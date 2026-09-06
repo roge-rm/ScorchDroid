@@ -6,4 +6,7 @@ object NativeBridge {
     }
 
     external fun helloFromNative(): String
+
+    /** Points the native engine's cwd/$HOME at the extracted data root (see AssetDataExtractor). */
+    external fun initEngine(dataRoot: String): Boolean
 }

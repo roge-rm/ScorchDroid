@@ -5,16 +5,14 @@ set(REPO_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../..)
 set(THIRD_PARTY_DIR ${REPO_ROOT}/third_party)
 set(SCORCHED_SRC ${THIRD_PARTY_DIR}/scorched3d/src)
 
-# Apply our Android-portability patches to the pinned upstream submodule
-# checkout before compiling anything from it. Idempotent - see the script
-# for why the submodule itself is never edited/committed directly.
-execute_process(
-    COMMAND bash ${REPO_ROOT}/scripts/apply_patches.sh
-    RESULT_VARIABLE APPLY_PATCHES_RESULT
-)
-if(NOT APPLY_PATCHES_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to apply patches/scorched3d/*.patch (see scripts/apply_patches.sh)")
-endif()
+# NOTE: patches/scorched3d/*.patch are applied to the submodule checkout by
+# the Gradle "applyScorchedPatches" task (app/build.gradle.kts), not here.
+# CMake only re-runs execute_process() when it decides to reconfigure (e.g.
+# CMakeLists.txt changed) - not on every build - so a patch-apply call here
+# can silently be skipped for builds where nothing in this file changed,
+# even if the submodule checkout itself has since been reset to pristine
+# (e.g. by `git submodule update`). Gradle can be forced to check every
+# build regardless of CMake's own configure cache.
 
 # --- Third-party deps needed by src/common (added one at a time as M1
 # progresses; see the porting plan for the full dependency list) ---

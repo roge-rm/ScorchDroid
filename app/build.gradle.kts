@@ -40,12 +40,47 @@ android {
             version = "4.1.2"
         }
     }
+
+    // Bundle upstream's data/ directory (weapon/landscape/mod XML, tank
+    // meshes, language strings, etc.) straight from the submodule, via a
+    // generated staging dir (see stageScorchedData below) rather than
+    // duplicating ~90MB into this repo. Extracted to internal storage at
+    // first run (see AssetDataExtractor.kt) since upstream's file I/O uses
+    // plain fopen()/paths, not AAssetManager.
+    sourceSets {
+        getByName("main") {
+            assets.srcDirs("build/generated/assets-staging")
+        }
+    }
 }
+
+val stageScorchedData = tasks.register<Sync>("stageScorchedData") {
+    from(layout.projectDirectory.dir("../third_party/scorched3d/data"))
+    into(layout.buildDirectory.dir("generated/assets-staging/data"))
+}
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+    .configureEach { dependsOn(stageScorchedData) }
+
+// Runs scripts/apply_patches.sh on every build (not just when CMakeLists.txt
+// changes - CMake's own execute_process() only re-runs on reconfigure, which
+// can silently skip this if the submodule checkout is reset in between -
+// see the CMakeLists.txt comment). Always runs: patch application is itself
+// idempotent (see the script), so this is cheap on the common no-op path.
+val applyScorchedPatches = tasks.register<Exec>("applyScorchedPatches") {
+    workingDir = rootDir
+    commandLine("bash", "scripts/apply_patches.sh")
+    outputs.upToDateWhen { false }
+}
+
+tasks.matching { it.name.startsWith("configureCMake") }
+    .configureEach { dependsOn(applyScorchedPatches) }
 
 dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.core.ktx)
     implementation(libs.material)
+    implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
