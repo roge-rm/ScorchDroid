@@ -1,0 +1,36 @@
+<options source="ScorchDroid">
+  <!-- M2 vertical slice: a fast local practice-vs-bots game. This is a
+       ScorchDroid-owned config, not part of upstream's data/ - see the
+       porting plan (AssetDataExtractor / initEngine). -->
+  <option>
+    <name>NumberOfMinPlayers</name>
+    <value>2</value>
+  </option>
+  <option>
+    <name>RemoveBotsAtPlayers</name>
+    <value>2</value>
+  </option>
+  <!-- PlayerType1/2 default to "Human" (OptionsGame.cpp), which is why bots
+       never got auto-added by ballanceBots() until these were set to a
+       real AI name from data/globalmods/none/data/tankais.xml. -->
+  <option>
+    <name>PlayerType1</name>
+    <value>Moron</value>
+  </option>
+  <option>
+    <name>PlayerType2</name>
+    <value>Moron</value>
+  </option>
+  <option>
+    <name>ShotTime</name>
+    <value>35</value>
+  </option>
+  <option>
+    <name>BuyingTime</name>
+    <value>10</value>
+  </option>
+  <option>
+    <name>StartTime</name>
+    <value>5</value>
+  </option>
+</options>

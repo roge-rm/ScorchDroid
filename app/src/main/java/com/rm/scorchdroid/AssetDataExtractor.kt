@@ -13,7 +13,7 @@ import java.io.File
  */
 object AssetDataExtractor {
     private const val VERSION_MARKER = ".extracted_version"
-    private const val CURRENT_VERSION = "1"
+    private const val CURRENT_VERSION = "3"
 
     fun ensureExtracted(context: Context): File {
         val root = File(context.filesDir, "scorched_root")
@@ -25,6 +25,7 @@ object AssetDataExtractor {
         root.deleteRecursively()
         root.mkdirs()
         copyAssetDir(context.assets, "data", File(root, "data"))
+        copyAssetFile(context.assets, "scorchdroid_server.xml", File(root, "scorchdroid_server.xml"))
         marker.writeText(CURRENT_VERSION)
         return root
     }
