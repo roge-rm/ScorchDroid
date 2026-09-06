@@ -52,6 +52,20 @@ set(SCORCHED_COMMON_SUBDIRS
     common/lang
     common/net
     common/engine
+    common/movement
+    common/placement
+    common/tanket
+    common/target
+    common/tank
+    common/landscapedef
+    common/landscapemap
+    common/3dsparse
+    common/events
+    common/actions
+    common/simactions
+    common/coms
+    common/weapons
+    common/lua
 )
 
 set(SCORCHED_COMMON_SRCS "")
@@ -72,6 +86,17 @@ add_library(scorched_common STATIC
     ${SCORCHED_COMMON_SRCS}
     porting/SDL_net_compat.cpp
     porting/SDL_thread_compat.cpp
+)
+
+# common/3dsparse/aseFile.{lex,tab}.cpp are flex/bison-generated parsers
+# using the 'register' keyword, which is a hard error under C++17 (it was
+# only deprecated pre-C++17, removed after). Rather than hand-editing
+# generated code, compile just these two files against an older standard
+# that still accepts it.
+set_source_files_properties(
+    ${SCORCHED_SRC}/common/3dsparse/aseFile.lex.cpp
+    ${SCORCHED_SRC}/common/3dsparse/aseFile.tab.cpp
+    PROPERTIES COMPILE_OPTIONS "-std=gnu++14"
 )
 
 target_include_directories(scorched_common PUBLIC
