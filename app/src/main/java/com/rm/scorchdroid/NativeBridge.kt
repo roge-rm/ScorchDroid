@@ -25,4 +25,11 @@ object NativeBridge {
      * at whichever other tank is on the field.
      */
     external fun handleTap(normX: Float, normY: Float): Boolean
+
+    /**
+     * M3: drains sound events queued by SoundAction::simulate() since the
+     * last call (see SoundEventQueue.h) - each entry is an absolute path to
+     * an already-extracted .ogg file, ready to hand to a MediaPlayer.
+     */
+    external fun pollSoundEvents(): Array<String>
 }

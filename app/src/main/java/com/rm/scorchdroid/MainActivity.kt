@@ -58,6 +58,12 @@ class MainActivity : AppCompatActivity() {
             while (isActive) {
                 withContext(Dispatchers.Default) {
                     NativeBridge.tickEngine()
+                    // M3: SoundAction events queued this tick (see
+                    // SoundEventQueue.h) - played via Android's own media
+                    // stack, not vendored OpenAL/OGG (see the porting plan).
+                    for (soundPath in NativeBridge.pollSoundEvents()) {
+                        SoundPlayer.play(soundPath)
+                    }
                 }
                 statusText.text = withContext(Dispatchers.Default) {
                     NativeBridge.getGameStateDebugString()
