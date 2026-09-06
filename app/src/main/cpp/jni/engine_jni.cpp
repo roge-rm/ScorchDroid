@@ -30,6 +30,7 @@ std::mutex g_engineMutex;
 #include <tanket/TanketWeapon.hpp>
 #include <weapons/Accessory.hpp>
 #include <coms/ComsPlayedMoveMessage.hpp>
+#include <SoundEventQueue.h>
 #include <target/TargetLife.hpp>
 #include <landscapemap/LandscapeMaps.hpp>
 #include <landscapemap/GroundMaps.hpp>
@@ -237,4 +238,25 @@ Java_com_rm_scorchdroid_NativeBridge_getGameStateDebugString(JNIEnv *env, jobjec
         result = buffer;
     }
     return env->NewStringUTF(result.c_str());
+}
+
+// M3: drains sound events queued by SoundAction::simulate() (see
+// SoundEventQueue.h) since the last call, returning each as an absolute
+// file path the Kotlin side can hand straight to a MediaPlayer/SoundPool -
+// no vendored OGG/Vorbis/Oboe needed, since Android's own media stack
+// already decodes the .ogg files bundled in data/ (see the porting plan's
+// note on the audio-approach revisit).
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* this */) {
+    std::vector<std::string> events;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        events = ScorchDroidAudio::drainSoundEvents();
+    }
+
+    jobjectArray result = env->NewObjectArray((jsize) events.size(), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < events.size(); i++) {
+        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(events[i].c_str()));
+    }
+    return result;
 }

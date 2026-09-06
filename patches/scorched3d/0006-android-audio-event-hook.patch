@@ -1,0 +1,55 @@
+diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
+index 43451de2..f0c46f4e 100644
+--- a/src/common/actions/Explosion.cpp
++++ b/src/common/actions/Explosion.cpp
+@@ -34,6 +34,11 @@
+ 	#include <graph/MainCamera.hpp>
+ 	#include <client/ScorchedClient.hpp>
+ 	#include <sound/SoundUtils.hpp>
++#else
++	// Android build: lets a new Android-side audio layer react to the real
++	// explosion-sound trigger even though this whole path is normally
++	// client-only - see SoundEventQueue.h and the porting plan.
++	#include <SoundEventQueue.h>
+ #endif
+ #include <landscapemap/DeformLandscape.hpp>
+ #include <landscapemap/LandscapeMaps.hpp>
+@@ -298,6 +303,13 @@ void Explosion::simulate(fixed frameTime, bool &remove)
+ 					expSound, position_.asVector());
+ 			}
+ 		}
++#else
++		if (params_->getExplosionSound() &&
++			0 != strcmp("none", params_->getExplosionSound()))
++		{
++			ScorchDroidAudio::pushSoundEvent(
++				S3D::getModFile(S3D::formatStringBuffer("data/wav/%s", params_->getExplosionSound())));
++		}
+ #endif // #ifndef S3D_SERVER
+ 
+ 		// Get the land height at the explosion
+diff --git a/src/common/actions/SoundAction.cpp b/src/common/actions/SoundAction.cpp
+index c298c6da..8469afd5 100644
+--- a/src/common/actions/SoundAction.cpp
++++ b/src/common/actions/SoundAction.cpp
+@@ -23,6 +23,11 @@
+ #include <weapons/AccessoryStore.hpp>
+ #ifndef S3D_SERVER
+ 	#include <sound/SoundUtils.hpp>
++#else
++	// Android build: lets a new Android-side audio layer react to sound
++	// events even though this whole file is normally client-only - see
++	// SoundEventQueue.h and the porting plan.
++	#include <SoundEventQueue.h>
+ #endif
+ #include <common/Defines.hpp>
+ 
+@@ -59,6 +64,8 @@ void SoundAction::simulate(fixed frameTime, bool &remove)
+ 		source->setRolloff(weapon_->getRolloff().asFloat());
+ 		source->play(activateSound);
+ 	}
++#else
++	ScorchDroidAudio::pushSoundEvent(S3D::getModFile(weapon_->getSound()));
+ #endif // #ifndef S3D_SERVER
+ 
+ 	remove = true;

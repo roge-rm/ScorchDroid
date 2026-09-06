@@ -135,6 +135,7 @@ add_library(scorched_common STATIC
     porting/SDL_net_compat.cpp
     porting/SDL_thread_compat.cpp
     porting/Keyboard_stub.cpp
+    porting/SoundEventQueue.cpp
 )
 
 # common/3dsparse/aseFile.{lex,tab}.cpp are flex/bison-generated parsers
