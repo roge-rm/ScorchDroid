@@ -5,6 +5,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -32,10 +33,24 @@ class MainActivity : AppCompatActivity() {
             val gameOk = withContext(Dispatchers.Default) {
                 NativeBridge.startLocalGame()
             }
-            statusText.text = if (gameOk) {
-                "Local game started"
-            } else {
-                "Failed to start local game (see logcat)"
+            if (!gameOk) {
+                statusText.text = "Failed to start local game (see logcat)"
+                return@launch
+            }
+
+            // Drives the real ServerSimulator tick loop (see the porting
+            // plan) - this is the same role the dedicated server's own
+            // main loop plays on desktop, so the ServerState machine
+            // (waiting for players -> new level -> buying -> playing)
+            // progresses on its own as bots get added.
+            while (isActive) {
+                withContext(Dispatchers.Default) {
+                    NativeBridge.tickEngine()
+                }
+                statusText.text = withContext(Dispatchers.Default) {
+                    NativeBridge.getGameStateDebugString()
+                }
+                kotlinx.coroutines.delay(100)
             }
         }
     }

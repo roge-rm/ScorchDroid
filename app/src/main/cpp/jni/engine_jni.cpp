@@ -6,7 +6,18 @@
 
 #include <server/ScorchedServer.hpp>
 #include <server/ScorchedServerSettings.hpp>
+#include <server/ServerState.hpp>
+#include <server/ServerFileServer.hpp>
+#include <server/ServerChannelManager.hpp>
+#include <server/ServerTimedMessage.hpp>
+#include <server/ServerConnectAuthHandler.hpp>
+#include <server/ServerHandlers.hpp>
+#include <target/TargetContainer.hpp>
+#include <engine/Simulator.hpp>
+#include <net/NetInterface.hpp>
 #include <common/Defines.hpp>
+#include <common/Clock.hpp>
+#include <common/Logger.hpp>
 
 #define LOG_TAG "ScorchDroidEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -44,13 +55,61 @@ Java_com_rm_scorchdroid_NativeBridge_initEngine(JNIEnv *env, jobject /* this */,
 }
 
 // M2 vertical slice: boot a real local (loopback) game via the actual
-// upstream ScorchedServer bootstrap path, using its own default local-game
-// settings file, rather than a hand-rolled harness - see the porting plan
-// for why this was chosen over stubbing the weapon/data system.
+// upstream ScorchedServer bootstrap path, using a ScorchDroid-owned
+// settings file (not upstream's data/server.xml, kept pristine) that turns
+// on bots so a practice-vs-AI game can actually start on a single device -
+// see the porting plan for why this was chosen over stubbing the
+// weapon/data system.
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_rm_scorchdroid_NativeBridge_startLocalGame(JNIEnv *env, jobject /* this */) {
-    ScorchedServerSettingsOptions settings("data/server.xml", false, false);
+    ScorchedServerSettingsOptions settings("scorchdroid_server.xml", false, false);
     bool started = ScorchedServer::startServer(settings, true, nullptr);
     LOGI("ScorchedServer::startServer -> %d", started);
     return started ? JNI_TRUE : JNI_FALSE;
+}
+
+static Clock tickClock;
+
+// Drives the real game simulation forward - replicates ServerMain.cpp's
+// serverLoop() (excluded from this build - see the porting plan - because
+// it also pulls in the deferred UDP-based ServerBrowserInfo/ServerWebServer
+// at the top of that same file). serverLoop() itself is what actually
+// advances ServerState (waiting for players -> new level -> buying ->
+// playing), not Simulator::simulate() alone, so all of these calls are
+// needed, not just the simulator step.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_tickEngine(JNIEnv *env, jobject /* this */) {
+    if (!ScorchedServer::serverStarted() || !ScorchedServer::instance()->getContext().getNetInterfaceValid()) {
+        return;
+    }
+
+    // ServerMain.cpp: fixed timeDifference(true, ticksDifference * 10) -
+    // FIXED_RESOLUTION represents 1.0 == 1 second, so ms * 10 == ms/1000 * FIXED_RESOLUTION.
+    unsigned int ticksDifference = tickClock.getTicksDifference();
+    fixed timeDifference(true, ((Sint64) ticksDifference) * 10);
+
+    Logger::instance()->processLogEntries();
+
+    ScorchedServer *server = ScorchedServer::instance();
+    server->getNetInterface().processMessages();
+    server->getSimulator().simulate();
+    server->getServerState().simulate(timeDifference);
+    server->getServerConnectAuthHandler().processMessages();
+    server->getServerFileServer().simulate();
+    server->getServerChannelManager().simulate(timeDifference);
+    server->getTimedMessage().simulate();
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getGameStateDebugString(JNIEnv *env, jobject /* this */) {
+    std::string result = "not started";
+    if (ScorchedServer::serverStarted()) {
+        ScorchedServer *server = ScorchedServer::instance();
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "state=%d tanks=%u",
+                 (int) server->getServerState().getState(),
+                 server->getTargetContainer().getNoOfTanks());
+        result = buffer;
+    }
+    return env->NewStringUTF(result.c_str());
 }
