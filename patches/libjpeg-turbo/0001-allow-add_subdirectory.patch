@@ -1,0 +1,22 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d6d68383..1f9fb1f4 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -66,9 +66,14 @@ endif()
+ # ExternalProject_Add() or make downstream modifications to the libjpeg-turbo
+ # build system to suit their specific needs.  Please do not file bug reports,
+ # feature requests, or pull requests regarding this.
+-if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+-  message(FATAL_ERROR "The ${CMAKE_PROJECT_NAME} build system cannot be integrated into another build system using add_subdirectory().  Use ExternalProject_Add() instead.")
+-endif()
++#
++# ScorchDroid: add_subdirectory() is used deliberately here anyway (see
++# app/src/main/cpp/CMakeLists.txt and patches/libjpeg-turbo/) - this repo
++# only needs libjpeg-turbo as a plain static lib for one Android ABI pair
++# built alongside everything else, and upstream's own advice
++# (ExternalProject_Add) is unnecessary complexity for that. This guard is
++# disabled rather than worked around, tracked as a patch, never committed
++# to this submodule checkout directly.
+ 
+ # CMake 3.14 and later sets CMAKE_MACOSX_BUNDLE to TRUE by default when
+ # CMAKE_SYSTEM_NAME is iOS, tvOS, or watchOS, which breaks the libjpeg-turbo

@@ -1,0 +1,278 @@
+diff --git a/src/common/common/DefinesAssert.cpp b/src/common/common/DefinesAssert.cpp
+index 4bb9d11e..0fe2b4cc 100644
+--- a/src/common/common/DefinesAssert.cpp
++++ b/src/common/common/DefinesAssert.cpp
+@@ -23,6 +23,9 @@
+ #include <common/Defines.hpp>
+ #include <common/Logger.hpp>
+ #include <string>
++#ifdef __ANDROID__
++#include <android/log.h>
++#endif
+ 
+ #ifdef _WIN32
+ 	#define WIN32_LEAN_AND_MEAN
+@@ -67,6 +70,9 @@ void S3D::dialogMessage(const std::string &header, const std::string &text, bool
+ 	// Show the dialog (if any)
+ #if defined(_WIN32) && !defined(S3D_SERVER)
+ 	MessageBox( nullptr, newtext.c_str(), header.c_str(), MB_OK );
++#elif defined(__ANDROID__)
++	// printf() output isn't captured by logcat on Android.
++	__android_log_print(ANDROID_LOG_ERROR, "Scorched3D", "%s : %s", header.c_str(), newtext.c_str());
+ #else
+ 	printf("%s : %s\n", header.c_str(), newtext.c_str());
+ #endif
+@@ -87,11 +93,19 @@ void S3D::dialogAssert(const char *lineText, const int line, const char *file)
+ 	char buffer[20048];
+ 	snprintf(buffer, 20048, "%s\n%i:%s", lineText, line, file);
+ 	S3D::dialogMessage("Program Assert", buffer);
+-	exit(64);
++	// Android build: abort() instead of exit() - exit() runs the whole
++	// process's atexit handlers/static destructors while other ART-owned
++	// threads (RenderThread, GC, ...) are still live, which corrupts ART's
++	// own internal state and crashes with a confusing, unrelated-looking
++	// "destroyed mutex" error on some other thread rather than this one.
++	// abort() skips all of that - still fatal, but doesn't touch anything
++	// outside this process's own signal handling.
++	abort();
+ }
+ 
+ void S3D::dialogExit(const std::string &header, const std::string &text, bool split)
+ {
+ 	S3D::dialogMessage(header, text, split);
+-	exit(64);
++	// See the Android build note in dialogAssert() above.
++	abort();
+ }
+diff --git a/src/common/image/Image.cpp b/src/common/image/Image.cpp
+index cdf35bf6..276421eb 100644
+--- a/src/common/image/Image.cpp
++++ b/src/common/image/Image.cpp
+@@ -21,8 +21,10 @@
+ #include <image/Image.hpp>
+ #include <image/ImageFactory.hpp>
+ #include <common/DefinesAssert.hpp>
+-#include <SDL/SDL.h>
+ #include <string.h>
++#include <cstdio>
++#include <cstdint>
++#include <vector>
+ 
+ Image::Image()
+ {
+@@ -74,53 +76,57 @@ unsigned char *Image::getBitsOffset(int offset)
+ 	return &getBits()[offset];
+ }
+ 
++// Android build: SDL_CreateRGBSurface/SDL_SaveBMP replaced with a minimal
++// uncompressed-24bpp BMP writer, matching ImageBitmapFactory's reader (SDL
++// is not part of this build - see the porting plan). Unused by anything
++// reachable in gameplay (a screenshot-save utility with no callers at time
++// of porting), kept working regardless since it's cheap to.
+ bool Image::writeToFile(const std::string &filename)
+ {
+ 	if (!getBits() || getComponents() == 4) return false;
+ 
+-	unsigned char *brgbits = new unsigned char[getWidth() * getHeight() * 3];
++	int width = getWidth();
++	int height = getHeight();
++	unsigned rowSize = ((width * 3 + 3) / 4) * 4;  // Rows are padded to a 4-byte boundary
+ 
+-	// Convert the returned bits from RGB to BGR
+-	// and flip the verticle scan lines
+-	unsigned char* from = getBits();
+-	for (int i=0; i<getHeight(); i ++)
+-	{
+-		unsigned char *destRow = ((unsigned char *) brgbits) + 
+-			((getHeight() - i - 1) * (getWidth() * 3));
+-		for (int j=0; j<getWidth(); j++)
+-		{
+-			unsigned char *dest = destRow + (j * getComponents());
+-
+-			dest[0] = from[0];
+-			dest[1] = from[1];
+-			dest[2] = from[2];
+-			from+=getComponents();
+-		}
+-	}
++	FILE *f = fopen(filename.c_str(), "wb");
++	if (!f) return false;
+ 
+-    /* SDL interprets each pixel as a 32-bit number, so our masks must depend
+-       on the endianness (byte order) of the machine */
+-    Uint32 rmask, gmask, bmask;
+-#if SDL_BYTEORDER == SDL_BIG_ENDIAN
+-    rmask = 0xff000000;
+-    gmask = 0x00ff0000;
+-    bmask = 0x0000ff00;
+-#else
+-    rmask = 0x000000ff;
+-    gmask = 0x0000ff00;
+-    bmask = 0x00ff0000;
+-#endif
++	uint32_t pixelDataOffset = 14 + 40;
++	uint32_t fileSize = pixelDataOffset + rowSize * height;
+ 
+-	SDL_Surface *image = SDL_CreateRGBSurface( 
+-		SDL_SWSURFACE, getWidth(), getHeight(), 24, rmask, gmask, bmask, 0);
+-	memcpy(image->pixels, brgbits, getWidth() * getHeight() * 3);
++	unsigned char fileHeader[14] = { 'B', 'M' };
++	*(uint32_t *) (fileHeader + 2) = fileSize;
++	*(uint32_t *) (fileHeader + 10) = pixelDataOffset;
++	fwrite(fileHeader, 1, sizeof(fileHeader), f);
+ 
+-	if (!image) return false;
++	unsigned char infoHeader[40] = { 0 };
++	*(uint32_t *) (infoHeader + 0) = 40;
++	*(int32_t *) (infoHeader + 4) = width;
++	*(int32_t *) (infoHeader + 8) = height;  // Positive height = bottom-up rows
++	*(uint16_t *) (infoHeader + 12) = 1;     // Planes
++	*(uint16_t *) (infoHeader + 14) = 24;    // Bits per pixel
++	fwrite(infoHeader, 1, sizeof(infoHeader), f);
+ 
+-	SDL_SaveBMP(image, filename.c_str());
+-    SDL_FreeSurface (image);
++	std::vector<unsigned char> rowBuffer(rowSize, 0);
++	unsigned char *from = getBits();
++	for (int i = 0; i < height; i++)
++	{
++		// Bottom-up rows, RGB -> BGR
++		int srcRow = height - i - 1;
++		unsigned char *src = from + (srcRow * width * getComponents());
++		for (int j = 0; j < width; j++)
++		{
++			unsigned char *dest = rowBuffer.data() + (j * 3);
++			unsigned char *pixel = src + (j * getComponents());
++			dest[0] = pixel[2];
++			dest[1] = pixel[1];
++			dest[2] = pixel[0];
++		}
++		fwrite(rowBuffer.data(), 1, rowSize, f);
++	}
+ 
+-	delete [] brgbits;
++	fclose(f);
+ 	return true;
+ }
+ 
+diff --git a/src/common/image/ImageBitmapFactory.cpp b/src/common/image/ImageBitmapFactory.cpp
+index 3b7c1323..a87afe17 100644
+--- a/src/common/image/ImageBitmapFactory.cpp
++++ b/src/common/image/ImageBitmapFactory.cpp
+@@ -20,32 +20,85 @@
+ 
+ #include <image/ImageBitmapFactory.hpp>
+ #include <common/Defines.hpp>
+-#include <SDL/SDL.h>
++#include <cstdio>
++#include <cstdint>
++#include <vector>
++
++// Android build: SDL_LoadBMP() replaced with a minimal reader for exactly
++// the case upstream itself requires (uncompressed 24bpp BMP) - SDL is not
++// part of this build, see the porting plan. BMP's on-disk layout (a
++// BITMAPFILEHEADER + BITMAPINFOHEADER, little-endian, bottom-up BGR rows,
++// each row padded to a 4-byte boundary) is simple/stable enough that a full
++// library isn't warranted just for this one format.
++namespace
++{
++	uint16_t readLE16(const unsigned char *p) { return (uint16_t) p[0] | ((uint16_t) p[1] << 8); }
++	uint32_t readLE32(const unsigned char *p)
++	{
++		return (uint32_t) p[0] | ((uint32_t) p[1] << 8) | ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
++	}
++}
+ 
+ Image ImageBitmapFactory::loadFromFile(const char * filename, bool alpha)
+ {
+-	SDL_Surface *image = SDL_LoadBMP(filename);
+-	if (!image) return Image();
++	FILE *f = fopen(filename, "rb");
++	if (!f) return Image();
++
++	unsigned char fileHeader[14];
++	unsigned char infoHeaderSize[4];
++	if (fread(fileHeader, 1, sizeof(fileHeader), f) != sizeof(fileHeader) ||
++		fileHeader[0] != 'B' || fileHeader[1] != 'M' ||
++		fread(infoHeaderSize, 1, sizeof(infoHeaderSize), f) != sizeof(infoHeaderSize))
++	{
++		fclose(f);
++		return Image();
++	}
++
++	uint32_t pixelDataOffset = readLE32(fileHeader + 10);
++	uint32_t infoHeaderLen = readLE32(infoHeaderSize);
++
++	std::vector<unsigned char> infoHeader(infoHeaderLen);
++	memcpy(infoHeader.data(), infoHeaderSize, sizeof(infoHeaderSize));
++	if (fread(infoHeader.data() + sizeof(infoHeaderSize), 1, infoHeaderLen - sizeof(infoHeaderSize), f) !=
++		infoHeaderLen - sizeof(infoHeaderSize))
++	{
++		fclose(f);
++		return Image();
++	}
++
++	int32_t width = (int32_t) readLE32(infoHeader.data() + 4);
++	int32_t height = (int32_t) readLE32(infoHeader.data() + 8);
++	uint16_t bitsPerPixel = readLE16(infoHeader.data() + 14);
++	uint32_t compression = readLE32(infoHeader.data() + 16);
+ 
+-	if (image->format->BitsPerPixel != 24)
++	if (bitsPerPixel != 24 || compression != 0)
+ 	{
+ 		S3D::dialogExit("ImageBitmap",
+-			S3D::formatStringBuffer("ERROR: Bitmap \"%s\" is not encoded as a 24bit bitmap",
++			S3D::formatStringBuffer("ERROR: Bitmap \"%s\" is not encoded as an uncompressed 24bit bitmap",
+ 				filename));
+ 	}
+ 
+-	// Create the internal byte array
+-	Image result(image->w, image->h, alpha);
++	bool topDown = height < 0;
++	if (topDown) height = -height;
++
++	unsigned rowSize = ((width * 3 + 3) / 4) * 4;  // Rows are padded to a 4-byte boundary
++	std::vector<unsigned char> rowBuffer(rowSize);
++
++	Image result(width, height, alpha);
+ 
+-	// Convert the returned bits from BGR to RGB
+-	// and flip the verticle scan lines
+-	unsigned char *from = (unsigned char *) image->pixels;
+-	for (int i=0; i<result.getHeight(); i ++)
++	fseek(f, pixelDataOffset, SEEK_SET);
++	for (int row = 0; row < height; row++)
+ 	{
+-		unsigned char* destRow = result.getBits() + (
+-			( result.getHeight() - i - 1 ) * ( result.getWidth() * result.getComponents() )
+-		);
+-		for (int j=0; j<result.getWidth(); j++)
++		if (fread(rowBuffer.data(), 1, rowSize, f) != rowSize)
++		{
++			fclose(f);
++			return Image();
++		}
++
++		int destRowIndex = topDown ? row : (result.getHeight() - row - 1);
++		unsigned char *destRow = result.getBits() + (destRowIndex * (result.getWidth() * result.getComponents()));
++		unsigned char *from = rowBuffer.data();
++		for (int j = 0; j < result.getWidth(); j++)
+ 		{
+ 			unsigned char *dest = destRow + (j * result.getComponents());
+ 
+@@ -56,11 +109,11 @@ Image ImageBitmapFactory::loadFromFile(const char * filename, bool alpha)
+ 			{
+ 				dest[3] = (unsigned char)(from[0]+from[1]+from[2]==0?0:255);
+ 			}
+-			
+-			from+=3;
++
++			from += 3;
+ 		}
+ 	}
+-	
+-	SDL_FreeSurface(image);
++
++	fclose(f);
+ 	return result;
+ }

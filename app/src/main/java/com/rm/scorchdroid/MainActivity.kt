@@ -20,13 +20,22 @@ class MainActivity : AppCompatActivity() {
             val dataRoot = withContext(Dispatchers.IO) {
                 AssetDataExtractor.ensureExtracted(applicationContext)
             }
-            val ok = withContext(Dispatchers.Default) {
+            val initOk = withContext(Dispatchers.Default) {
                 NativeBridge.initEngine(dataRoot.absolutePath)
             }
-            statusText.text = if (ok) {
-                "Engine data root ready: ${dataRoot.absolutePath}"
+            if (!initOk) {
+                statusText.text = "Failed to initialize engine data root"
+                return@launch
+            }
+
+            statusText.text = "Starting local game..."
+            val gameOk = withContext(Dispatchers.Default) {
+                NativeBridge.startLocalGame()
+            }
+            statusText.text = if (gameOk) {
+                "Local game started"
             } else {
-                "Failed to initialize engine data root"
+                "Failed to start local game (see logcat)"
             }
         }
     }
