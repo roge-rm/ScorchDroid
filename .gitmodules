@@ -1,3 +1,6 @@
 [submodule "third_party/scorched3d"]
 	path = third_party/scorched3d
 	url = https://github.com/bberberov/scorched3d.git
+[submodule "third_party/expat"]
+	path = third_party/expat
+	url = https://github.com/libexpat/libexpat.git
