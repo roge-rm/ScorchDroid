@@ -66,6 +66,8 @@ set(SCORCHED_COMMON_SUBDIRS
     common/coms
     common/weapons
     common/lua
+    server/server
+    server/tankai
 )
 
 set(SCORCHED_COMMON_SRCS "")
@@ -81,6 +83,20 @@ endforeach()
 # it's a real design task for a later milestone, so it's excluded here
 # rather than stubbed.
 list(REMOVE_ITEM SCORCHED_COMMON_SRCS ${SCORCHED_SRC}/common/common/Keyboard.cpp)
+
+# ServerBrowserInfo uses SDL_net's UDP API for the legacy public
+# master-server-list broadcast/announce mechanism. Per the porting plan,
+# browsing/announcing to the public PC server list is an explicit,
+# separate, deferred feature (LAN discovery uses Android NSD instead) -
+# excluded rather than ported for now.
+list(REMOVE_ITEM SCORCHED_COMMON_SRCS ${SCORCHED_SRC}/server/server/ServerBrowserInfo.cpp)
+
+# ServerMain is the standalone dedicated-server executable's main loop
+# (only ever called from the excluded scorcheds/main.cpp) and pulls in
+# ServerBrowserInfo.hpp - nothing else references it, and our Android
+# harness drives server logic directly rather than through this loop, so
+# it's excluded rather than ported.
+list(REMOVE_ITEM SCORCHED_COMMON_SRCS ${SCORCHED_SRC}/server/server/ServerMain.cpp)
 
 add_library(scorched_common STATIC
     ${SCORCHED_COMMON_SRCS}
