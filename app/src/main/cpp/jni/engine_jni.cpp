@@ -3,6 +3,12 @@
 #include <string>
 #include <unistd.h>
 #include <cstdlib>
+#include <mutex>
+
+// Guards ScorchedServer state shared between this simulation thread and the
+// GL render thread (see renderer_jni.cpp), which reads live tank/landscape
+// state every frame.
+std::mutex g_engineMutex;
 
 #include <server/ScorchedServer.hpp>
 #include <server/ScorchedServerSettings.hpp>
@@ -62,6 +68,7 @@ Java_com_rm_scorchdroid_NativeBridge_initEngine(JNIEnv *env, jobject /* this */,
 // weapon/data system.
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_rm_scorchdroid_NativeBridge_startLocalGame(JNIEnv *env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
     ScorchedServerSettingsOptions settings("scorchdroid_server.xml", false, false);
     bool started = ScorchedServer::startServer(settings, true, nullptr);
     LOGI("ScorchedServer::startServer -> %d", started);
@@ -79,6 +86,7 @@ static Clock tickClock;
 // needed, not just the simulator step.
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_tickEngine(JNIEnv *env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
     if (!ScorchedServer::serverStarted() || !ScorchedServer::instance()->getContext().getNetInterfaceValid()) {
         return;
     }
