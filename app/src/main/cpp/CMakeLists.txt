@@ -180,6 +180,7 @@ target_compile_definitions(scorched_common PUBLIC HAVE_SNPRINTF)
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
     jni/engine_jni.cpp
+    jni/renderer_jni.cpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -187,6 +188,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 )
 
 find_library(log-lib log)
+find_library(gles3-lib GLESv3)
 
 # scorched_common relies heavily on self-registering static objects
 # (REGISTER_ACCESSORY_SOURCE and similar macros - a file-scope object whose
@@ -202,4 +204,5 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     scorched_common
     -Wl,--no-whole-archive
     ${log-lib}
+    ${gles3-lib}
 )

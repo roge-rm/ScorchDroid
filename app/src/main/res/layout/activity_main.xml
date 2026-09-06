@@ -3,11 +3,18 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
+    <android.opengl.GLSurfaceView
+        android:id="@+id/game_surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
     <TextView
         android:id="@+id/status_text"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:textSize="16sp" />
+        android:layout_gravity="top|start"
+        android:layout_margin="16dp"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp" />
 
 </FrameLayout>
