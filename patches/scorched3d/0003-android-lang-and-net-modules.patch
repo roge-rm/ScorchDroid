@@ -1,0 +1,369 @@
+diff --git a/src/common/lang/LangImpl.cpp b/src/common/lang/LangImpl.cpp
+index 4e68d7c9..79537cf4 100644
+--- a/src/common/lang/LangImpl.cpp
++++ b/src/common/lang/LangImpl.cpp
+@@ -21,14 +21,14 @@
+ #include <lang/LangImpl.hpp>
+ #include <lang/ResourceBundleEntryImpl.hpp>
+ #include <common/Defines.hpp>
+-#include <SDL/SDL.h>
+-#include <SDL/SDL_thread.h>
++#include <pthread.h>
++// Android build: SDL_mutex replaced with pthread_mutex_t
++// (SDL is not part of this build - see the porting plan).
+ 
+-static SDL_mutex *langMutex = nullptr;
++static pthread_mutex_t langMutex = PTHREAD_MUTEX_INITIALIZER;
+ 
+ LangImpl::LangImpl() : undefinedBundle_(nullptr)
+ {
+-	langMutex = SDL_CreateMutex();
+ 	init();
+ }
+ 
+@@ -52,7 +52,7 @@ void LangImpl::clear()
+ 
+ void LangImpl::init()
+ {
+-	SDL_LockMutex(langMutex);
++	pthread_mutex_lock(&langMutex);
+ 
+ 	// Read the platform default language from the language file
+ 	std::string currentLang = "EN";
+@@ -86,7 +86,7 @@ void LangImpl::init()
+ 
+ 	undefinedBundle_ = new ResourceBundle();
+ 	bundles_.push_back(undefinedBundle_);
+-	SDL_UnlockMutex(langMutex);
++	pthread_mutex_unlock(&langMutex);
+ }
+ 
+ void LangImpl::saveUndefined()
+@@ -103,7 +103,7 @@ ResourceBundleEntry *LangImpl::getEntry(
+ ResourceBundleEntry *LangImpl::getEntry(
+ 	const std::string &key, const LangString &value)
+ {
+-	SDL_LockMutex(langMutex);
++	pthread_mutex_lock(&langMutex);
+ 
+ 	ResourceBundleEntry* entry = nullptr;
+ 	std::vector<ResourceBundle *>::iterator itor;
+@@ -121,6 +121,6 @@ ResourceBundleEntry *LangImpl::getEntry(
+ 		undefinedBundle_->addEntry(entry);
+ 	}
+ 
+-	SDL_UnlockMutex(langMutex);
++	pthread_mutex_unlock(&langMutex);
+ 	return entry;
+ }
+diff --git a/src/common/net/NetBuffer.cpp b/src/common/net/NetBuffer.cpp
+index 0ce1f957..d9a9462a 100644
+--- a/src/common/net/NetBuffer.cpp
++++ b/src/common/net/NetBuffer.cpp
+@@ -23,6 +23,13 @@
+ #include <common/Logger.hpp>
+ #include <string.h>
+ #include <zlib.h>
++#include <arpa/inet.h>
++#include <endian.h>
++#include <SDL_types_compat.h>
++// Android build: SDLNet_Read32/SDLNet_Write32/SDL_SwapBE64 (all just
++// network/big-endian byte-order conversions) replaced with the standard
++// ntohl/htonl and be64toh/htobe64 equivalents (SDL is not part of this
++// build - see the porting plan).
+ 
+ static const unsigned startSize = 1024 * 10;
+ 
+@@ -304,23 +311,21 @@ void NetBuffer::addToBuffer(FixedVector4 &add)
+ 
+ void NetBuffer::addToBuffer(const fixed add)
+ {
+-	Sint64 value = SDL_SwapBE64(fixed(add).getInternalData());
++	Sint64 value = htobe64(fixed(add).getInternalData());
+ 	addDataToBuffer(&value, sizeof(Sint64));
+ }
+ 
+ void NetBuffer::addToBuffer(const int add)
+ {
+-	Uint32 value = 0;
+-	SDLNet_Write32(add, &value);
++	Uint32 value = htonl((Uint32) add);
+ 	addDataToBuffer(&value, sizeof(Uint32));
+ }
+ 
+ void NetBuffer::addToBuffer(const float addf)
+ {
+-	Uint32 value = 0;
+ 	Uint32 add = 0;
+ 	memcpy(&add, &addf, sizeof(Uint32));
+-	SDLNet_Write32(add, &value);
++	Uint32 value = htonl(add);
+ 	addDataToBuffer(&value, sizeof(Uint32));
+ }
+ 
+@@ -342,8 +347,7 @@ void NetBuffer::addToBuffer(const char add)
+ 
+ void NetBuffer::addToBuffer(const unsigned int add)
+ {
+-	Uint32 value = 0;
+-	SDLNet_Write32(add, &value);
++	Uint32 value = htonl((Uint32) add);
+ 	addDataToBuffer(&value, sizeof(Uint32));
+ }
+ 
+@@ -442,7 +446,7 @@ bool NetBufferReader::getFromBuffer(int &result)
+ {
+ 	Uint32 value = 0;
+ 	if (!getDataFromBuffer(&value, sizeof(value))) return false;
+-	result = SDLNet_Read32(&value);
++	result = ntohl(value);
+ 	return true;
+ }
+ 
+@@ -450,7 +454,7 @@ bool NetBufferReader::getFromBuffer(fixed &result)
+ {
+ 	Sint64 value = 0;
+ 	if (!getDataFromBuffer(&value, sizeof(value))) return false;
+-	result = fixed(true, SDL_SwapBE64(value));
++	result = fixed(true, be64toh(value));
+ 	return true;
+ }
+ 
+@@ -458,7 +462,7 @@ bool NetBufferReader::getFromBuffer(float &resultf)
+ {
+ 	Uint32 value = 0;
+ 	if (!getDataFromBuffer(&value, sizeof(value))) return false;
+-	Uint32 result = SDLNet_Read32(&value);
++	Uint32 result = ntohl(value);
+ 	memcpy(&resultf, &result, sizeof(Uint32));
+ 	return true;
+ }
+@@ -487,7 +491,7 @@ bool NetBufferReader::getFromBuffer(unsigned int &result)
+ {
+ 	Uint32 value = 0;
+ 	if (!getDataFromBuffer(&value, sizeof(value))) return false;
+-	result = SDLNet_Read32(&value);
++	result = ntohl(value);
+ 	return true;
+ }
+ 
+diff --git a/src/common/net/NetBuffer.hpp b/src/common/net/NetBuffer.hpp
+index 5dba54da..08b1f62d 100644
+--- a/src/common/net/NetBuffer.hpp
++++ b/src/common/net/NetBuffer.hpp
+@@ -24,9 +24,15 @@
+ #include <lang/LangString.hpp>
+ #include <common/FixedVector4.hpp>
+ #include <common/FixedVector.hpp>
+-// NOTE: the upstream SDL/SDL_net includes here are unused by this header
+-// (byte-swap helpers using SDL_net live only in NetBuffer.cpp) and SDL is
+-// not part of the Android build - see the porting plan.
++// Android build: SDL is not part of this build (see the porting plan).
++// The rest of src/common/net relies on this header transitively pulling
++// in SDL's TCPsocket/IPaddress/SDL_mutex/SDL_Thread/Uint32-family types
++// (upstream's own NetBuffer.hpp did the same via SDL.h/SDL_net.h), so
++// this pulls in our POSIX-backed compat headers instead, in the same
++// transitive spot.
++#include <SDL_types_compat.h>
++#include <SDL_net_compat.h>
++#include <SDL_thread_compat.h>
+ 
+ class NetBuffer;
+ 
+diff --git a/src/common/net/NetBufferUtil.cpp b/src/common/net/NetBufferUtil.cpp
+index 65d8df5f..a059f0db 100644
+--- a/src/common/net/NetBufferUtil.cpp
++++ b/src/common/net/NetBufferUtil.cpp
+@@ -18,15 +18,10 @@
+ //    51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+-#ifndef _WIN32
+ #include <fcntl.h>
+-#define SOCKET	int
+ #include <sys/socket.h>
+ #include <netdb.h>
+-#else
+-#include <winsock2.h>
+-#include <ws2tcpip.h>
+-#endif
++#include <SDL_net_compat.h>
+ 
+ #include <net/NetBufferUtil.hpp>
+ 
+@@ -36,14 +31,10 @@
+ // this is NOT what we want as we use threads and do not
+ // care.
+ // This seems to be the only way to set blocking IO back on.
+-
+-struct _TCPsocket {
+-	int ready;
+-	SOCKET channel;
+-	IPaddress remoteAddress;
+-	IPaddress localAddress;
+-	int sflag;
+-};
++//
++// Android build: struct _TCPsocket now comes from SDL_net_compat.h (kept
++// in sync with this file's assumptions about its layout) instead of being
++// redefined here (SDL is not part of this build - see the porting plan).
+ 
+ bool NetBufferUtil::getLocalIPAddress(TCPsocket &so, std::string &result)
+ {
+diff --git a/src/common/net/NetMessageHandler.cpp b/src/common/net/NetMessageHandler.cpp
+index 91e50262..38f2779a 100644
+--- a/src/common/net/NetMessageHandler.cpp
++++ b/src/common/net/NetMessageHandler.cpp
+@@ -26,31 +26,31 @@ NetMessageHandlerI::~NetMessageHandlerI()
+ {
+ }
+ 
+-NetMessageHandler::NetMessageHandler() : handler_( nullptr ), messagesMutex_( nullptr ), messagesWaiting_( false )
++NetMessageHandler::NetMessageHandler() : handler_( nullptr ), messagesWaiting_( false )
+ {
+-	messagesMutex_ = SDL_CreateMutex();
++	pthread_mutex_init(&messagesMutex_, nullptr);
+ }
+ 
+ NetMessageHandler::~NetMessageHandler()
+ {
+-	SDL_LockMutex(messagesMutex_);
++	pthread_mutex_lock(&messagesMutex_);
+ 	while (!messages_.empty())
+ 	{
+ 		NetMessage *message = messages_.front();
+ 		messages_.pop_front();
+ 		NetMessagePool::instance()->addToPool(message);
+ 	}	
+-	SDL_UnlockMutex(messagesMutex_);
++	pthread_mutex_unlock(&messagesMutex_);
+ 
+-	SDL_DestroyMutex(messagesMutex_);
++	pthread_mutex_destroy(&messagesMutex_);
+ }
+ 
+ void NetMessageHandler::addMessage(NetMessage *message)
+ {
+-	SDL_LockMutex(messagesMutex_);
++	pthread_mutex_lock(&messagesMutex_);
+ 	messages_.push_back(message);
+ 	messagesWaiting_ = true;
+-	SDL_UnlockMutex(messagesMutex_);
++	pthread_mutex_unlock(&messagesMutex_);
+ }
+ 
+ int NetMessageHandler::processMessages()
+@@ -70,14 +70,14 @@ bool NetMessageHandler::processSingleMessage()
+ 	// Get the list of messages that should be processed
+ 	// Process one at a time, incase this method is called re-entrantly
+ 	NetMessage* message = nullptr;
+-	SDL_LockMutex(messagesMutex_);
++	pthread_mutex_lock(&messagesMutex_);
+ 	if (!messages_.empty())
+ 	{
+ 		message = messages_.front();
+ 		messages_.pop_front();
+ 	}
+ 	messagesWaiting_ = !messages_.empty();
+-	SDL_UnlockMutex(messagesMutex_);
++	pthread_mutex_unlock(&messagesMutex_);
+ 
+ 	if (message)
+ 	{
+diff --git a/src/common/net/NetMessageHandler.hpp b/src/common/net/NetMessageHandler.hpp
+index 8feeabf5..f59c16ca 100644
+--- a/src/common/net/NetMessageHandler.hpp
++++ b/src/common/net/NetMessageHandler.hpp
+@@ -22,7 +22,9 @@
+ #define __INCLUDE_NetMessageHandler_hpp_INCLUDE__
+ 
+ #include <net/NetMessage.hpp>
+-#include <SDL/SDL_thread.h>
++#include <pthread.h>
++// Android build: SDL_mutex replaced with pthread_mutex_t
++// (SDL is not part of this build - see the porting plan).
+ #include <list>
+ 
+ class NetMessageHandlerI
+@@ -47,7 +49,7 @@ public:
+ protected:
+ 	NetMessageHandlerI*      handler_;
+ 	std::list< NetMessage* > messages_;
+-	SDL_mutex*               messagesMutex_;
++	pthread_mutex_t                messagesMutex_;
+ 	bool                     messagesWaiting_;
+ 
+ 	bool processSingleMessage();
+diff --git a/src/common/net/NetMessagePool.cpp b/src/common/net/NetMessagePool.cpp
+index fba7e2a9..69f40dc5 100644
+--- a/src/common/net/NetMessagePool.cpp
++++ b/src/common/net/NetMessagePool.cpp
+@@ -32,21 +32,21 @@ NetMessagePool *NetMessagePool::instance()
+ 	return instance_;
+ }
+ 
+-NetMessagePool::NetMessagePool() : messagePoolMutex_(nullptr)
++NetMessagePool::NetMessagePool()
+ {
+-	messagePoolMutex_ = SDL_CreateMutex();
++	pthread_mutex_init(&messagePoolMutex_, nullptr);
+ }
+ 
+ NetMessagePool::~NetMessagePool()
+ {
+-	SDL_DestroyMutex(messagePoolMutex_);
++	pthread_mutex_destroy(&messagePoolMutex_);
+ }
+ 
+ void NetMessagePool::addToPool(NetMessage *message)
+ {
+-	SDL_LockMutex(messagePoolMutex_);
++	pthread_mutex_lock(&messagePoolMutex_);
+ 	messagePool_.push_back(message);
+-	SDL_UnlockMutex(messagePoolMutex_);
++	pthread_mutex_unlock(&messagePoolMutex_);
+ }
+ 
+ NetMessage *NetMessagePool::getFromPool(NetMessage::MessageType type,
+@@ -55,7 +55,7 @@ NetMessage *NetMessagePool::getFromPool(NetMessage::MessageType type,
+ 	unsigned int flags,
+ 	unsigned int recvTime)
+ {
+-	SDL_LockMutex(messagePoolMutex_);
++	pthread_mutex_lock(&messagePoolMutex_);
+ 
+ 	NetMessage *result = nullptr;
+ 	if (messagePool_.empty())
+@@ -74,7 +74,7 @@ NetMessage *NetMessagePool::getFromPool(NetMessage::MessageType type,
+ 	result->setFlags(flags);
+ 	result->setRecvTime(recvTime);
+ 
+-	SDL_UnlockMutex(messagePoolMutex_);
++	pthread_mutex_unlock(&messagePoolMutex_);
+ 
+ 	return result;
+ }
+diff --git a/src/common/net/NetMessagePool.hpp b/src/common/net/NetMessagePool.hpp
+index ef540348..c8784b50 100644
+--- a/src/common/net/NetMessagePool.hpp
++++ b/src/common/net/NetMessagePool.hpp
+@@ -23,7 +23,9 @@
+ 
+ #include <net/NetMessage.hpp>
+ #include <list>
+-#include <SDL/SDL_thread.h>
++#include <pthread.h>
++// Android build: SDL_mutex replaced with pthread_mutex_t
++// (SDL is not part of this build - see the porting plan).
+ 
+ // SINGLETON
+ class NetMessagePool
+@@ -44,7 +46,7 @@ protected:
+ 	static NetMessagePool* instance_;
+ 
+ 	std::list< NetMessage* > messagePool_;
+-	SDL_mutex*               messagePoolMutex_;
++	pthread_mutex_t                messagePoolMutex_;
+ 
+ private:
+ 	NetMessagePool();
