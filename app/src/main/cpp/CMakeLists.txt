@@ -37,6 +37,39 @@ add_library(lua STATIC ${LUA_SRCS})
 target_include_directories(lua PUBLIC ${THIRD_PARTY_DIR}/lua-5.1.5/src)
 target_compile_definitions(lua PRIVATE LUA_USE_POSIX)
 
+# NDK's default -D_FORTIFY_SOURCE=2 produces a false-positive
+# "strchr: prevented read past end of buffer" abort in luaL_findtable()
+# (lauxlib.c) on a plain 4-byte string literal ("s3d") - a known class of
+# bionic/clang __builtin_object_size misbehavior on certain compiler/
+# optimization-level combinations, not a real bug in this 30-year-old,
+# widely-used code path. Disabled for this target only.
+target_compile_options(lua PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0)
+
+# libpng (+ Android/NDK-provided zlib). Needed natively, not just for
+# client-side rendering textures: common/landscapemap's heightmap loading
+# calls ImageFactory::loadImage() unconditionally, even server-side - see
+# the porting plan for why the earlier "BitmapFactory on the Kotlin side"
+# plan was superseded for this.
+set(PNG_SHARED OFF CACHE BOOL "" FORCE)
+set(PNG_STATIC ON CACHE BOOL "" FORCE)
+set(PNG_TESTS OFF CACHE BOOL "" FORCE)
+set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
+set(PNG_FRAMEWORK OFF CACHE BOOL "" FORCE)
+add_subdirectory(${THIRD_PARTY_DIR}/libpng libpng-build)
+
+# libjpeg-turbo. 390+ .jpg assets in the real bundled data/ (icons, some
+# textures) genuinely need this, not just PNG - see the porting plan.
+# SIMD disabled to avoid requiring a NASM toolchain in this build; revisit
+# if JPEG decode performance ever matters.
+set(ENABLE_SHARED OFF CACHE BOOL "" FORCE)
+set(ENABLE_STATIC ON CACHE BOOL "" FORCE)
+set(WITH_SIMD OFF CACHE BOOL "" FORCE)
+set(WITH_TURBOJPEG OFF CACHE BOOL "" FORCE)
+set(WITH_TOOLS OFF CACHE BOOL "" FORCE)
+set(WITH_TESTS OFF CACHE BOOL "" FORCE)
+set(WITH_JAVA OFF CACHE BOOL "" FORCE)
+add_subdirectory(${THIRD_PARTY_DIR}/libjpeg-turbo libjpeg-turbo-build)
+
 # --- Vendored Scorched3D core (src/common, src/server) ---
 # NOTE M1 in progress, module by module. src/client and src/launcher are
 # NEVER added here - they're fully replaced by Kotlin/Compose + a
@@ -66,6 +99,7 @@ set(SCORCHED_COMMON_SUBDIRS
     common/lua
     server/server
     server/tankai
+    common/image
 )
 
 set(SCORCHED_COMMON_SRCS "")
@@ -100,6 +134,7 @@ add_library(scorched_common STATIC
     ${SCORCHED_COMMON_SRCS}
     porting/SDL_net_compat.cpp
     porting/SDL_thread_compat.cpp
+    porting/Keyboard_stub.cpp
 )
 
 # common/3dsparse/aseFile.{lex,tab}.cpp are flex/bison-generated parsers
@@ -118,9 +153,14 @@ target_include_directories(scorched_common PUBLIC
     ${SCORCHED_SRC}/common/porting
     ${SCORCHED_SRC}/server
     ${CMAKE_CURRENT_SOURCE_DIR}/porting
+    # libjpeg-turbo doesn't export its include dirs via the target (unlike
+    # libpng/expat), just a directory-scoped include_directories() that
+    # doesn't reach consumers in a different CMakeLists.txt - add manually.
+    ${THIRD_PARTY_DIR}/libjpeg-turbo/src
+    ${CMAKE_CURRENT_BINARY_DIR}/libjpeg-turbo-build
 )
 
-target_link_libraries(scorched_common PUBLIC expat lua)
+target_link_libraries(scorched_common PUBLIC expat lua png_static jpeg-static)
 
 # Matches upstream's own dedicated-server build flag (see meson.build's
 # server target) - it gates out client-only rendering deps (GLEXT, the
@@ -128,6 +168,13 @@ target_link_libraries(scorched_common PUBLIC expat lua)
 # is exactly what our "reuse src/common, replace the client" architecture
 # wants, for free.
 target_compile_definitions(scorched_common PUBLIC S3D_SERVER=1)
+
+# Android/bionic has a real snprintf/vsnprintf - tell DefinesString.hpp so
+# it doesn't fall back to common/common/snprintf.c's smb_snprintf (a
+# portable substitute for platforms without one, mainly old MSVC). This
+# macro is normally set by autoconf/meson's configure step, which our
+# CMake build doesn't run.
+target_compile_definitions(scorched_common PUBLIC HAVE_SNPRINTF)
 
 # --- App-side JNI bridge (owned by this repo, not vendored) ---
 
@@ -141,7 +188,18 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 find_library(log-lib log)
 
+# scorched_common relies heavily on self-registering static objects
+# (REGISTER_ACCESSORY_SOURCE and similar macros - a file-scope object whose
+# constructor registers a weapon/accessory/action type into a factory map).
+# A static library only pulls in the .o files it needs to resolve an
+# otherwise-undefined symbol; nothing else references these registration
+# objects, so the linker silently drops them and their constructors never
+# run - accessories.xml then fails to parse with "Failed to find accessory
+# part type" for every registered type. --whole-archive forces every object
+# file in scorched_common into the final .so regardless.
 target_link_libraries(${CMAKE_PROJECT_NAME}
+    -Wl,--whole-archive
     scorched_common
+    -Wl,--no-whole-archive
     ${log-lib}
 )
