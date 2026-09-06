@@ -37,6 +37,8 @@ add_subdirectory(${THIRD_PARTY_DIR}/expat/expat expat-build)
 set(SCORCHED_COMMON_SUBDIRS
     common/XML
     common/common
+    common/lang
+    common/net
 )
 
 set(SCORCHED_COMMON_SRCS "")
@@ -53,7 +55,11 @@ endforeach()
 # rather than stubbed.
 list(REMOVE_ITEM SCORCHED_COMMON_SRCS ${SCORCHED_SRC}/common/common/Keyboard.cpp)
 
-add_library(scorched_common STATIC ${SCORCHED_COMMON_SRCS})
+add_library(scorched_common STATIC
+    ${SCORCHED_COMMON_SRCS}
+    porting/SDL_net_compat.cpp
+    porting/SDL_thread_compat.cpp
+)
 
 target_include_directories(scorched_common PUBLIC
     ${SCORCHED_SRC}/common

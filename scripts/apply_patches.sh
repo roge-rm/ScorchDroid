@@ -16,12 +16,19 @@ PATCH_DIR="$REPO_ROOT/patches/scorched3d"
 
 cd "$SUBMODULE_DIR"
 
+# If the checkout already has local modifications, assume they're from
+# active development (patches already applied, plus in-progress edits not
+# yet folded into a patch file) and leave it alone - re-applying patches
+# against a tree that has drifted from any single patch's exact context
+# lines fails even when the patch is effectively already present. Only a
+# fully clean checkout (matching the pinned commit exactly) gets patches
+# applied automatically.
+if [ -n "$(git status --porcelain)" ]; then
+    exit 0
+fi
+
 shopt -s nullglob
 for patch in "$PATCH_DIR"/*.patch; do
-    if git apply --reverse --check "$patch" 2>/dev/null; then
-        # Already applied.
-        continue
-    fi
     echo "Applying $(basename "$patch") to third_party/scorched3d"
     git apply "$patch"
 done
