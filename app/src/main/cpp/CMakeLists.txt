@@ -27,6 +27,18 @@ set(EXPAT_BUILD_FUZZERS OFF CACHE BOOL "" FORCE)
 set(EXPAT_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${THIRD_PARTY_DIR}/expat/expat expat-build)
 
+# Lua 5.1.5 (official lua.org source, MIT license), compiled as C++ per
+# src/common/lua's expectations. lua.c/luac.c are the standalone
+# interpreter/compiler executables - not needed as a library.
+file(GLOB LUA_SRCS ${THIRD_PARTY_DIR}/lua-5.1.5/src/*.c)
+list(REMOVE_ITEM LUA_SRCS
+    ${THIRD_PARTY_DIR}/lua-5.1.5/src/lua.c
+    ${THIRD_PARTY_DIR}/lua-5.1.5/src/luac.c
+)
+add_library(lua STATIC ${LUA_SRCS})
+target_include_directories(lua PUBLIC ${THIRD_PARTY_DIR}/lua-5.1.5/src)
+target_compile_definitions(lua PRIVATE LUA_USE_POSIX)
+
 # --- Vendored Scorched3D core (src/common, src/server) ---
 # NOTE M1 in progress, module by module. src/client and src/launcher are
 # NEVER added here - they're fully replaced by Kotlin/Compose + a
@@ -39,6 +51,7 @@ set(SCORCHED_COMMON_SUBDIRS
     common/common
     common/lang
     common/net
+    common/engine
 )
 
 set(SCORCHED_COMMON_SRCS "")
@@ -64,10 +77,11 @@ add_library(scorched_common STATIC
 target_include_directories(scorched_common PUBLIC
     ${SCORCHED_SRC}/common
     ${SCORCHED_SRC}/common/porting
+    ${SCORCHED_SRC}/server
     ${CMAKE_CURRENT_SOURCE_DIR}/porting
 )
 
-target_link_libraries(scorched_common PUBLIC expat)
+target_link_libraries(scorched_common PUBLIC expat lua)
 
 # Matches upstream's own dedicated-server build flag (see meson.build's
 # server target) - it gates out client-only rendering deps (GLEXT, the

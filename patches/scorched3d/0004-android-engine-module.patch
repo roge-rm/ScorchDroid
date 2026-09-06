@@ -1,0 +1,53 @@
+diff --git a/src/common/common/Keyboard.hpp b/src/common/common/Keyboard.hpp
+index c6413877..ca3fd10a 100644
+--- a/src/common/common/Keyboard.hpp
++++ b/src/common/common/Keyboard.hpp
+@@ -23,10 +23,18 @@
+ 
+ #include <common/KeyboardHistory.hpp>
+ #include <common/KeyboardKey.hpp>
++#include <SDL_types_compat.h>
+ #include <string>
+ #include <list>
+ #include <map>
+ 
++// Android build: Keyboard.cpp (the SDL_Event-polling implementation) is
++// deliberately not compiled - see the CMakeLists.txt comment - but other
++// engine code still declares/references this class, so SDL_Event only
++// needs to be forward-declared here, not implemented
++// (SDL is not part of this build - see the porting plan).
++struct SDL_Event;
++
+ #define MAX_KEYBDHIST            1024
+ #define KEYBOARDKEY( name, key ) static KeyboardKey* key = Keyboard::instance()->getKey( name );
+ 
+diff --git a/src/common/engine/GameState.cpp b/src/common/engine/GameState.cpp
+index eb5b6e73..869d6ab5 100644
+--- a/src/common/engine/GameState.cpp
++++ b/src/common/engine/GameState.cpp
+@@ -27,7 +27,9 @@
+ #include <common/Logger.hpp>
+ #include <common/LoggerI.hpp>
+ #include <limits.h>
+-#include <SDL/SDL.h>
++#include <SDL_thread_compat.h>
++// Android build: SDL_GetTicks() comes from our pthread/clock_gettime-backed
++// compat shim (SDL is not part of this build - see the porting plan).
+ 
+ GameStatePerfCounter::GameStatePerfCounter(const char *name) :
+ 	name_(name),
+diff --git a/src/common/engine/Simulator.cpp b/src/common/engine/Simulator.cpp
+index e67766c6..85324173 100644
+--- a/src/common/engine/Simulator.cpp
++++ b/src/common/engine/Simulator.cpp
+@@ -27,7 +27,9 @@
+ #include <movement/TargetMovement.hpp>
+ #include <common/OptionsScorched.hpp>
+ #include <landscapemap/LandscapeMaps.hpp>
+-#include <SDL/SDL.h>
++#include <SDL_thread_compat.h>
++// Android build: SDL_GetTicks() comes from our pthread/clock_gettime-backed
++// compat shim (SDL is not part of this build - see the porting plan).
+ 
+ static const fixed StepSize = fixed(true, fixed::FIXED_RESOLUTION / Sint64(50));
+ 
