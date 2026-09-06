@@ -21,6 +21,15 @@
     <name>PlayerType2</name>
     <value>Moron</value>
   </option>
+  <!-- TurnSimultaneous (0): every tank can move/fire within the same round
+       window, rather than strict turn order (the default,
+       TurnSequentialLoserFirst) - simplifies touch-fire, which just directly
+       submits a move for whichever tank is tapped, with no turn-order
+       bookkeeping of our own. -->
+  <option>
+    <name>TurnType</name>
+    <value>0</value>
+  </option>
   <option>
     <name>ShotTime</name>
     <value>35</value>

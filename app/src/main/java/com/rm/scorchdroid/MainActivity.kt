@@ -1,7 +1,9 @@
 package com.rm.scorchdroid
 
+import android.annotation.SuppressLint
 import android.opengl.GLSurfaceView
 import android.os.Bundle
+import android.view.MotionEvent
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +25,7 @@ class MainActivity : AppCompatActivity() {
         gameSurface.setEGLContextClientVersion(3)
         gameSurface.setRenderer(GameRenderer())
         gameSurface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+        setUpTouchToFire(gameSurface, statusText)
 
         CoroutineScope(Dispatchers.Main).launch {
             statusText.text = "Extracting game data..."
@@ -61,6 +64,27 @@ class MainActivity : AppCompatActivity() {
                 }
                 kotlinx.coroutines.delay(100)
             }
+        }
+    }
+
+    // M2 touch-fire: a tap picks the nearest tank and fires it at whichever
+    // other tank is on the field (see NativeBridge.handleTap) - not real
+    // aim/power touch controls yet, just proof that touch input reaches a
+    // real weapon fire through the actual simulation.
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setUpTouchToFire(surface: GLSurfaceView, statusText: TextView) {
+        surface.setOnTouchListener { view, event ->
+            if (event.action == MotionEvent.ACTION_UP) {
+                val normX = (event.x / view.width) * 2f - 1f
+                val normY = 1f - (event.y / view.height) * 2f
+                CoroutineScope(Dispatchers.Main).launch {
+                    val fired = withContext(Dispatchers.Default) {
+                        NativeBridge.handleTap(normX, normY)
+                    }
+                    if (fired) statusText.text = "Fired!\n${statusText.text}"
+                }
+            }
+            true
         }
     }
 

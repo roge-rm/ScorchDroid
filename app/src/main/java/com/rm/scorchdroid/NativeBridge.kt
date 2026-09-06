@@ -18,4 +18,11 @@ object NativeBridge {
 
     /** Debug-only: current ServerState + tank count. */
     external fun getGameStateDebugString(): String
+
+    /**
+     * M2 touch-fire: (normX, normY) in the same [-0.9, 0.9] landscape space
+     * the renderer draws in - finds the tank nearest the tap and fires it
+     * at whichever other tank is on the field.
+     */
+    external fun handleTap(normX: Float, normY: Float): Boolean
 }
