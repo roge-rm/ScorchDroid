@@ -28,23 +28,47 @@ set(EXPAT_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${THIRD_PARTY_DIR}/expat/expat expat-build)
 
 # --- Vendored Scorched3D core (src/common, src/server) ---
-# NOTE M1 in progress: only the XML module (+ its direct transitive deps)
-# is wired up so far. src/client and src/launcher are never added here -
-# they're fully replaced by Kotlin/Compose + a from-scratch GLES3 renderer.
+# NOTE M1 in progress, module by module. src/client and src/launcher are
+# NEVER added here - they're fully replaced by Kotlin/Compose + a
+# from-scratch GLES3 renderer per the porting plan. Each wired-in
+# subdirectory below is named explicitly and globbed only within itself,
+# so this can never accidentally sweep in src/client or src/launcher.
 
-add_library(scorched_common STATIC
-    ${SCORCHED_SRC}/common/XML/XMLFile.cpp
-    ${SCORCHED_SRC}/common/XML/XMLNode.cpp
-    ${SCORCHED_SRC}/common/XML/XMLParser.cpp
-    ${SCORCHED_SRC}/common/XML/XMLStringBuffer.cpp
+set(SCORCHED_COMMON_SUBDIRS
+    common/XML
+    common/common
 )
+
+set(SCORCHED_COMMON_SRCS "")
+foreach(subdir ${SCORCHED_COMMON_SUBDIRS})
+    file(GLOB subdir_srcs ${SCORCHED_SRC}/${subdir}/*.cpp)
+    list(APPEND SCORCHED_COMMON_SRCS ${subdir_srcs})
+endforeach()
+
+# common/Keyboard.cpp is a live SDL_Event-polling keyboard-state tracker
+# (SDL_GetKeyState/SDL_EnableKeyRepeat/SDL_Event) meant to be fed by SDL's
+# main loop. Android input is touch-first and will get its own JNI-driven
+# input path (see the porting plan) - this isn't a header-portability fix,
+# it's a real design task for a later milestone, so it's excluded here
+# rather than stubbed.
+list(REMOVE_ITEM SCORCHED_COMMON_SRCS ${SCORCHED_SRC}/common/common/Keyboard.cpp)
+
+add_library(scorched_common STATIC ${SCORCHED_COMMON_SRCS})
 
 target_include_directories(scorched_common PUBLIC
     ${SCORCHED_SRC}/common
     ${SCORCHED_SRC}/common/porting
+    ${CMAKE_CURRENT_SOURCE_DIR}/porting
 )
 
 target_link_libraries(scorched_common PUBLIC expat)
+
+# Matches upstream's own dedicated-server build flag (see meson.build's
+# server target) - it gates out client-only rendering deps (GLEXT, the
+# GLW widget toolkit, etc.) throughout src/common at compile time, which
+# is exactly what our "reuse src/common, replace the client" architecture
+# wants, for free.
+target_compile_definitions(scorched_common PUBLIC S3D_SERVER=1)
 
 # --- App-side JNI bridge (owned by this repo, not vendored) ---
 
