@@ -9,6 +9,9 @@
 #include <image/Image.hpp>
 #include <common/Defines.hpp>
 
+#include "SkyDescription.hpp"
+#include <landscapemap/GroundMaps.hpp>
+#include <landscapemap/HeightMap.hpp>
 #include <algorithm>
 #include <cmath>
 
@@ -354,6 +357,114 @@ Texture applyMovementMask(
 		}
 	}
 	return result;
+}
+
+// Upstream's ImageModifier::findIntersection: march from [start] towards
+// [end] a texel at a time, reporting the greatest depth by which the ground
+// rises above the ray. That depth - not a distance along the ray - is what
+// upstream softens the shadow edge with.
+static bool findGroundIntersection(HeightMap &hMap,
+								   float startX, float startY, float startZ,
+								   float endX, float endY, float endZ,
+								   float &depth, float stopDepth)
+{
+	bool blocked = false;
+	depth = 0.0f;
+
+	float px = startX, py = startY, pz = startZ;
+	float dx = endX - startX, dy = endY - startY, dz = endZ - startZ;
+
+	// One heightmap cell per step along whichever axis moves fastest.
+	const float ax = std::fabs(dx), ay = std::fabs(dy);
+	const float scale = (ax > ay) ? ax : ay;
+	if (scale < 0.0001f) return false;
+	dx /= scale; dy /= scale; dz /= scale;
+
+	const int width = hMap.getMapWidth();
+	const int height = hMap.getMapHeight();
+
+	while (px >= 0.0f && py >= 0.0f && px <= (float) width && py <= (float) height) {
+		const float ground =
+			hMap.getHeight((int) px, (int) py).asFloat() - 0.1f;
+		const float above = ground - pz;
+		if (above > 0.0f) {
+			if (above > depth) depth = above;
+			blocked = true;
+			if (depth > stopDepth) return blocked;
+		}
+		px += dx; py += dy; pz += dz;
+	}
+	return blocked;
+}
+
+bool applyLightMap(ScorchedContext &context, Texture &texture)
+{
+	if (!texture.valid()) return false;
+
+	HeightMap &hMap = context.getLandscapeMaps().getGroundMaps().getHeightMap();
+	if (hMap.getMapWidth() <= 0 || hMap.getMapHeight() <= 0) return false;
+
+	ScorchDroidSky::Description sky = ScorchDroidSky::describe(context);
+
+	// Upstream's own two constants: a 256x256 light map regardless of the
+	// texture's size, and a soft edge three units deep.
+	const int lightMapSize = 256;
+	const float softShadow = 3.0f;
+
+	std::vector<float> light((size_t) lightMapSize * lightMapSize * 3, 1.0f);
+	for (int y = 0; y < lightMapSize; y++) {
+		for (int x = 0; x < lightMapSize; x++) {
+			const float dx = (float) x / (float) lightMapSize * (float) hMap.getMapWidth();
+			const float dy = (float) y / (float) lightMapSize * (float) hMap.getMapHeight();
+			const float dz = hMap.getInterpHeight(
+				fixed::fromFloat(dx), fixed::fromFloat(dy)).asFloat();
+
+			FixedVector fixedNormal;
+			hMap.getInterpNormal(fixed::fromFloat(dx), fixed::fromFloat(dy), fixedNormal);
+
+			float sx = sky.sunPosition[0] - dx;
+			float sy = sky.sunPosition[1] - dy;
+			float sz = sky.sunPosition[2] - dz;
+			const float slen = std::sqrt(sx * sx + sy * sy + sz * sz);
+			if (slen > 0.0001f) { sx /= slen; sy /= slen; sz /= slen; }
+
+			// Upstream's half-lambert: (n.l)/2 + 0.5, so ground facing away
+			// still catches something rather than going flat black.
+			float lambert = (fixedNormal[0].asFloat() * sx +
+							 fixedNormal[1].asFloat() * sy +
+							 fixedNormal[2].asFloat() * sz) * 0.5f + 0.5f;
+
+			float depth = 0.0f;
+			if (findGroundIntersection(hMap, dx, dy, dz,
+					sky.sunPosition[0], sky.sunPosition[1], sky.sunPosition[2],
+					depth, softShadow)) {
+				lambert *= (depth < softShadow) ? (1.0f - depth / softShadow) : 0.0f;
+			}
+
+			float *out = &light[((size_t) y * lightMapSize + x) * 3];
+			for (int c = 0; c < 3; c++) {
+				out[c] = std::min(1.0f, sky.diffuse[c] * lambert + sky.ambience[c]);
+			}
+		}
+	}
+
+	// Multiply into the texture, nearest-sampled. Upstream scales the light
+	// map up with gluScaleImage first; sampling straight from it is the same
+	// thing without the intermediate copy, and the map is smooth enough that
+	// the difference doesn't show.
+	for (int y = 0; y < texture.height; y++) {
+		const int ly = std::min(y * lightMapSize / texture.height, lightMapSize - 1);
+		for (int x = 0; x < texture.width; x++) {
+			const int lx = std::min(x * lightMapSize / texture.width, lightMapSize - 1);
+			const float *lit = &light[((size_t) ly * lightMapSize + lx) * 3];
+			unsigned char *dest = &texture.rgb[((size_t) y * texture.width + x) * 3];
+			for (int c = 0; c < 3; c++) {
+				dest[c] = (unsigned char) std::min(255.0f,
+					std::max(0.0f, (float) dest[c] * lit[c]));
+			}
+		}
+	}
+	return true;
 }
 
 }  // namespace LandscapeTextureBuilder

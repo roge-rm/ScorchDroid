@@ -38,6 +38,17 @@ namespace ScorchDroidSky
 		float sunDirection[3] = { 0.0f, 0.0f, 1.0f };
 		float sunColor[3] = { 1.0f, 1.0f, 1.0f };
 
+		// The sun as a *position* in landscape coordinates, which is what
+		// upstream's light map bakes against: it takes the direction to the
+		// sun per texel, so a point source at a finite distance, not a
+		// parallel one. Upstream's own radius (900) and map-centre offset.
+		float sunPosition[3] = { 0.0f, 0.0f, 900.0f };
+
+		// <skyambience> and <skydiffuse>: the two terms upstream's light map
+		// combines as `diffuse * lambert + ambience`.
+		float ambience[3] = { 0.4f, 0.4f, 0.4f };
+		float diffuse[3] = { 0.4f, 0.4f, 0.4f };
+
 		// The colour upstream fogs distance towards, which is in practice
 		// the haze colour at the horizon.
 		float fog[3] = { 0.5f, 0.5f, 0.5f };
