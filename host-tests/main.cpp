@@ -53,6 +53,7 @@
 #include <landscapedef/LandscapeDefinitions.hpp>
 #include <common/OptionsGame.hpp>
 #include <ClientContext.hpp>
+#include <ClientSync.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -685,7 +686,7 @@ namespace
 		Clock tickClock;
 		int status = 0;
 		pid_t waited = 0;
-		for (int i = 0; i < 150; i++)
+		for (int i = 0; i < 250; i++)
 		{
 			unsigned int ticksDifference = tickClock.getTicksDifference();
 			fixed timeDifference(true, ((Sint64) ticksDifference) * 10);
@@ -728,9 +729,11 @@ namespace
 		if (joined)
 		{
 			unsigned int clientTanks = 0, clientWidth = 0, clientHeight = 0;
+			long long clientTimeDiff = 0;
 			FILE *resultFile = fopen(resultPath, "r");
 			bool parsed = resultFile &&
-				fscanf(resultFile, "joined tanks=%u width=%u height=%u", &clientTanks, &clientWidth, &clientHeight) == 3;
+				fscanf(resultFile, "joined tanks=%u width=%u height=%u timediff=%lld",
+					&clientTanks, &clientWidth, &clientHeight, &clientTimeDiff) == 4;
 			if (resultFile) fclose(resultFile);
 			check(parsed, "parsed the client process's result file");
 
@@ -757,6 +760,31 @@ namespace
 					"client's landscape width matches the host's");
 				check(clientHeight == (unsigned int) server->getLandscapeMaps().getGroundMaps().getHeightMap().getMapHeight(),
 					"client's landscape height matches the host's");
+
+				// ClientSync::syncToServerTime - see that function. The
+				// client's clock starts at the level message's actualTime,
+				// but its own level load has already burned several hundred
+				// ms by the time it gets there, so without a correction it
+				// runs permanently that far behind and everything is
+				// displayed late. The value is measured from the host's own
+				// message timestamps, so a broken correction shows up as a
+				// large residual rather than a suspiciously perfect zero.
+				//
+				// Threshold picked from measurement, not guessed. With the
+				// correction removed the residual sits at a flat 0.68-0.77s
+				// and never closes; with it, after this test's ~8s settle
+				// it measures 0.10-0.14s, and given 15s it reaches 0.007s
+				// (i.e. it really converges, this is just mid-convergence).
+				// 0.35s sits ~2.4x above the observed corrected value and
+				// ~1.9x below the uncorrected floor, so it discriminates
+				// without being flaky. A longer settle would assert more
+				// tightly at the cost of suite runtime, which is the whole
+				// point of host-tests.
+				fprintf(stderr, "  (client/host clock difference: %lld internal units, %.3fs)\n",
+					clientTimeDiff, (double) clientTimeDiff / (double) fixed::FIXED_RESOLUTION);
+				const long long maxDriftInternal = (long long) (fixed::FIXED_RESOLUTION * 35 / 100);
+				check(clientTimeDiff < maxDriftInternal && clientTimeDiff > -maxDriftInternal,
+					"the joined client's clock converges on the host's rather than staying a level-load behind");
 			}
 		}
 
@@ -823,9 +851,14 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 			}
 			if (!ownTankSeen) usleep(100 * 1000);
 		}
-		// A couple more ticks so the TankLoaded/TankChange actions that
-		// follow the add have settled too before the count is reported.
-		for (int i = 0; i < 5; i++)
+		// Keep ticking a while longer for two reasons: the TankLoaded/
+		// TankChange actions that follow the add need to settle before the
+		// count is reported, and the clock-drift correction
+		// (ClientSync::syncToServerTime) needs enough live messages to
+		// converge - it deliberately closes only a twentieth of the gap per
+		// message, and the host's ComsNetStatMessage (which supplies the
+		// round-trip estimate) only starts arriving a couple of seconds in.
+		for (int i = 0; i < 80; i++)
 		{
 			client.tick();
 			usleep(100 * 1000);
@@ -836,10 +869,15 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 	if (!f) return 1;
 	if (joined)
 	{
-		fprintf(f, "joined tanks=%zu width=%d height=%d\n",
+		// timediff is ClientSync's rolling average of (host clock - our
+		// clock), in fixed's internal units, computed purely from timestamps
+		// the *host* put in its messages - see testClientJoin()'s assertion.
+		ClientSync &sync = (ClientSync &) client.getSimulator();
+		fprintf(f, "joined tanks=%zu width=%d height=%d timediff=%lld\n",
 			client.getTargetContainer().getTanks().size(),
 			client.getLandscapeMaps().getGroundMaps().getHeightMap().getMapWidth(),
-			client.getLandscapeMaps().getGroundMaps().getHeightMap().getMapHeight());
+			client.getLandscapeMaps().getGroundMaps().getHeightMap().getMapHeight(),
+			(long long) sync.getServerTimeDifference().getInternalData());
 	}
 	else
 	{
