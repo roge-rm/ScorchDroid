@@ -33,6 +33,8 @@ namespace ScorchDroidEffects
 		eLaser,          // beam from position to endPosition
 		eLightning,      // one arc segment, position to endPosition
 		eShieldHit,      // flash on a shield sphere; size is the shield radius
+		eSkyFlash,       // whole-sky flash (a nuke); position is unused
+		eTeleport,       // a tank arriving or leaving; size is its radius
 	};
 
 	struct EffectEvent
