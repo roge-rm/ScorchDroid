@@ -138,6 +138,7 @@ add_library(scorched_common STATIC
     porting/SoundEventQueue.cpp
     porting/DeformEventQueue.cpp
     porting/EffectEventQueue.cpp
+    porting/TracerStore.cpp
     porting/ClientSync.cpp
     porting/ClientContext.cpp
     porting/LandscapeTextureBuilder.cpp
