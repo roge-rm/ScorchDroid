@@ -1,5 +1,7 @@
 package com.rm.scorchdroid
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -51,6 +53,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -252,7 +255,11 @@ fun GameHud(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.align(Alignment.CenterStart).padding(start = 4.dp),
         ) {
-            HudText("${state.elevationDegrees.toInt()}°")
+            FadingReadout("${state.elevationDegrees.toInt()}°", state.elevationDegrees)
+            // Up increases, down decreases - the buttons bracket a vertical
+            // track, so they follow the track's own direction rather than
+            // the left/right convention the angle dial uses.
+            NudgeButton("+") { onElevationChange((state.elevationDegrees + it).coerceIn(0f, 90f)) }
             AxisSlider(
                 value = state.elevationDegrees,
                 valueRange = 0f..90f,
@@ -260,6 +267,7 @@ fun GameHud(
                 onValueChange = onElevationChange,
                 modifier = Modifier.size(width = 56.dp, height = 160.dp),
             )
+            NudgeButton("−") { onElevationChange((state.elevationDegrees - it).coerceIn(0f, 90f)) }
         }
 
         // Power - mirrors the elevation slider on the opposite edge.
@@ -267,7 +275,10 @@ fun GameHud(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.align(Alignment.CenterEnd).padding(end = 4.dp),
         ) {
-            HudText("${(state.powerFraction * 100).toInt()}%")
+            FadingReadout("${(state.powerFraction * 100).toInt()}%", state.powerFraction)
+            // A step here is one percentage point, so the button matches
+            // what the readout shows rather than nudging by a raw 1.0.
+            NudgeButton("+") { onPowerChange((state.powerFraction + it / 100f).coerceIn(0f, 1f)) }
             AxisSlider(
                 value = state.powerFraction,
                 valueRange = 0f..1f,
@@ -275,6 +286,7 @@ fun GameHud(
                 onValueChange = onPowerChange,
                 modifier = Modifier.size(width = 56.dp, height = 160.dp),
             )
+            NudgeButton("−") { onPowerChange((state.powerFraction - it / 100f).coerceIn(0f, 1f)) }
         }
 
         // Angle - horizontal, sitting just above the two-row control strip
@@ -283,7 +295,7 @@ fun GameHud(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 130.dp),
         ) {
-            HudText("${state.angleDegrees.toInt()}°")
+            FadingReadout("${state.angleDegrees.toInt()}°", state.angleDegrees)
             // Nudge buttons flank the slider. 220dp of track covering 360
             // degrees is about 1.6 degrees per dp, so a single degree is
             // less than a pixel of travel - unhittable by dragging, however
@@ -291,7 +303,7 @@ fun GameHud(
             // the final adjustment while the slider still does the coarse
             // sweep.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                AngleNudgeButton("−") { onAngleChange(wrapDegrees(state.angleDegrees - it)) }
+                NudgeButton("−") { onAngleChange(wrapDegrees(state.angleDegrees - it)) }
                 AxisSlider(
                     value = state.angleDegrees,
                     valueRange = 0f..360f,
@@ -304,7 +316,7 @@ fun GameHud(
                     // lift off and restart from the far side of the track.
                     wrapAround = true,
                 )
-                AngleNudgeButton("+") { onAngleChange(wrapDegrees(state.angleDegrees + it)) }
+                NudgeButton("+") { onAngleChange(wrapDegrees(state.angleDegrees + it)) }
             }
         }
 
@@ -324,17 +336,18 @@ private enum class SliderOrientation { Vertical, Horizontal }
 private fun wrapDegrees(degrees: Float): Float = ((degrees % 360f) + 360f) % 360f
 
 /**
- * A small step-by-one control for the angle dial. Tap for a single degree;
- * hold to repeat, accelerating, so a long correction doesn't need dozens of
- * taps but a short one stays exact.
+ * A small step-by-one control beside a slider. Tap for a single step; hold
+ * to repeat, accelerating, so a long correction doesn't need dozens of taps
+ * but a short one stays exact.
  *
  * Deliberately understated: it sits over the battlefield, and the slider
- * next to it is the primary control. [onNudge] receives the step size so
- * the caller owns the wrapping - the button has no idea it's driving a
- * compass.
+ * next to it is the primary control. [onNudge] is handed the step count
+ * rather than a value, so wrapping and clamping stay with the caller that
+ * knows which axis this is - the button drives a compass, an elevation and
+ * a power bar without knowing the difference.
  */
 @Composable
-private fun AngleNudgeButton(label: String, onNudge: (Float) -> Unit) {
+private fun NudgeButton(label: String, onNudge: (Float) -> Unit) {
     var pressed by remember { mutableStateOf(false) }
     val nudge by rememberUpdatedState(onNudge)
 
@@ -483,8 +496,33 @@ private fun AxisSlider(
 }
 
 @Composable
-private fun HudText(text: String) {
-    Text(text, color = Color.White, style = MaterialTheme.typography.bodyMedium)
+private fun HudText(text: String, modifier: Modifier = Modifier) {
+    Text(text, color = Color.White, style = MaterialTheme.typography.bodyMedium, modifier = modifier)
+}
+
+/**
+ * A slider's numeric readout, shown while the value is being changed and
+ * faded out a second after the last change. The numbers matter only while
+ * you are adjusting - the rest of the time they are three more things
+ * competing with the battlefield for attention.
+ *
+ * Faded via alpha rather than removed from the layout, so the slider
+ * underneath doesn't shift up and down as the label comes and goes.
+ */
+@Composable
+private fun FadingReadout(text: String, value: Float) {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(value) {
+        visible = true
+        delay(1000)
+        visible = false
+    }
+    val alpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = tween(durationMillis = if (visible) 0 else 400),
+        label = "readout",
+    )
+    HudText(text, modifier = Modifier.alpha(alpha))
 }
 
 /**
