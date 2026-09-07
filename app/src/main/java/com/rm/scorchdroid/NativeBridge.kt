@@ -148,12 +148,12 @@ object NativeBridge {
     external fun submitMove(moveType: Int): Boolean
 
     /**
-     * M6: "my tank"'s current aim as
-     * "angleDegrees|elevationDegrees|powerFraction", or "" if there's no
-     * tank yet. The angle is in the engine's own convention
-     * (counterclockwise from world +Y) and needs the same mirroring the
-     * fire path applies to turn it into the player-facing dial.
+     * M6 HUD: the move id the server has granted "my tank", or 0 if none is
+     * outstanding. Zero on a live tank means the shot is locked in and the
+     * round is waiting on the other players.
      */
+    external fun getMyMoveId(): Int
+
     /**
      * M6 HUD: seconds left in the current timed phase (buying, or the shot
      * clock), or -1 where a countdown would be meaningless - no game yet,
@@ -162,6 +162,13 @@ object NativeBridge {
      */
     external fun getPhaseSecondsRemaining(): Int
 
+    /**
+     * M6: "my tank"'s current aim as
+     * "angleDegrees|elevationDegrees|powerFraction", or "" if there's no
+     * tank yet. The angle needs no conversion for the player-facing dial -
+     * the two share a sense, established by measurement rather than by
+     * reading the velocity formula (see MainActivity.engineAngleFromDial).
+     */
     external fun getMyAim(): String
 
     /**

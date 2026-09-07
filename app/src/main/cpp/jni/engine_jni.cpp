@@ -735,6 +735,18 @@ static void trackPhaseTime(ScorchedServer *server, fixed frameTime)
     }
 }
 
+// M6 HUD: the move id the server has currently granted "my tank", or 0 if
+// none is outstanding. ServerTurns::playMove sets it when a tanket is given
+// a move and playMoveFinished clears it once that move is submitted, so a
+// live tank with 0 here has locked its shot in and is waiting on everyone
+// else - which is exactly what the Fire button wants to show.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getMyMoveId(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    Tank *tank = findMyTank();
+    return tank ? (jint) tank->getShotInfo().getMoveId() : 0;
+}
+
 // M6 HUD: seconds left in the current timed phase, or -1 where a countdown
 // would be meaningless (no game yet, joined as a client - the host owns the
 // clock there and does not send it - or a phase that ends on an event
