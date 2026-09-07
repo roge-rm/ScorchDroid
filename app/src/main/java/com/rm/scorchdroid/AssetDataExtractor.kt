@@ -13,7 +13,7 @@ import java.io.File
  */
 object AssetDataExtractor {
     private const val VERSION_MARKER = ".extracted_version"
-    private const val CURRENT_VERSION = "10"
+    private const val CURRENT_VERSION = "11"
 
     fun ensureExtracted(context: Context): File {
         val root = File(context.filesDir, "scorched_root")
