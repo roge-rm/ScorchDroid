@@ -42,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
@@ -56,6 +57,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 /**
  * M4: the real in-game HUD (see the porting plan) - Compose overlaid on the
@@ -282,18 +284,28 @@ fun GameHud(
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 130.dp),
         ) {
             HudText("${state.angleDegrees.toInt()}°")
-            AxisSlider(
-                value = state.angleDegrees,
-                valueRange = 0f..360f,
-                orientation = SliderOrientation.Horizontal,
-                onValueChange = onAngleChange,
-                modifier = Modifier.size(width = 220.dp, height = 40.dp),
-                // A compass has no ends: dragging off either side keeps
-                // turning the turret and the value wraps, so the whole 360
-                // is reachable in one continuous swipe instead of having to
-                // lift off and restart from the far side of the track.
-                wrapAround = true,
-            )
+            // Nudge buttons flank the slider. 220dp of track covering 360
+            // degrees is about 1.6 degrees per dp, so a single degree is
+            // less than a pixel of travel - unhittable by dragging, however
+            // steady your thumb. These give exact single-degree steps for
+            // the final adjustment while the slider still does the coarse
+            // sweep.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AngleNudgeButton("−") { onAngleChange(wrapDegrees(state.angleDegrees - it)) }
+                AxisSlider(
+                    value = state.angleDegrees,
+                    valueRange = 0f..360f,
+                    orientation = SliderOrientation.Horizontal,
+                    onValueChange = onAngleChange,
+                    modifier = Modifier.size(width = 220.dp, height = 40.dp),
+                    // A compass has no ends: dragging off either side keeps
+                    // turning the turret and the value wraps, so the whole 360
+                    // is reachable in one continuous swipe instead of having to
+                    // lift off and restart from the far side of the track.
+                    wrapAround = true,
+                )
+                AngleNudgeButton("+") { onAngleChange(wrapDegrees(state.angleDegrees + it)) }
+            }
         }
 
         HudDialogHost(state.dialog)
@@ -309,6 +321,65 @@ private enum class SliderOrientation { Vertical, Horizontal }
  * the surrounding layout). Used for elevation and power (vertical) and
  * angle (horizontal).
  */
+private fun wrapDegrees(degrees: Float): Float = ((degrees % 360f) + 360f) % 360f
+
+/**
+ * A small step-by-one control for the angle dial. Tap for a single degree;
+ * hold to repeat, accelerating, so a long correction doesn't need dozens of
+ * taps but a short one stays exact.
+ *
+ * Deliberately understated: it sits over the battlefield, and the slider
+ * next to it is the primary control. [onNudge] receives the step size so
+ * the caller owns the wrapping - the button has no idea it's driving a
+ * compass.
+ */
+@Composable
+private fun AngleNudgeButton(label: String, onNudge: (Float) -> Unit) {
+    var pressed by remember { mutableStateOf(false) }
+    val nudge by rememberUpdatedState(onNudge)
+
+    // The repeat only - the first step is fired synchronously on press
+    // below. Doing it here instead raced: a quick tap can flip `pressed`
+    // true and false within a single composition, and LaunchedEffect keyed
+    // on it then never runs the true branch at all, so short taps silently
+    // did nothing.
+    LaunchedEffect(pressed) {
+        if (!pressed) return@LaunchedEffect
+        delay(400)  // hold threshold, so a tap is exactly one step
+        var interval = 140L
+        while (pressed) {
+            nudge(1f)
+            delay(interval)
+            // Ease into a faster repeat, floored so it stays controllable.
+            interval = (interval * 4 / 5).coerceAtLeast(30L)
+        }
+    }
+
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(30.dp)
+            .background(Color.White.copy(alpha = 0.18f), CircleShape)
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        // Exactly one step per press, however brief.
+                        nudge(1f)
+                        pressed = true
+                        tryAwaitRelease()
+                        pressed = false
+                    },
+                )
+            },
+    ) {
+        Text(
+            text = label,
+            color = Color.White.copy(alpha = 0.75f),
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+}
+
 @Composable
 private fun AxisSlider(
     value: Float,
