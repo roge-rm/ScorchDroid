@@ -2234,11 +2234,19 @@ Java_com_rm_scorchdroid_GameRenderer_nativeGetTankOverlays(JNIEnv *env, jobject)
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeCameraDrag(JNIEnv *, jobject, jfloat dx, jfloat dy) {
 	std::lock_guard<std::mutex> lock(g_cameraMutex);
-	g_camera.yaw += dx * kDragSensitivity;
-	// Vertical drag raises the camera as the finger moves down, i.e. the
-	// view tips the way the far side of the ground would if you had hold of
-	// it. The opposite (drag down, camera drops toward the horizon) was
-	// tried first and reported backwards.
+	// Both axes turn the view the way the ground would go if you had hold
+	// of it - the same sense as the two-finger pan, which moves the target
+	// against the finger so the world follows it.
+	//
+	// Horizontal was `+= dx` and was reported backwards: the eye orbits
+	// target + d*(cos p * sin yaw, sin p, cos p * cos yaw), so screen-right
+	// is (cos yaw, 0, -sin yaw) and a point on the near side of the target
+	// has d(screenX)/d(yaw) < 0 - increasing yaw as the finger moves right
+	// pushes the world left. Subtracting makes the world follow the finger,
+	// and matches the vertical axis, which was flipped for the same reason
+	// (drag down and the far side of the ground tips up towards you; the
+	// opposite was tried first and also reported backwards).
+	g_camera.yaw -= dx * kDragSensitivity;
 	g_camera.pitch = std::min(std::max(g_camera.pitch + dy * kDragSensitivity, kMinPitch), kMaxPitch);
 }
 

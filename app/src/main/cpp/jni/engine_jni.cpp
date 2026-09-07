@@ -1024,8 +1024,16 @@ Java_com_rm_scorchdroid_NativeBridge_fireWeapon(JNIEnv *env, jobject /* this */,
     } else {
         ok = g_clientContext->sendGameMessage(message);
     }
-    LOGI("fireWeapon: player=%d weapon=%u angle=%.1f elevation=%.1f power=%.2f ok=%d",
-         playerId, weapon->getAccessoryId(), angleDegrees, elevationDegrees, power, ok);
+    // The firing position is logged alongside the angle because the only
+    // way to check aim against the world is to compare where the shot
+    // actually landed (the renderer's "Terrain deformed" line) with the
+    // direction it was sent in - and both tanks fire in the same phase, so
+    // without knowing which crater started where, the bot's is easy to
+    // mistake for your own. See the aim-direction verification notes.
+    FixedVector &firedFrom = tank->getLife().getTargetPosition();
+    LOGI("fireWeapon: player=%d weapon=%u from=(%.1f,%.1f) angle=%.1f elevation=%.1f power=%.2f ok=%d",
+         playerId, weapon->getAccessoryId(), firedFrom[0].asFloat(), firedFrom[1].asFloat(),
+         angleDegrees, elevationDegrees, power, ok);
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
