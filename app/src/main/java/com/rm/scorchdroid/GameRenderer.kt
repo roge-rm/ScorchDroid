@@ -21,6 +21,15 @@ class GameRenderer : GLSurfaceView.Renderer {
     external fun nativeCameraDrag(dx: Float, dy: Float)
     external fun nativeCameraZoom(scaleFactor: Float)
 
+    /**
+     * Slides the free-fly camera's look-at point across the ground, in
+     * screen-relative pixels (two-finger drag - see
+     * MainActivity.setUpCameraControls). A no-op in follow mode, which
+     * retargets to your tank every frame and would overwrite any pan on the
+     * very next one.
+     */
+    external fun nativeCameraPan(dx: Float, dy: Float)
+
     // Toggles free-fly (orbit the map) vs. third-person-follow (orbit "my
     // tank") - see renderer_jni.cpp. Returns the new mode (true = follow).
     external fun nativeToggleCameraMode(): Boolean
