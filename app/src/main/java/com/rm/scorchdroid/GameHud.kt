@@ -29,6 +29,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.GpsFixed
+import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
@@ -38,6 +39,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -109,6 +111,11 @@ class GameHudState {
     // contextual "done buying" button, which is meaningless (and so hidden)
     // the rest of the time. Kept in sync from the tick loop's status poll.
     var buyingPhase by mutableStateOf(false)
+    // M6: this round's shot is submitted and the round is waiting on the
+    // other players. Simultaneous turns mean firing produces no immediate
+    // feedback - nothing flies until everyone has committed - so without
+    // this the Fire button looked like it had done nothing.
+    var shotLocked by mutableStateOf(false)
     // M6 parity: current wind (speed + direction) - it really does perturb
     // shots, and nothing showed it before. "" while there's no game yet.
     var windLabel by mutableStateOf("")
@@ -212,10 +219,29 @@ fun GameHud(
                     Text(state.weaponLabel, maxLines = 1)
                 }
                 Spacer(Modifier.width(8.dp))
-                Button(onClick = onFire, contentPadding = PaddingValues(horizontal = 16.dp)) {
-                    Icon(Icons.Filled.GpsFixed, contentDescription = null, modifier = Modifier.size(18.dp))
+                // Red once the shot is committed, back to normal when the
+                // round resolves and a new move is granted. The label
+                // changes with it - colour alone would leave anyone who
+                // can't distinguish it with no feedback at all.
+                Button(
+                    onClick = onFire,
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                    colors = if (state.shotLocked) {
+                        ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFFC62828),
+                            contentColor = Color.White,
+                        )
+                    } else {
+                        ButtonDefaults.buttonColors()
+                    },
+                ) {
+                    Icon(
+                        if (state.shotLocked) Icons.Filled.HourglassTop else Icons.Filled.GpsFixed,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
                     Spacer(Modifier.width(6.dp))
-                    Text("FIRE")
+                    Text(if (state.shotLocked) "LOCKED" else "FIRE")
                 }
                 if (state.buyingPhase) {
                     Spacer(Modifier.width(8.dp))

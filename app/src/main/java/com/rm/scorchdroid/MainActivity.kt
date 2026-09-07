@@ -250,6 +250,12 @@ class MainActivity : AppCompatActivity() {
             // while you are still nudging the sliders, both just happen.
             // Prefixed to the status rather than given its own line, so the
             // battlefield keeps the space.
+            // M6: a granted move id means it is our turn to act again, so
+            // whatever we committed last round has been played out. See
+            // GameHudState.shotLocked - the Fire button reads this.
+            val moveId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
+            if (moveId != 0) hudState.shotLocked = false
+
             val seconds = withContext(Dispatchers.Default) { NativeBridge.getPhaseSecondsRemaining() }
             hudState.statusText = if (seconds >= 0) "${seconds}s | $baseStatus" else baseStatus
             // M6: drives the contextual "done buying" button - it only
@@ -490,7 +496,10 @@ class MainActivity : AppCompatActivity() {
                 // Remember what we actually fired so "revert to last
                 // angles" can restore it (see showActionsMenu).
                 lastFiredAim = Triple(currentAngleDegrees, currentElevationDegrees, currentPowerFraction)
-                hudState.statusText = "Fired!\n${hudState.statusText}"
+                // The shot is committed but nothing flies until every player
+                // has committed too - the tick loop clears this once the
+                // server grants the next move.
+                hudState.shotLocked = true
             }
         }
     }
