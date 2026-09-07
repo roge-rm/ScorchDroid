@@ -37,6 +37,17 @@ class GameRenderer : GLSurfaceView.Renderer {
      */
     external fun nativePickTerrain(screenX: Float, screenY: Float): String
 
+    /**
+     * Development readout: "fps|drawCalls|targets" for the last complete
+     * frame. Draw calls are counted at every glDraw* site rather than
+     * estimated, because the number worth knowing - one per landscape
+     * target - is the easy one to be wrong about by an order of magnitude.
+     *
+     * Not a player-facing feature; see GameHudState.perfLabel for where to
+     * gate it before a release.
+     */
+    external fun nativeGetFrameStats(): String
+
     external fun nativeCameraDrag(dx: Float, dy: Float)
     external fun nativeCameraZoom(scaleFactor: Float)
 

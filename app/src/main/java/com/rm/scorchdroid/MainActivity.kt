@@ -290,6 +290,16 @@ class MainActivity : AppCompatActivity() {
             }
             hudState.positionSelectWeapon =
                 positionSelect.split("|").getOrNull(1).orEmpty()
+            // Development perf readout - see GameHudState.perfLabel.
+            val stats = gameRenderer.nativeGetFrameStats().split("|")
+            val fps = stats.getOrNull(0).orEmpty()
+            val calls = stats.getOrNull(1).orEmpty()
+            val targets = stats.getOrNull(2).orEmpty()
+            hudState.perfLabel = if (fps.isEmpty()) {
+                ""
+            } else {
+                "$fps fps | $calls draws | $targets targets"
+            }
             // M6: seed the aiming sliders from where the tank is actually
             // pointing, once, as soon as we have a tank - the engine gives
             // every tank a real starting turret rotation, so leaving the
