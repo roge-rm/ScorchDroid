@@ -163,6 +163,14 @@ namespace
 	float  waterAlpha = 0.8f;
 	// Shoreline foam: a baked mask of how close each cell is to the water's
 	// edge, sampled by the water shader (see buildShoreMask).
+	// W2: the displaced part of the surface. The flat skirt above still
+	// covers out to the far plane; this grid is the near water that moves.
+	GLuint waterGridVao = 0, waterGridVbo = 0;
+	int    waterGridVertexCount = 0;
+	int    waterSkirtVertexCount = 0;
+	float  waveCentreX = 0.0f, waveCentreZ = 0.0f, waveReach = 1.0f;
+	GLint  waterWaveAmpLoc = -1, waterWaveCentreLoc = -1, waterWaveReachLoc = -1;
+	GLint  waterSunDirLoc = -1;
 	GLuint waterShoreTexture = 0;
 	GLint  waterShoreLoc = -1, waterMapSizeLoc = -1;
 	constexpr int kShoreMaskSize = 256;
@@ -704,11 +712,44 @@ namespace
 	const char *kWaterVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
 		uniform mat4 uMVP;
+		uniform float uTime;
+		uniform float uWaveAmplitude;
+		uniform vec2  uWaveCentre;
+		uniform float uWaveReach;
 		out vec2 vWorld;
 		out float vViewDepth;
+		out vec3 vNormal;
+
+		// The same two waves the surface is coloured by, as a height field,
+		// so the shape and the shading cannot drift apart.
+		float waveHeight(vec2 p, float t) {
+			return sin(p.x * 0.09 + t * 0.7)
+				 + sin((p.x * 0.4 + p.y * 0.9) * 0.05 - t * 0.5);
+		}
+
 		void main() {
 			vWorld = aPosition.xz;
-			gl_Position = uMVP * vec4(aPosition, 1.0);
+
+			// Amplitude falls to nothing at the edge of the displaced grid,
+			// so it meets the flat skirt beyond it without a seam - the
+			// skirt is one big quad and could never match a moved edge.
+			float edge = distance(vWorld, uWaveCentre) / uWaveReach;
+			float amp = uWaveAmplitude * (1.0 - clamp(edge, 0.0, 1.0));
+
+			vec3 world = aPosition;
+			world.y += waveHeight(vWorld, uTime) * amp;
+
+			// Normal from the analytic slope rather than from neighbouring
+			// vertices: exact, and it costs two more evaluations instead of
+			// a bigger vertex format.
+			float e = 1.0;
+			float hx = (waveHeight(vWorld + vec2(e, 0.0), uTime)
+					  - waveHeight(vWorld - vec2(e, 0.0), uTime)) * amp;
+			float hz = (waveHeight(vWorld + vec2(0.0, e), uTime)
+					  - waveHeight(vWorld - vec2(0.0, e), uTime)) * amp;
+			vNormal = normalize(vec3(-hx, 2.0 * e, -hz));
+
+			gl_Position = uMVP * vec4(world, 1.0);
 			vViewDepth = gl_Position.w;
 		}
 	)";
@@ -717,7 +758,9 @@ namespace
 		precision mediump float;
 		in vec2 vWorld;
 		in float vViewDepth;
+		in vec3 vNormal;
 		out vec4 fragColor;
+		uniform vec3 uSunDir;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
 		uniform vec3 uDeepColor;
@@ -744,6 +787,12 @@ namespace
 			crest = mix(crest, 0.5, clamp(d / 400.0, 0.0, 1.0));
 
 			vec3 water = mix(uDeepColor, uShallowColor, clamp(crest, 0.0, 1.0));
+
+			// Sun off the wave slopes. This is what the displacement buys
+			// beyond a silhouette - flat water cannot glint.
+			vec3 n = normalize(vNormal);
+			float glint = pow(max(dot(n, normalize(uSunDir)), 0.0), 24.0);
+			water += vec3(1.0) * glint * 0.35;
 
 			// Foam along the shore. The mask is in landscape space, so v
 			// runs the other way to world Z - the same flip the ground
@@ -1411,20 +1460,82 @@ namespace
 		const float margin = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
 		const float x0 = -margin, x1 = mapWidthUnits + margin;
 		const float z0 = -margin, z1 = mapHeightUnits + margin;
-		const float quad[] = {
-			x0, waterHeight, z0,
-			x0, waterHeight, z1,
-			x1, waterHeight, z0,
-			x1, waterHeight, z0,
-			x0, waterHeight, z1,
-			x1, waterHeight, z1,
+
+		// The skirt is a *ring* around the displaced grid, not a sheet
+		// under it. Drawn as one quad underneath, the two surfaces are
+		// coplanar wherever the wave amplitude has faded to zero - they
+		// z-fight, and being translucent they also blend twice and come out
+		// too dark. Leaving a hole for the grid avoids both by construction.
+		waveCentreX = mapWidthUnits * 0.5f;
+		waveCentreZ = mapHeightUnits * 0.5f;
+		waveReach = std::max(mapWidthUnits, mapHeightUnits) * 0.5f + 400.0f;
+		const float ix0 = waveCentreX - waveReach, ix1 = waveCentreX + waveReach;
+		const float iz0 = waveCentreZ - waveReach, iz1 = waveCentreZ + waveReach;
+
+		std::vector<float> quad;
+		auto addSkirtQuad = [&](float ax, float az, float bx, float bz) {
+			const float corner[6][2] = {
+				{ ax, az }, { ax, bz }, { bx, az },
+				{ bx, az }, { ax, bz }, { bx, bz },
+			};
+			for (int i = 0; i < 6; i++) {
+				quad.push_back(corner[i][0]);
+				quad.push_back(waterHeight);
+				quad.push_back(corner[i][1]);
+			}
 		};
+		addSkirtQuad(x0, z0, x1, iz0);   // near side
+		addSkirtQuad(x0, iz1, x1, z1);   // far side
+		addSkirtQuad(x0, iz0, ix0, iz1); // left
+		addSkirtQuad(ix1, iz0, x1, iz1); // right
+		waterSkirtVertexCount = (int) (quad.size() / 3);
 
 		if (waterVao == 0) glGenVertexArrays(1, &waterVao);
 		if (waterVbo == 0) glGenBuffers(1, &waterVbo);
 		glBindVertexArray(waterVao);
 		glBindBuffer(GL_ARRAY_BUFFER, waterVbo);
-		glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, quad.size() * sizeof(float), quad.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
+		glBindVertexArray(0);
+
+		// The displaced part of the surface: a grid over the map and a
+		// margin, which is everywhere the waves can be read anyway - past
+		// that the distance fade has already flattened them.
+		//
+		// Cell size is chosen against the wave, not picked: the longer of
+		// the two has a wavelength near 125 units and the shorter near 70,
+		// so 8 units per cell puts ~9 vertices across the tighter one. Much
+		// coarser and the crests turn into facets.
+		const float cell = 8.0f;
+		const int cells = std::min((int) ((waveReach * 2.0f) / cell), 200);
+		const float step = (waveReach * 2.0f) / (float) cells;
+		const float gx0 = ix0, gz0 = iz0;
+
+		std::vector<float> grid;
+		grid.reserve((size_t) cells * cells * 6 * 3);
+		for (int gz = 0; gz < cells; gz++) {
+			for (int gx = 0; gx < cells; gx++) {
+				const float x0 = gx0 + gx * step, x1 = x0 + step;
+				const float z0 = gz0 + gz * step, z1 = z0 + step;
+				const float corner[6][2] = {
+					{ x0, z0 }, { x0, z1 }, { x1, z0 },
+					{ x1, z0 }, { x0, z1 }, { x1, z1 },
+				};
+				for (int i = 0; i < 6; i++) {
+					grid.push_back(corner[i][0]);
+					grid.push_back(waterHeight);
+					grid.push_back(corner[i][1]);
+				}
+			}
+		}
+		waterGridVertexCount = (int) (grid.size() / 3);
+
+		if (waterGridVao == 0) glGenVertexArrays(1, &waterGridVao);
+		if (waterGridVbo == 0) glGenBuffers(1, &waterGridVbo);
+		glBindVertexArray(waterGridVao);
+		glBindBuffer(GL_ARRAY_BUFFER, waterGridVbo);
+		glBufferData(GL_ARRAY_BUFFER, grid.size() * sizeof(float), grid.data(), GL_STATIC_DRAW);
 		glEnableVertexAttribArray(0);
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
 		glBindVertexArray(0);
@@ -2421,6 +2532,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterEyeLoc = glGetUniformLocation(waterProgram, "uEye");
 	waterFogColorLoc = glGetUniformLocation(waterProgram, "uFogColor");
 	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
+	waterWaveAmpLoc = glGetUniformLocation(waterProgram, "uWaveAmplitude");
+	waterWaveCentreLoc = glGetUniformLocation(waterProgram, "uWaveCentre");
+	waterWaveReachLoc = glGetUniformLocation(waterProgram, "uWaveReach");
+	waterSunDirLoc = glGetUniformLocation(waterProgram, "uSunDir");
 	waterShoreLoc = glGetUniformLocation(waterProgram, "uShore");
 	waterMapSizeLoc = glGetUniformLocation(waterProgram, "uMapSize");
 
@@ -3145,8 +3260,27 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// to look up through it from a valley floor is worth more than the
 		// culling.
 		glDisable(GL_CULL_FACE);
+		glUniform2f(waterWaveCentreLoc, waveCentreX, waveCentreZ);
+		glUniform1f(waterWaveReachLoc, waveReach);
+		glUniform3f(waterSunDirLoc,
+					skyDescription.sunDirection[0],
+					skyDescription.sunDirection[2],
+					-skyDescription.sunDirection[1]);
+
+		// The skirt first, undisplaced - it is one quad, so a wave on it
+		// would tilt the whole sea.
+		glUniform1f(waterWaveAmpLoc, 0.0f);
 		glBindVertexArray(waterVao);
-		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, waterSkirtVertexCount);
+
+		// Then the grid inside the ring, which does move. Its amplitude
+		// fades to zero at its own edge, so it meets the skirt flush.
+		if (waterGridVertexCount > 0) {
+			glUniform1f(waterWaveAmpLoc, 0.45f);
+			glBindVertexArray(waterGridVao);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, waterGridVertexCount);
+		}
+
 		glDisable(GL_BLEND);
 		glEnable(GL_CULL_FACE);
 	}
