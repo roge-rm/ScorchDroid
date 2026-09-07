@@ -50,6 +50,7 @@
 #include <landscapemap/DeformLandscape.hpp>
 #include <landscapemap/MovementMap.hpp>
 #include <TargetModelStore.h>
+#include <SkyDescription.hpp>
 #include <weapons/WeaponMoveTank.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
@@ -683,6 +684,63 @@ namespace
 		// is passed true even on the S3D_SERVER path), so lighting/physics
 		// stay consistent - it's only the rendered mesh that goes stale.
 		check(true, "deform ran without needing any client-only code");
+	}
+
+	// M6 sky: the numbers the sky shader is fed, read out of the landscape
+	// definition. Checked here because the fiddly part is reading upstream's
+	// colour map with upstream's own indexing (Hemisphere::drawColored), and
+	// getting that wrong produces a sky that is merely "a bit off" rather
+	// than obviously broken.
+	void testSkyDescription()
+	{
+		printf("\nsky description (landscape colour map, sun, fog):\n");
+
+		ScorchedContext &context = ScorchedServer::instance()->getContext();
+		ScorchDroidSky::Description sky = ScorchDroidSky::describe(context);
+
+		check(sky.valid, "the landscape's sky colour map loaded and was sampled");
+		if (!sky.valid) return;
+
+		// The sun direction is upstream's own Sun::setPosition formula, so
+		// it must at least be a unit vector.
+		const float length = sqrtf(
+			sky.sunDirection[0] * sky.sunDirection[0] +
+			sky.sunDirection[1] * sky.sunDirection[1] +
+			sky.sunDirection[2] * sky.sunDirection[2]);
+		check(fabsf(length - 1.0f) < 0.001f, "the sun direction is a unit vector");
+		check(sky.sunDirection[2] > -0.001f,
+			"the sun is at or above the horizon, not lighting the map from below");
+
+		// Every gradient step has to be a real colour in range - an
+		// out-of-range read would show up here rather than as a black sky.
+		int inRange = 0, distinct = 0;
+		for (int i = 0; i < ScorchDroidSky::kGradientSteps; i++)
+		{
+			bool ok = true;
+			for (int c = 0; c < 3; c++)
+			{
+				if (sky.gradient[i][c] < 0.0f || sky.gradient[i][c] > 1.0f) ok = false;
+			}
+			if (ok) inRange++;
+			if (i > 0 && (sky.gradient[i][0] != sky.gradient[i - 1][0] ||
+						  sky.gradient[i][1] != sky.gradient[i - 1][1] ||
+						  sky.gradient[i][2] != sky.gradient[i - 1][2]))
+			{
+				distinct++;
+			}
+		}
+		check(inRange == ScorchDroidSky::kGradientSteps,
+			"every gradient step is a colour in 0..1");
+		// A flat gradient would mean the row indexing collapsed onto one
+		// pixel - the sky would draw, in one colour, and look like the flat
+		// clear colour this replaces.
+		check(distinct > 0, "the gradient actually varies from horizon to zenith");
+
+		printf("  (horizon %.2f,%.2f,%.2f -> zenith %.2f,%.2f,%.2f)\n",
+			sky.gradient[0][0], sky.gradient[0][1], sky.gradient[0][2],
+			sky.gradient[ScorchDroidSky::kGradientSteps - 1][0],
+			sky.gradient[ScorchDroidSky::kGradientSteps - 1][1],
+			sky.gradient[ScorchDroidSky::kGradientSteps - 1][2]);
 	}
 
 	// M6 non-tank targets: trees, buildings and everything else a landscape
@@ -1466,6 +1524,7 @@ int main(int argc, char **argv)
 	testNonShotMoves();
 	testTerrainDeformation();
 	testCameraPickRay();
+	testSkyDescription();
 	testLandscapeTargets();
 	testTankMovement();
 	testRealTcpHostAndConnect();

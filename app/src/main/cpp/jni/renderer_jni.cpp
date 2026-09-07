@@ -55,6 +55,7 @@
 #include <LandscapeTextureBuilder.hpp>
 #include <MovementStore.h>
 #include <TargetModelStore.h>
+#include <SkyDescription.hpp>
 #include <DeformEventQueue.h>
 #include <EffectEventQueue.h>
 #include <TracerStore.h>
@@ -104,6 +105,12 @@ namespace
 	// mask itself is recomputed on the simulation side (see engine_jni's
 	// refreshMovementMask); this side only notices the version change and
 	// re-uploads.
+	// M6 sky.
+	GLuint skyProgram = 0, skyVao = 0, skyVbo = 0;
+	GLint  skyGradientLoc = -1, skySunDirLoc = -1, skySunColorLoc = -1, skyGlowLoc = -1;
+	bool   skyBuilt = false;
+	ScorchDroidSky::Description skyDescription;
+
 	// M6 water surface: one quad at the landscape's own water height.
 	GLuint waterProgram = 0, waterVao = 0, waterVbo = 0;
 	GLint  waterMvpLoc = -1, waterDeepLoc = -1, waterShallowLoc = -1;
@@ -443,6 +450,54 @@ namespace
 		void main() { fragColor = vec4(vColor, 1.0); }
 	)";
 
+	// M6 sky. A full-screen pass rather than a dome: the colour only ever
+	// depends on the direction the pixel looks in, so the geometry a dome
+	// would add is a way of interpolating that direction, and interpolating
+	// the four corner rays across two triangles does the same for six
+	// vertices. It also cannot be clipped, fall through at the horizon, or
+	// need the camera translating into it.
+	const char *kSkyVertexShader = R"(#version 300 es
+		layout(location = 0) in vec2 aClip;
+		layout(location = 1) in vec3 aRay;
+		out vec3 vRay;
+		void main() {
+			vRay = aRay;
+			// z = 1 puts it on the far plane; it is drawn first with depth
+			// writes off, so everything else lands in front of it.
+			gl_Position = vec4(aClip, 1.0, 1.0);
+		}
+	)";
+
+	const char *kSkyFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec3 vRay;
+		out vec4 fragColor;
+		uniform vec3 uGradient[16];
+		uniform vec3 uSunDir;
+		uniform vec3 uSunColor;
+		uniform float uHorizonGlow;
+		void main() {
+			vec3 d = normalize(vRay);
+
+			// Upstream's gradient is indexed by height above the horizon.
+			// Below it there is nothing to show but the horizon colour -
+			// the ground is drawn over that anyway, and clamping avoids a
+			// hard band when the camera dips.
+			float t = clamp(d.y, 0.0, 1.0) * 15.0;
+			int lo = int(floor(t));
+			int hi = min(lo + 1, 15);
+			vec3 sky = mix(uGradient[lo], uGradient[hi], fract(t));
+
+			// The sun itself, then its halo. Two powers rather than one so
+			// the disc stays tight while the glow spreads.
+			float toSun = max(dot(d, uSunDir), 0.0);
+			sky += uSunColor * pow(toSun, 256.0) * 2.0;
+			sky += uSunColor * pow(toSun, 12.0) * 0.35 * uHorizonGlow;
+
+			fragColor = vec4(sky, 1.0);
+		}
+	)";
+
 	// M6 water. Upstream's own water is a whole subsystem in the excluded
 	// client layer (Water/WaterMap/WaterWaves, a reflection cubemap, a foam
 	// pass and a wave shader), and none of it is reusable - but the
@@ -612,9 +667,10 @@ namespace
 			// before this rebuild would never be painted.
 			movementOverlayPainted = false;
 			paintedMovementVersion = 0;
-			// Water height and colours are per-landscape too.
+			// Water and sky are per-landscape too.
 			waterBuilt = false;
 			waterVisible = false;
+			skyBuilt = false;
 			// Any pending crater belongs to the landscape being thrown
 			// away - applying it to the new one would corrupt unrelated
 			// vertices.
@@ -750,6 +806,73 @@ namespace
 		LOGI("Ground texture built: %dx%d", ground.width, ground.height);
 	}
 
+	// M6 sky: the landscape's own sky colours, read once per landscape.
+	void buildSkyIfNeeded(ScorchedContext &ctx)
+	{
+		if (skyBuilt) return;
+		skyBuilt = true;
+		skyDescription = ScorchDroidSky::describe(ctx);
+		if (skyDescription.valid) {
+			LOGI("Sky: gradient loaded, sun towards (%.2f, %.2f, %.2f), glow %d",
+				 skyDescription.sunDirection[0], skyDescription.sunDirection[1],
+				 skyDescription.sunDirection[2], skyDescription.horizonGlow ? 1 : 0);
+		} else {
+			LOGI("Sky: no usable colour map for this landscape - keeping the flat fallback");
+		}
+	}
+
+	// Draws the sky behind everything. The four corner view rays are built
+	// from the same camera basis the terrain pick uses, so the horizon sits
+	// where the world says it does at any pitch.
+	void drawSky(float eyeFwdX, float eyeFwdY, float eyeFwdZ,
+				 float rightX, float rightY, float rightZ,
+				 float upX, float upY, float upZ,
+				 float tanHalfFov, float aspect)
+	{
+		if (!skyDescription.valid || skyProgram == 0) return;
+
+		const float sx = aspect * tanHalfFov;
+		const float sy = tanHalfFov;
+		float verts[6 * 5];
+		const float corners[6][2] = {
+			{ -1.0f, -1.0f }, { 1.0f, -1.0f }, { -1.0f, 1.0f },
+			{ -1.0f,  1.0f }, { 1.0f, -1.0f }, {  1.0f, 1.0f },
+		};
+		for (int i = 0; i < 6; i++) {
+			const float cx = corners[i][0], cy = corners[i][1];
+			verts[i * 5 + 0] = cx;
+			verts[i * 5 + 1] = cy;
+			verts[i * 5 + 2] = eyeFwdX + rightX * cx * sx + upX * cy * sy;
+			verts[i * 5 + 3] = eyeFwdY + rightY * cx * sx + upY * cy * sy;
+			verts[i * 5 + 4] = eyeFwdZ + rightZ * cx * sx + upZ * cy * sy;
+		}
+
+		glUseProgram(skyProgram);
+		glUniform3fv(skyGradientLoc, ScorchDroidSky::kGradientSteps,
+					 &skyDescription.gradient[0][0]);
+		// Landscape (x, y, height) -> render (x, height, z), like every
+		// other direction that crosses this boundary.
+		glUniform3f(skySunDirLoc,
+					skyDescription.sunDirection[0],
+					skyDescription.sunDirection[2],
+					-skyDescription.sunDirection[1]);
+		glUniform3f(skySunColorLoc, skyDescription.sunColor[0],
+					skyDescription.sunColor[1], skyDescription.sunColor[2]);
+		glUniform1f(skyGlowLoc, skyDescription.horizonGlow ? 1.0f : 0.0f);
+
+		glBindVertexArray(skyVao);
+		glBindBuffer(GL_ARRAY_BUFFER, skyVbo);
+		glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+		// No depth writes: this is a backdrop, and everything drawn after
+		// it must win the depth test whatever its distance.
+		glDepthMask(GL_FALSE);
+		glDisable(GL_CULL_FACE);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+		glEnable(GL_CULL_FACE);
+		glDepthMask(GL_TRUE);
+		glBindVertexArray(0);
+	}
+
 	// M6 water: reads the landscape's own water definition and builds the
 	// surface quad. Called each frame; does nothing after the first attempt
 	// for a given landscape (waterBuilt is cleared when one is thrown away,
@@ -792,7 +915,12 @@ namespace
 		// it doubles as the fix for the terrain patch's visible edge at low
 		// camera angles - past the shore there is now sea rather than a
 		// cliff into nothing.
-		const float margin = std::max(mapWidthUnits, mapHeightUnits) * 2.0f;
+		// Out as far as the far clip plane (see nativeOnDrawFrame). Two map
+		// widths was not enough: the surface simply stopped mid-view and
+		// read as "the sea ends there". Taken out to the far plane the edge
+		// is clipped rather than seen, which is what a sea horizon looks
+		// like.
+		const float margin = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
 		const float x0 = -margin, x1 = mapWidthUnits + margin;
 		const float z0 = -margin, z1 = mapHeightUnits + margin;
 		const float quad[] = {
@@ -1689,6 +1817,21 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainGroundTexLoc = glGetUniformLocation(terrainProgram, "uGroundTexture");
 	terrainHasTextureLoc = glGetUniformLocation(terrainProgram, "uHasTexture");
 
+	skyProgram = linkProgram(kSkyVertexShader, kSkyFragmentShader);
+	skyGradientLoc = glGetUniformLocation(skyProgram, "uGradient");
+	skySunDirLoc = glGetUniformLocation(skyProgram, "uSunDir");
+	skySunColorLoc = glGetUniformLocation(skyProgram, "uSunColor");
+	skyGlowLoc = glGetUniformLocation(skyProgram, "uHorizonGlow");
+	glGenVertexArrays(1, &skyVao);
+	glGenBuffers(1, &skyVbo);
+	glBindVertexArray(skyVao);
+	glBindBuffer(GL_ARRAY_BUFFER, skyVbo);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) 0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (2 * sizeof(float)));
+	glBindVertexArray(0);
+
 	waterProgram = linkProgram(kWaterVertexShader, kWaterFragmentShader);
 	waterMvpLoc = glGetUniformLocation(waterProgram, "uMVP");
 	waterDeepLoc = glGetUniformLocation(waterProgram, "uDeepColor");
@@ -1790,6 +1933,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	buildGroundTextureIfNeeded(*ctx);
 	// After the terrain, which is where the map size it spans comes from.
 	buildWaterIfNeeded(*ctx);
+	buildSkyIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
 	applyScorchMarks(*ctx);
 	syncMovementOverlay();
@@ -2170,6 +2314,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		g_pickCamera.tanHalfFov = tanf(kFovYRadians * 0.5f);
 		g_pickCamera.aspect = aspect;
 	}
+
+	// Sky first: it is the backdrop everything else is drawn in front of.
+	drawSky(-view.m[2], -view.m[6], -view.m[10],
+			view.m[0], view.m[4], view.m[8],
+			view.m[1], view.m[5], view.m[9],
+			tanf(kFovYRadians * 0.5f), aspect);
 
 	glUseProgram(terrainProgram);
 	glUniformMatrix4fv(terrainMvpLoc, 1, GL_FALSE, mvp.m);

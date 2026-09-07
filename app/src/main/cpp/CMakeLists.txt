@@ -141,6 +141,7 @@ add_library(scorched_common STATIC
     porting/TracerStore.cpp
     porting/MovementStore.cpp
     porting/TargetModelStore.cpp
+    porting/SkyDescription.cpp
     porting/ClientSync.cpp
     porting/ClientContext.cpp
     porting/LandscapeTextureBuilder.cpp

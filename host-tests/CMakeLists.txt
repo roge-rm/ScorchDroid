@@ -109,6 +109,7 @@ add_library(scorched_common STATIC
     ${ANDROID_PORTING_DIR}/TracerStore.cpp
     ${ANDROID_PORTING_DIR}/MovementStore.cpp
     ${ANDROID_PORTING_DIR}/TargetModelStore.cpp
+    ${ANDROID_PORTING_DIR}/SkyDescription.cpp
     ${ANDROID_PORTING_DIR}/ClientSync.cpp
     ${ANDROID_PORTING_DIR}/ClientContext.cpp
     ${ANDROID_PORTING_DIR}/LandscapeTextureBuilder.cpp
