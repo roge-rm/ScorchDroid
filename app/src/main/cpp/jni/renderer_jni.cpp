@@ -1487,6 +1487,19 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	bool haveSight = false;
 	Mat4 sightTransform = Mat4::identity();
 	for (TankInstance &inst : tankInstances) {
+		// Upstream's rule, verbatim: TargetRendererImplTank::render() opens
+		// with `if (tank_->getState().getState() != TankState::sNormal)
+		// return;`, so a tank is drawn only while it is alive and playing -
+		// not while dead, loading, spectating or buying. Its drawParticle()
+		// does the same, falling through to just an off-screen arrow and a
+		// name plate for a non-normal tank (neither of which exists here
+		// yet), so nothing else is drawn for it either.
+		//
+		// The instance is still built for a dead tank, deliberately: the
+		// follow camera reads its position, and losing that mid-round would
+		// snap the view away the moment you died.
+		if (!inst.alive) continue;
+
 		GpuModel *gpu = uploadModel(inst.model);
 		if (!gpu) {
 			auto &bucket = inst.mine ? unmodelledMine : unmodelledOther;
