@@ -1,0 +1,140 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: landscape smoke hooks
+
+Upstream's lingering smoke - Landscape::getSmoke().addSmoke() - is raised
+from three places in src/common/actions, each inside a client-only block,
+so this build simulates all three and draws none of them. Same treatment
+as patches 0006/0010/0011: an #else beside the existing split that pushes
+an event, with the drawing left to the renderer.
+
+The three are deliberately kept distinct rather than collapsed into "smoke
+at explosions", because they are not the same thing and upstream gates
+each differently:
+
+- Explosion raises smoke *only* for WeaponMuzzle, the puff a gun leaves
+  when it fires. Every other explosion raises none. Same count (its
+  ExplosionSubParts option defaults to 4, doubled), same +-2 scatter and
+  same +2 height. The option itself is a display preference this port
+  does not expose, so its default is used.
+- Napalm raises one puff per draw tick from a randomly chosen burning
+  point, rate-limited by the same counter_ the existing napalm flame
+  event already reuses, and skipped entirely when the weapon sets
+  <nosmoke>.
+- TanketMovement raises a trail as a tank drives, gated on the target
+  being a tank at all and on that tank model's own <movementsmoke> flag,
+  with its own 0.1s limiter. Both gates are kept: without them, target
+  types and tank models upstream deliberately leaves clean would smoke.
+
+TanketMovement also needs tank/TankModel.hpp directly - the client body
+reaches that type through a client-only header.
+
+No game logic changes; the pushes are all inside #ifdef S3D_SERVER or the
+#else of an existing #ifndef S3D_SERVER.
+
+diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
+index 3d94f5df..3f887050 100644
+--- a/src/common/actions/Explosion.cpp
++++ b/src/common/actions/Explosion.cpp
+@@ -98,6 +98,27 @@ void Explosion::init()
+ 		effect.b = colour[2].asFloat();
+ 		ScorchDroidEffects::push(effect);
+ 	}
++	// Muzzle smoke. Upstream raises this only for WeaponMuzzle - the puff a
++	// gun leaves when it fires, not something every explosion does - and
++	// does it right here, in the client body below (search addSmoke). Same
++	// count, same +-2 scatter and same +2 height as upstream; its count
++	// comes from the ExplosionSubParts display option, whose default of 4
++	// (doubled) is used since this port exposes no such option.
++	if (0 == strcmp(weapon_->getAccessoryTypeName(), "WeaponMuzzle"))
++	{
++		for (int a=0; a<4 * 2; a++)
++		{
++			float posXY = (RAND * 4.0f) - 2.0f;
++			float posYZ = (RAND * 4.0f) - 2.0f;
++
++			ScorchDroidEffects::EffectEvent smoke;
++			smoke.type = ScorchDroidEffects::eSmoke;
++			smoke.x = position_[0].asFloat() + posXY;
++			smoke.y = position_[1].asFloat() + posYZ;
++			smoke.z = position_[2].asFloat() + 2.0f;
++			ScorchDroidEffects::push(smoke);
++		}
++	}
+ #endif
+ #ifndef S3D_SERVER  // FIXME: whole function is client-only, use higher-level conditional compile
+ 	fixed multiplier     = fixed( ( (int)context_->getOptionsGame().getWeapScale() ) - OptionsGame::ScaleMedium );
+diff --git a/src/common/actions/Napalm.cpp b/src/common/actions/Napalm.cpp
+index 7ce1e546..d9c9589d 100644
+--- a/src/common/actions/Napalm.cpp
++++ b/src/common/actions/Napalm.cpp
+@@ -205,6 +205,17 @@ void Napalm::simulate( fixed frameTime, bool& remove )
+ 			effect.size = 1.5f;
+ 			effect.r = 1.0f; effect.g = 0.55f; effect.b = 0.1f;
+ 			ScorchDroidEffects::push(effect);
++
++			// ...and the smoke above it. Upstream's client block raises
++			// exactly one of these per draw tick, from the same randomly
++			// chosen burning point and at the ground height under it, which
++			// is what the flame event above already computed.
++			ScorchDroidEffects::EffectEvent smoke;
++			smoke.type = ScorchDroidEffects::eSmoke;
++			smoke.x = effect.x;
++			smoke.y = effect.y;
++			smoke.z = effect.z;
++			ScorchDroidEffects::push(smoke);
+ 		}
+ 	}
+ #endif
+diff --git a/src/common/actions/TanketMovement.cpp b/src/common/actions/TanketMovement.cpp
+index f2a81c23..6f56bf03 100644
+--- a/src/common/actions/TanketMovement.cpp
++++ b/src/common/actions/TanketMovement.cpp
+@@ -37,10 +37,17 @@
+ 	#include <image/ImageStore.hpp>
+ 	#include <GLEXT/GLImageModifier.hpp>
+ 	#include <sound/Sound.hpp>
++#else
++	// Android build: the movement smoke trail's visual half is client-only
++	// here, so it is raised as an event instead - see EffectEventQueue.h.
++	#include <EffectEventQueue.h>
+ #endif
+ #include <target/TargetContainer.hpp>
+ #include <tank/Tank.hpp>
+ #include <tank/TankModelContainer.hpp>
++// For getMovementSmoke() below. The client body reaches TankModel through a
++// client-only header; the Android build's own smoke hook needs it directly.
++#include <tank/TankModel.hpp>
+ #include <tanket/TanketAccessories.hpp>
+ #include <tank/TankViewPoints.hpp>
+ #include <tank/TankModelStore.hpp>
+@@ -263,6 +270,30 @@ void TanketMovement::simulationMove(fixed frameTime)
+ 						}
+ 					}
+ 				}
++#else
++				// Android build: the same trail, raised as an event. Every
++				// gate is upstream's own - tanks only, the tank model's own
++				// <movementsmoke> flag, and the same 0.1s rate limiter -
++				// because a trail that ignored them would smoke for target
++				// types and tank models upstream deliberately leaves clean.
++				if (!context_->getServerMode() &&
++					tanket->getType() == Target::TypeTank)
++				{
++					Tank *tank = (Tank *) tanket;
++					TankModel *model = tank->getModelContainer().getTankModel();
++					if (model && model->getMovementSmoke())
++					{
++						if (smokeCounter_.nextDraw(frameTime.asFloat()))
++						{
++							ScorchDroidEffects::EffectEvent smoke;
++							smoke.type = ScorchDroidEffects::eSmoke;
++							smoke.x = tanket->getLife().getFloatPosition()[0];
++							smoke.y = tanket->getLife().getFloatPosition()[1];
++							smoke.z = tanket->getLife().getFloatPosition()[2];
++							ScorchDroidEffects::push(smoke);
++						}
++					}
++				}
+ #endif // S3D_SERVER
+ 
+ 				// Move the tank one position every stepTime seconds

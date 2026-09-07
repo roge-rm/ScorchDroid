@@ -97,3 +97,25 @@ work in a new file under `porting/` rather than in the submodule.
   sites, not one: flattening is terrain destruction too - it is how tanks
   bed into the ground at round start and after moving, falling or
   teleporting.
+- `0011-android-weapon-effect-event-hook.patch` - the five weapon effects
+  whose Actions simulate correctly here but whose drawing half is
+  client-only: Explosion, Napalm, Laser, Lightning, ShieldHit. Each pushes
+  one record to `porting/EffectEventQueue.*` carrying type, position, end
+  position, size and colour; the renderer owns the look entirely.
+- `0012-android-ranging-tracer-hook.patch` - `RenderTracer`'s ranging marks,
+  left by the two Tracer weapons, recorded in `porting/TracerStore.*`.
+- `0013-android-target-model-hook.patch` - `TargetDefinition::createTarget`
+  works out a non-tank target's model, scale, brightness and rotation and
+  hands all four straight to a client renderer this build compiles out, so
+  they were computed and discarded. They are recorded in
+  `porting/TargetModelStore.*` instead, keyed by player id.
+- `0014-android-skyflash-teleport-hooks.patch` - SkyFlash (`Sky::flashSky()`)
+  and Teleport (a `TeleportRenderer` sprite), both client-only objects that
+  do not exist here, raised as events instead. Teleport raises two, at the
+  tank's old and new positions.
+- `0015-android-landscape-smoke-hooks.patch` - upstream's lingering smoke
+  (`Landscape::getSmoke().addSmoke()`), raised from three client-only sites
+  with three different gates, all of which are preserved: a gun's muzzle
+  flash (WeaponMuzzle only), a napalm fire (rate-limited, skipped on
+  `<nosmoke>`), and a tank driving (tanks only, and only when the tank
+  model sets `<movementsmoke>`).
