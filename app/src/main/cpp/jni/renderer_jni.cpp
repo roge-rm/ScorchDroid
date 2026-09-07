@@ -1567,6 +1567,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float elevationRadians;
 		bool mine;
 		bool alive;
+		// Tank::getVisible() - alive, or shopping in the buying phase.
+		// Upstream's TargetRendererImplTank::drawParticle bails on this
+		// before it draws anything at all, so a destroyed tank gets no
+		// name plate either; a tank that is visible but not sNormal (i.e.
+		// buying) gets its name but no life bar. Kept separate from
+		// `alive` because the two differ exactly during the buying phase.
+		bool visible;
 		Model *model;
 		// Name-plate data, filled here and projected to screen space once
 		// the MVP exists further down.
@@ -1620,6 +1627,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float heading = -tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
 		float elevation = tank->getShotInfo().getRotationGunYZ().asFloat() * (float) M_PI / 180.0f;
 		bool alive = (tank->getState().getState() == TankState::sNormal);
+		bool visible = tank->getVisible();
 
 		// Name plate / health bar inputs. Life is a straight fraction of
 		// max; shield is the fraction of the raised shield's own power, or
@@ -1672,7 +1680,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 
 		tankInstances.push_back({
-			x, groundY, z, heading, elevation, mine, alive, model,
+			x, groundY, z, heading, elevation, mine, alive, visible, model,
 			LangStringUtil::convertFromLang(tank->getTargetName()),
 			std::min(std::max(lifeFraction, 0.0f), 1.0f),
 			std::min(std::max(shieldFraction, 0.0f), 1.0f),
@@ -2094,6 +2102,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		std::vector<TankOverlay> overlays;
 		overlays.reserve(tankInstances.size());
 		for (TankInstance &inst : tankInstances) {
+			// Nothing at all for a tank upstream wouldn't draw. Its
+			// drawParticle starts with `if (!getVisible()) return;`, and
+			// Tank::getVisible() is `getAlive() || state == sBuying` - so a
+			// destroyed tank has no name, no life bar and no off-screen
+			// arrow, and the `!= sNormal` branch that draws a bare name is
+			// reached only by a tank that is alive but shopping.
+			//
+			// This port previously kept a dimmed plate over a destroyed
+			// tank, on the reading that upstream falls through to
+			// drawNames() for any non-normal tank. That reading missed the
+			// getVisible() guard above it, and on screen it left a player's
+			// name hanging over an empty crater.
+			if (!inst.visible) continue;
+
 			// Anchor above the tank, like upstream's own name billboard
 			// (drawNames puts it at height + 8).
 			const float wx = inst.x, wy = inst.y + 4.0f, wz = inst.z;
