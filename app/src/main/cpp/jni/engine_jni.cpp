@@ -699,6 +699,72 @@ Java_com_rm_scorchdroid_NativeBridge_getMyStatusLabel(JNIEnv *env, jobject /* th
     return env->NewStringUTF(label.c_str());
 }
 
+// M6 HUD: how long is left in the current phase. The server states time
+// themselves out internally (ServerStateBuying::totalTime_ vs BuyingTime,
+// ServerStatePlaying's shot timer) but keep those counters protected with
+// no accessor, and upstream's client learns the deadline a different way
+// again - through the timeout carried on the move messages it receives.
+//
+// Rather than patch the submodule to expose a counter, this mirrors the
+// accumulation here: the tick loop already knows the same frameTime the
+// server state machine is given, so adding it up alongside and comparing
+// against the configured duration tracks the real timer to within a tick.
+// Reset whenever the state changes, which is the only event that matters.
+static int g_lastServerState = -1;
+static unsigned int g_lastMoveId = 0;
+static fixed g_phaseElapsed(0);
+
+static void trackPhaseTime(ScorchedServer *server, fixed frameTime)
+{
+    const int state = (int) server->getServerState().getState();
+
+    // The shot clock is per *move*, not per playing-phase: ServerTurns::
+    // playMove arms a timeout of getShotTime() each time it hands a tanket
+    // a move, and the playing state spans many of them. Timing from the
+    // state change alone counted down once and then sat at zero for the
+    // rest of the round, which is what it looked like on device.
+    Tank *tank = findMyTank();
+    const unsigned int moveId = tank ? tank->getShotInfo().getMoveId() : 0;
+
+    if (state != g_lastServerState || moveId != g_lastMoveId) {
+        g_lastServerState = state;
+        g_lastMoveId = moveId;
+        g_phaseElapsed = 0;
+    } else {
+        g_phaseElapsed += frameTime;
+    }
+}
+
+// M6 HUD: seconds left in the current timed phase, or -1 where a countdown
+// would be meaningless (no game yet, joined as a client - the host owns the
+// clock there and does not send it - or a phase that ends on an event
+// rather than a deadline, like waiting for players).
+extern "C" JNIEXPORT jint JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getPhaseSecondsRemaining(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    if (g_mode != EngineMode::kHost || !ScorchedServer::serverStarted()) return -1;
+
+    ScorchedServer *server = ScorchedServer::instance();
+    int duration = 0;
+    switch (server->getServerState().getState()) {
+    case ServerState::ServerBuyingState:
+        duration = server->getOptionsGame().getBuyingTime();
+        break;
+    case ServerState::ServerPlayingState:
+        duration = server->getOptionsGame().getShotTime();
+        break;
+    default:
+        return -1;
+    }
+    // A duration of 0 means "no limit" in upstream's options, not "already
+    // expired" - see ServerStateBuying::simulate, which skips its whole
+    // timeout branch in that case.
+    if (duration <= 0) return -1;
+
+    const int remaining = duration - g_phaseElapsed.asInt();
+    return remaining > 0 ? remaining : 0;
+}
+
 static Clock tickClock;
 
 // Drives the real game simulation forward. Host mode replicates
@@ -738,6 +804,7 @@ Java_com_rm_scorchdroid_NativeBridge_tickEngine(JNIEnv *env, jobject /* this */)
     server->getNetInterface().processMessages();
     server->getSimulator().simulate();
     server->getServerState().simulate(timeDifference);
+    trackPhaseTime(server, timeDifference);
 
     // Must run after getServerState().simulate() above, not before: on the
     // very first tick, that call is what runs ServerStartupState's own

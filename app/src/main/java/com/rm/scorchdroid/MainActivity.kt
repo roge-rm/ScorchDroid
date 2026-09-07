@@ -85,7 +85,6 @@ class MainActivity : AppCompatActivity() {
         findViewById<ComposeView>(R.id.hud_compose_view).setContent {
             GameHud(
                 state = hudState,
-                onHelp = { showTutorial() },
                 onFindGames = { showFindGames() },
                 onShop = { showWeaponShop() },
                 onWeapon = { showWeaponQuickSelect() },
@@ -112,10 +111,6 @@ class MainActivity : AppCompatActivity() {
                 onSkip = { submitMoveAsync(MoveType.SKIP) },
                 onDoneBuying = { submitMoveAsync(MoveType.FINISHED_BUY) },
             )
-        }
-
-        if (!hasSeenTutorial()) {
-            showTutorial()
         }
 
         CoroutineScope(Dispatchers.Main).launch {
@@ -246,9 +241,17 @@ class MainActivity : AppCompatActivity() {
             // Falls back to the debug string before a tank of ours exists
             // yet (label is "" during connect/buying-roster setup).
             val label = withContext(Dispatchers.Default) { NativeBridge.getMyStatusLabel() }
-            hudState.statusText = label.ifEmpty {
+            val baseStatus = label.ifEmpty {
                 withContext(Dispatchers.Default) { NativeBridge.getGameStateDebugString() }
             }
+            // M6: how long is left in the current phase. Both timed phases
+            // end on a deadline the player otherwise can't see - a buying
+            // phase that closes mid-purchase, or a shot clock that expires
+            // while you are still nudging the sliders, both just happen.
+            // Prefixed to the status rather than given its own line, so the
+            // battlefield keeps the space.
+            val seconds = withContext(Dispatchers.Default) { NativeBridge.getPhaseSecondsRemaining() }
+            hudState.statusText = if (seconds >= 0) "${seconds}s | $baseStatus" else baseStatus
             // M6: drives the contextual "done buying" button - it only
             // exists during the buying phase, which is the one time it
             // does anything (see ServerPlayedMoveHandler's eFinishedBuy).
@@ -763,74 +766,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // M4 tutorial: ScorchDroid's own onboarding content. Upstream's
-    // data/tutorial.xml is entirely keyed to its GLW desktop-dialog widget
-    // tree (step conditions like "WindowVisible" naming windows/controls
-    // such as "Rules"/"Team"/"Ok" - see that file) - meaningless without
-    // rebuilding those legacy dialogs, which the architecture explicitly
-    // rules out (this port fully rewrites the UI layer - see the porting
-    // plan). So this describes the controls actually built in this file
-    // instead of trying to adapt that data.
-    private data class TutorialStep(val title: String, val message: String)
-
-    private val tutorialSteps = listOf(
-        TutorialStep(
-            "Welcome",
-            "Welcome to ScorchDroid! This is the same Scorched3D game logic as the PC version, with touch controls built for Android.",
-        ),
-        TutorialStep(
-            "Tap to fire",
-            "Tap anywhere on the battlefield to fire your tank aimed at that point.",
-        ),
-        TutorialStep(
-            "Drag to aim and set power",
-            "Press and drag like a slingshot: your tank fires in the direction opposite the drag, and further drags fire with more power.",
-        ),
-        TutorialStep(
-            "Elevation",
-            "Use the vertical slider on the left edge of the screen to set your shot's elevation angle.",
-        ),
-        TutorialStep(
-            "Shop",
-            "Tap Shop to spend your money on new weapons.",
-        ),
-        TutorialStep(
-            "Weapon",
-            "The button at the bottom shows your current weapon. Tap it to switch between weapons you already own.",
-        ),
-        TutorialStep(
-            "You're ready",
-            "That's everything you need to play. Tap the ? button any time to see this again.",
-        ),
-    )
-
-    private fun showTutorial(stepIndex: Int = 0) {
-        val step = tutorialSteps[stepIndex]
-        val isLast = stepIndex == tutorialSteps.lastIndex
-        hudState.dialog = HudDialog.TutorialStep(
-            title = "${step.title} (${stepIndex + 1}/${tutorialSteps.size})",
-            message = step.message,
-            isLast = isLast,
-            onNext = {
-                if (isLast) {
-                    markTutorialSeen()
-                    hudState.dialog = HudDialog.None
-                } else {
-                    showTutorial(stepIndex + 1)
-                }
-            },
-            onSkip = if (isLast) null else {
-                { markTutorialSeen(); hudState.dialog = HudDialog.None }
-            },
-        )
-    }
-
-    private fun hasSeenTutorial(): Boolean =
-        getPreferences(MODE_PRIVATE).getBoolean(PREF_TUTORIAL_SEEN, false)
-
-    private fun markTutorialSeen() {
-        getPreferences(MODE_PRIVATE).edit().putBoolean(PREF_TUTORIAL_SEEN, true).apply()
-    }
 
     // M5: shows "Hosting on <ip>:<port>" once startLocalGame() has bound a
     // real listening socket (see NativeBridge.isHostingOnNetwork/
@@ -976,7 +911,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
-        const val PREF_TUTORIAL_SEEN = "tutorial_seen"
 
     }
 }
