@@ -6,17 +6,28 @@
     <name>NumberOfMinPlayers</name>
     <value>2</value>
   </option>
+  <!-- M5 Phase 2: OptionsGame.cpp's own default NoMaxPlayers is 2, which
+       addHumanTank() + the single starting bot already fill on their own -
+       ServerConnectAuthHandler::processMessageInternal() rejects
+       ("Server full") any real network client trying to join once
+       getNoMaxPlayers() - getNoOfTanks() <= 0, found the hard way testing
+       a real two-emulator join. Raised well past 2 so a host still has
+       room for real LAN players, not just its own local bot-practice tank. -->
+  <option>
+    <name>NumberOfPlayers</name>
+    <value>8</value>
+  </option>
   <option>
     <name>RemoveBotsAtPlayers</name>
     <value>2</value>
   </option>
-  <!-- PlayerType1/2 default to "Human" (OptionsGame.cpp), which is why bots
-       never got auto-added by ballanceBots() until these were set to a
-       real AI name from data/globalmods/none/data/tankais.xml. -->
-  <option>
-    <name>PlayerType1</name>
-    <value>Moron</value>
-  </option>
+  <!-- M4: engine_jni.cpp's addHumanTank() adds one real (destinationId != 0)
+       "my tank" player itself, counted by
+       ServerStateEnoughPlayers::countBots() exactly like a real network
+       client would be - so only one more bot slot is needed to reach the
+       2-player total above. PlayerType1 left as "Human" (the OptionsGame.cpp
+       default) so ballanceBots() doesn't also try to add a bot into that
+       slot. -->
   <option>
     <name>PlayerType2</name>
     <value>Moron</value>
@@ -36,7 +47,7 @@
   </option>
   <option>
     <name>BuyingTime</name>
-    <value>10</value>
+    <value>30</value>
   </option>
   <option>
     <name>StartTime</name>
