@@ -125,6 +125,13 @@ namespace
 	// Built once, in the same conical shape upstream draws (stacked cones
 	// for the canopy over a trunk), and drawn per instance with its own
 	// colour and scale.
+	GLuint spriteProgram = 0, spriteVao = 0, spriteVbo = 0;
+	GLint  spriteMvpLoc = -1, spriteSamplerLoc = -1, spriteTintLoc = -1;
+	GLuint sunTexture = 0;
+	// Stars share the cloud layer's geometry and shader - same plane, same
+	// tiling - but never scroll, which is what "skytexturestatic" means.
+	GLuint starTexture = 0;
+
 	GLuint cloudProgram = 0, cloudVao = 0, cloudVbo = 0, cloudTexture = 0;
 	GLint  cloudMvpLoc = -1, cloudScrollLoc = -1, cloudTexScaleLoc = -1;
 	GLint  cloudSamplerLoc = -1, cloudTintLoc = -1, cloudOpacityLoc = -1;
@@ -140,7 +147,7 @@ namespace
 	// M6 sky.
 	GLuint skyProgram = 0, skyVao = 0, skyVbo = 0;
 	GLint  skyGradientLoc = -1, skySunDirLoc = -1, skySunColorLoc = -1, skyGlowLoc = -1;
-	GLint  skyFlashLoc = -1;
+	GLint  skyFlashLoc = -1, skySunDiscLoc = -1;
 	bool   skyBuilt = false;
 	ScorchDroidSky::Description skyDescription;
 
@@ -588,6 +595,7 @@ namespace
 		uniform vec3 uSunColor;
 		uniform float uHorizonGlow;
 		uniform float uFlash;
+		uniform float uSunDisc;
 		void main() {
 			vec3 d = normalize(vRay);
 
@@ -603,11 +611,41 @@ namespace
 			// The sun itself, then its halo. Two powers rather than one so
 			// the disc stays tight while the glow spreads.
 			float toSun = max(dot(d, uSunDir), 0.0);
-			sky += uSunColor * pow(toSun, 256.0) * 2.0;
+			// The tight disc is only drawn here when the landscape has no
+			// sun texture of its own; otherwise the sprite is the sun and
+			// this would show through it as a second, harder one.
+			sky += uSunColor * pow(toSun, 256.0) * 2.0 * uSunDisc;
 			sky += uSunColor * pow(toSun, 12.0) * 0.35 * uHorizonGlow;
 
 			// SkyFlash: lift the whole sky towards white.
 			fragColor = vec4(mix(sky, vec3(1.0), uFlash), 1.0);
+		}
+	)";
+
+	// M6: a camera-facing textured quad, for the sun and moon. The corners
+	// are built on the CPU from the view matrix's own right/up rows, which
+	// is fewer moving parts than passing the basis in and rebuilding it
+	// per vertex for a single quad.
+	const char *kSpriteVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec2 aUv;
+		uniform mat4 uMVP;
+		out vec2 vUv;
+		void main() {
+			vUv = aUv;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+		}
+	)";
+
+	const char *kSpriteFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec2 vUv;
+		out vec4 fragColor;
+		uniform sampler2D uTexture;
+		uniform vec4 uTint;
+		void main() {
+			vec4 c = texture(uTexture, vUv);
+			fragColor = vec4(c.rgb * uTint.rgb, c.a * uTint.a);
 		}
 	)";
 
@@ -861,6 +899,10 @@ namespace
 			skyBuilt = false;
 			cloudsBuilt = false;
 			cloudsVisible = false;
+			if (cloudTexture) glDeleteTextures(1, &cloudTexture);
+			if (starTexture) glDeleteTextures(1, &starTexture);
+			if (sunTexture) glDeleteTextures(1, &sunTexture);
+			cloudTexture = starTexture = sunTexture = 0;
 			// Any pending crater belongs to the landscape being thrown
 			// away - applying it to the new one would corrupt unrelated
 			// vertices.
@@ -1085,6 +1127,90 @@ namespace
 		for (int i = 0; i < 3; i++) out[i] = source[i];
 	}
 
+	// Loads a landscape image into a GL texture, with its mask as alpha.
+	// Returns 0 if the definition names nothing or the file won't load -
+	// every caller treats that as "this landscape has no such layer".
+	GLuint loadSkyTexture(const std::string &file, const std::string &mask, bool repeat)
+	{
+		if (file.empty()) return 0;
+		Image image = ImageFactory::loadImage(S3D::eModLocation, file, mask, false);
+		if (!image.getBits() || image.getWidth() <= 0) return 0;
+
+		GLuint texture = 0;
+		glGenTextures(1, &texture);
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		const GLenum format = (image.getComponents() == 4) ? GL_RGBA : GL_RGB;
+		glTexImage2D(GL_TEXTURE_2D, 0, (GLint) format,
+					 image.getWidth(), image.getHeight(), 0,
+					 format, GL_UNSIGNED_BYTE, image.getBits());
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		const GLint wrap = repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE;
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		return texture;
+	}
+
+	// M6 sun/moon: upstream draws a 60-unit billboard at the sun's position
+	// (Sun::draw), additively unless the landscape says otherwise.
+	void drawSunSprite(const Mat4 &mvp, const Mat4 &view)
+	{
+		if (sunTexture == 0 || spriteProgram == 0) return;
+
+		// The sun's absolute position, as upstream places it: map centre
+		// plus 900 units along its bearing. Being a real point rather than
+		// fixed to the eye, it shifts very slightly as the camera moves,
+		// which is upstream's behaviour too.
+		const float cx = skyDescription.sunPosition[0];
+		const float cy = skyDescription.sunPosition[2];
+		const float cz = worldZFromEngineY(skyDescription.sunPosition[1]);
+
+		const float rx = view.m[0], ry = view.m[4], rz = view.m[8];
+		const float ux = view.m[1], uy = view.m[5], uz = view.m[9];
+		const float half = 30.0f;  // upstream's 60x60
+
+		float verts[6 * 5];
+		const float corner[6][2] = {
+			{ -1, -1 }, { 1, -1 }, { -1, 1 },
+			{ -1,  1 }, { 1, -1 }, {  1, 1 },
+		};
+		for (int i = 0; i < 6; i++) {
+			const float sx = corner[i][0] * half, sy = corner[i][1] * half;
+			verts[i * 5 + 0] = cx + rx * sx + ux * sy;
+			verts[i * 5 + 1] = cy + ry * sx + uy * sy;
+			verts[i * 5 + 2] = cz + rz * sx + uz * sy;
+			verts[i * 5 + 3] = corner[i][0] * 0.5f + 0.5f;
+			verts[i * 5 + 4] = corner[i][1] * 0.5f + 0.5f;
+		}
+
+		glUseProgram(spriteProgram);
+		glUniformMatrix4fv(spriteMvpLoc, 1, GL_FALSE, mvp.m);
+		glUniform4f(spriteTintLoc, skyDescription.sunColor[0],
+					skyDescription.sunColor[1], skyDescription.sunColor[2], 1.0f);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, sunTexture);
+		glUniform1i(spriteSamplerLoc, 0);
+
+		glBindVertexArray(spriteVao);
+		glBindBuffer(GL_ARRAY_BUFFER, spriteVbo);
+		glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA,
+					skyDescription.sunBlendAdditive ? GL_ONE : GL_ONE_MINUS_SRC_ALPHA);
+		glDepthMask(GL_FALSE);
+		glDisable(GL_CULL_FACE);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
+		glEnable(GL_CULL_FACE);
+		glDepthMask(GL_TRUE);
+		glDisable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glBindVertexArray(0);
+	}
+
 	// M6 clouds: the landscape's own cloud texture on a high plane.
 	void buildCloudsIfNeeded(ScorchedContext &ctx)
 	{
@@ -1096,26 +1222,17 @@ namespace
 		if (!tex || tex->skytexture.empty()) return;
 
 		// The mask becomes the alpha channel - that is what makes the gaps
-		// between clouds transparent rather than black.
-		Image clouds = ImageFactory::loadImage(
-			S3D::eModLocation, tex->skytexture, tex->skytexturemask, false);
-		if (!clouds.getBits() || clouds.getWidth() <= 0) return;
+		// between clouds transparent rather than black. Tiled, since the
+		// plane is far wider than the texture.
+		cloudTexture = loadSkyTexture(tex->skytexture, tex->skytexturemask, true);
+		if (cloudTexture == 0) return;
 
-		if (cloudTexture == 0) glGenTextures(1, &cloudTexture);
-		glBindTexture(GL_TEXTURE_2D, cloudTexture);
-		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-		const GLenum format = (clouds.getComponents() == 4) ? GL_RGBA : GL_RGB;
-		glTexImage2D(GL_TEXTURE_2D, 0, (GLint) format,
-					 clouds.getWidth(), clouds.getHeight(), 0,
-					 format, GL_UNSIGNED_BYTE, clouds.getBits());
-		glGenerateMipmap(GL_TEXTURE_2D);
-		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		// Tiled, not clamped: the plane is far wider than the texture.
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-		glBindTexture(GL_TEXTURE_2D, 0);
+		// Stars ride the same plane. Only night landscapes define them, and
+		// upstream draws them with no mask of their own.
+		starTexture = loadSkyTexture(tex->skytexturestatic, tex->skytexturestatic, true);
+
+		// Sun or moon. Clamped, not tiled - it is one sprite.
+		sunTexture = loadSkyTexture(tex->suntexture, tex->suntexturemask, false);
 
 		// High enough to sit well above the tallest terrain and read as sky
 		// rather than as a ceiling, and wide enough that its edge is past
@@ -1142,8 +1259,10 @@ namespace
 		glBindVertexArray(0);
 
 		cloudsVisible = true;
-		LOGI("Cloud layer built from %s (%dx%d)",
-			 tex->skytexture.c_str(), clouds.getWidth(), clouds.getHeight());
+		LOGI("Sky layers: clouds from %s, stars %s, sun sprite %s",
+			 tex->skytexture.c_str(),
+			 starTexture ? tex->skytexturestatic.c_str() : "none",
+			 sunTexture ? tex->suntexture.c_str() : "none");
 	}
 
 	// Advances the cloud scroll by the real wind, the way upstream does in
@@ -1227,6 +1346,7 @@ namespace
 		glUniform1f(skyGlowLoc, skyDescription.horizonGlow ? 1.0f : 0.0f);
 		glUniform1f(skyFlashLoc,
 					std::min(1.0f, skyFlashRemaining / kSkyFlashSeconds));
+		glUniform1f(skySunDiscLoc, (sunTexture != 0) ? 0.0f : 1.0f);
 
 		glBindVertexArray(skyVao);
 		glBindBuffer(GL_ARRAY_BUFFER, skyVbo);
@@ -2253,6 +2373,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (3 * sizeof(float)));
 	glBindVertexArray(0);
 
+	spriteProgram = linkProgram(kSpriteVertexShader, kSpriteFragmentShader);
+	spriteMvpLoc = glGetUniformLocation(spriteProgram, "uMVP");
+	spriteSamplerLoc = glGetUniformLocation(spriteProgram, "uTexture");
+	spriteTintLoc = glGetUniformLocation(spriteProgram, "uTint");
+	glGenVertexArrays(1, &spriteVao);
+	glGenBuffers(1, &spriteVbo);
+	glBindVertexArray(spriteVao);
+	glBindBuffer(GL_ARRAY_BUFFER, spriteVbo);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) 0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (3 * sizeof(float)));
+	glBindVertexArray(0);
+
 	cloudProgram = linkProgram(kCloudVertexShader, kCloudFragmentShader);
 	cloudMvpLoc = glGetUniformLocation(cloudProgram, "uMVP");
 	cloudScrollLoc = glGetUniformLocation(cloudProgram, "uScroll");
@@ -2267,6 +2401,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	skySunColorLoc = glGetUniformLocation(skyProgram, "uSunColor");
 	skyGlowLoc = glGetUniformLocation(skyProgram, "uHorizonGlow");
 	skyFlashLoc = glGetUniformLocation(skyProgram, "uFlash");
+	skySunDiscLoc = glGetUniformLocation(skyProgram, "uSunDisc");
 	glGenVertexArrays(1, &skyVao);
 	glGenBuffers(1, &skyVbo);
 	glBindVertexArray(skyVao);
@@ -2827,6 +2962,33 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			view.m[0], view.m[4], view.m[8],
 			view.m[1], view.m[5], view.m[9],
 			tanf(kFovYRadians * 0.5f), aspect);
+
+	// Stars first, then the sun, then the clouds over both. Stars share the
+	// cloud plane and shader but never scroll - that is what upstream's
+	// "skytexturestatic" means - and are drawn at upstream's own 0.7 alpha.
+	if (cloudsVisible && starTexture != 0 && cloudProgram != 0) {
+		glUseProgram(cloudProgram);
+		glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, mvp.m);
+		glUniform2f(cloudScrollLoc, 0.0f, 0.0f);
+		glUniform1f(cloudTexScaleLoc, 1.0f / 700.0f);
+		glUniform3f(cloudTintLoc, 1.0f, 1.0f, 1.0f);
+		glUniform1f(cloudOpacityLoc, 0.7f);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, starTexture);
+		glUniform1i(cloudSamplerLoc, 0);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDepthMask(GL_FALSE);
+		glDisable(GL_CULL_FACE);
+		glBindVertexArray(cloudVao);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
+		glEnable(GL_CULL_FACE);
+		glDepthMask(GL_TRUE);
+		glDisable(GL_BLEND);
+		glBindVertexArray(0);
+	}
+
+	drawSunSprite(mvp, view);
 
 	// Clouds sit between the sky and everything solid. Blended, and with
 	// no depth writes, so terrain drawn afterwards always wins - the layer

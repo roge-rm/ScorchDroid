@@ -21,6 +21,7 @@ namespace ScorchDroidSky
 		if (!tex) return sky;
 
 		sky.horizonGlow = !tex->nohorizonglow;
+		sky.sunBlendAdditive = !tex->nosunblend;
 		for (int i = 0; i < 3; i++) {
 			sky.fog[i] = tex->fog[i];
 			sky.sunColor[i] = tex->suncolor[i];
