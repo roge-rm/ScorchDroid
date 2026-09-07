@@ -286,6 +286,20 @@ class MainActivity : AppCompatActivity() {
     // inverse, so the same call works in both directions.
     private fun mirrorAngle(degrees: Float): Float = ((360f - degrees) % 360f + 360f) % 360f
 
+    /**
+     * The compass dial the player sees (0 up, 90 right) converted to the
+     * engine's fire angle (counterclockwise from +Y). Every native call
+     * that takes an angle takes an *engine* angle - fireWeapon and setAim
+     * both - so going through one named function makes it obvious at each
+     * call site which convention is being handed over.
+     *
+     * This exists because it went wrong: fireWeapon mirrored and setAim did
+     * not, so the shot flew where the compass said while the turret and aim
+     * sight visibly rotated the opposite way. Both are the same boundary
+     * and must speak the same convention.
+     */
+    private fun engineAngleFromDial(dialDegrees: Float): Float = mirrorAngle(dialDegrees)
+
     // M6: applies "angleDegrees|elevationDegrees|powerFraction" from
     // NativeBridge.getMyAim() to the sliders. Returns whether it applied -
     // false while there's no tank yet, so the caller can keep trying.
@@ -457,7 +471,7 @@ class MainActivity : AppCompatActivity() {
     // converts the player-facing dial into the engine's convention without
     // changing what the slider itself displays.
     private fun fireFromSliders() {
-        val engineAngle = mirrorAngle(currentAngleDegrees)
+        val engineAngle = engineAngleFromDial(currentAngleDegrees)
         CoroutineScope(Dispatchers.Main).launch {
             val fired = withContext(Dispatchers.Default) {
                 val myTankId = NativeBridge.getMyTankId()
@@ -486,7 +500,11 @@ class MainActivity : AppCompatActivity() {
     private fun pushAimToEngine() {
         CoroutineScope(Dispatchers.Main).launch {
             withContext(Dispatchers.Default) {
-                NativeBridge.setAim(currentAngleDegrees, currentElevationDegrees, currentPowerFraction)
+                NativeBridge.setAim(
+                    engineAngleFromDial(currentAngleDegrees),
+                    currentElevationDegrees,
+                    currentPowerFraction,
+                )
             }
         }
     }
