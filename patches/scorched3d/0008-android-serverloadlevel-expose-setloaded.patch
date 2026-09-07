@@ -1,0 +1,26 @@
+diff --git a/src/server/server/ServerLoadLevel.hpp b/src/server/server/ServerLoadLevel.hpp
+index e38ae332..d2d716f8 100644
+--- a/src/server/server/ServerLoadLevel.hpp
++++ b/src/server/server/ServerLoadLevel.hpp
+@@ -34,7 +34,20 @@ public:
+ 
+ 	virtual bool processMessage( NetMessage& message, const char* messageType, NetBufferReader& reader );
+ 
+-protected:
++	// Android port: exposed (was protected) so a host process can drive a
++	// local, non-network destination (ScorchDroid's own human player, added
++	// directly via TankAddSimAction rather than a real client connection -
++	// see engine_jni.cpp's addHumanTank()) through exactly the same
++	// "destination has finished loading" transition destinationId==0
++	// already gets for free inside destinationLoadLevel() above. Every
++	// *real* destination goes through the actual ComsLoadLevelMessage/
++	// ComsLevelLoadedMessage network round-trip and never needs this
++	// directly - see the porting plan's M5 notes on why a local human tank
++	// otherwise gets stuck in TankState::sLoading forever at the start of
++	// every round (ServerStateNewGame::newGame() resets any non-sLoading
++	// tank back to sLoading and calls destinationLoadLevel() for it, which
++	// for a real, non-zero destination just sends a message no local-only
++	// destination can ever answer).
+ 	static void setLoaded( unsigned int destinationId );
+ };
+ 

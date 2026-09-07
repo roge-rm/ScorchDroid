@@ -1,0 +1,50 @@
+diff --git a/src/common/landscapemap/DeformLandscape.cpp b/src/common/landscapemap/DeformLandscape.cpp
+index 0387b8dd..eb13f56b 100644
+--- a/src/common/landscapemap/DeformLandscape.cpp
++++ b/src/common/landscapemap/DeformLandscape.cpp
+@@ -39,6 +39,13 @@
+ 	#include <landscape/DeformTextures.hpp>
+ 	#include <land/VisibilityPatchGrid.hpp>
+ 	#include <sprites/ExplosionTextures.hpp>
++#else
++	// Android build: the crater maths below runs under S3D_SERVER, but the
++	// "the ground changed shape, redraw it" notification directly above
++	// does not - so a renderer built on this configuration never hears
++	// about terrain destruction. See DeformEventQueue.h and the porting
++	// plan; same shape of hook as the audio one in patch 0006.
++	#include <DeformEventQueue.h>
+ #endif
+ 
+ class DeformLandscapeCache
+@@ -149,7 +156,15 @@ void DeformLandscape::deformLandscape(
+ 	}
+ 
+ #ifdef S3D_SERVER
+-	deformLandscapeInternal(context, pos, radius, down, deformMap, true, depthScale);
++	if (deformLandscapeInternal(context, pos, radius, down, deformMap, true, depthScale))
++	{
++		// Same radius clamp deformLandscapeInternal applies to its own
++		// loop bounds, so the reported region can never claim more than
++		// was actually touched.
++		int iradius = radius.asInt() + 1;
++		if (49 < iradius) iradius = 49;
++		ScorchDroidLandscape::pushDeform(pos[0].asInt(), pos[1].asInt(), iradius);
++	}
+ #else
+ 	bool hits = deformLandscapeInternal(context, pos, radius, down, deformMap, true, depthScale);
+ 	if ( hits && !context.getServerMode() && deformTexture )
+@@ -383,6 +398,14 @@ void DeformLandscape::flattenArea(
+ 	}
+ 
+ 	flattenAreaInternal(context, tankPos, removeObjects, size, true);
++#ifdef S3D_SERVER
++	// Flattening is terrain destruction too - it is how tanks bed into the
++	// ground at round start and after moving/falling/teleporting - and the
++	// non-server branch below notifies the renderer for exactly this
++	// reason. flattenAreaInternal reports no hit/miss, so this is
++	// unconditional; a redundant region costs one partial mesh update.
++	ScorchDroidLandscape::pushDeform(tankPos[0].asInt(), tankPos[1].asInt(), size.asInt() + 1);
++#endif
+ 	if (removeObjects)
+ 	{
+ 		// Remove any targets in this location

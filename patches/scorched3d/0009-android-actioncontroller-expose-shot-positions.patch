@@ -1,0 +1,101 @@
+diff --git a/src/common/engine/ActionController.cpp b/src/common/engine/ActionController.cpp
+index 92dfd898..ef08c6a3 100644
+--- a/src/common/engine/ActionController.cpp
++++ b/src/common/engine/ActionController.cpp
+@@ -23,6 +23,10 @@
+ #include <engine/Simulator.hpp>
+ #include <common/Logger.hpp>
+ #include <common/OptionsScorched.hpp>
++#include <actions/ShotProjectile.hpp>
++#include <weapons/Accessory.hpp>
++#include <weapons/WeaponProjectile.hpp>
++#include <actions/Explosion.hpp>
+ #include <list>
+ 
+ ActionController::ActionController() :
+@@ -195,6 +199,44 @@ void ActionController::draw()
+ 	}
+ }
+ 
++void ActionController::getShotAndExplosionPositions(
++	std::vector<FixedVector> &shotPositions,
++	std::vector<FixedVector> &explosionPositions,
++	std::vector<unsigned int> *shotPlayerIds,
++	std::vector<FixedVector> *shotVelocities,
++	std::vector<unsigned int> *shotWeaponAccessoryIds)
++{
++	for (int i = 0; i < actions_.actionCount; i++)
++	{
++		Action *action = actions_.actions[i];
++		if (action->getActionType() == "ShotProjectile")
++		{
++			ShotProjectile *shot = (ShotProjectile *) action;
++			shotPositions.push_back(shot->getPhysics().getPosition());
++			// Android port: which tank fired, so the renderer can use that
++			// tank's own projectile model (TankModel::getProjectileModelID)
++			// rather than one arbitrary model for every shot on the map.
++			if (shotPlayerIds) shotPlayerIds->push_back(shot->getPlayerId());
++			// ... and its velocity, so the renderer can point the
++			// projectile mesh along its actual flight path.
++			if (shotVelocities) shotVelocities->push_back(shot->getPhysics().getVelocity());
++			// ... and the firing weapon's accessory id. Upstream picks the
++			// projectile mesh from the weapon first and only falls back to
++			// the tank's own projectilemodel (see Accessory::getWeaponMesh),
++			// so the renderer needs the weapon to match that precedence.
++			if (shotWeaponAccessoryIds)
++			{
++				Accessory *parent = shot->getWeapon() ? shot->getWeapon()->getParent() : nullptr;
++				shotWeaponAccessoryIds->push_back(parent ? parent->getAccessoryId() : 0);
++			}
++		}
++		else if (action->getActionType() == "Explosion")
++		{
++			explosionPositions.push_back(((Explosion *) action)->getPosition());
++		}
++	}
++}
++
+ void ActionController::simulate(fixed frameTime, fixed time)
+ {
+ 	// Ensure any new actions are added
+diff --git a/src/common/engine/ActionController.hpp b/src/common/engine/ActionController.hpp
+index 1b05466b..b6ff5b28 100644
+--- a/src/common/engine/ActionController.hpp
++++ b/src/common/engine/ActionController.hpp
+@@ -22,8 +22,10 @@
+ #define __INCLUDE_ActionController_hpp_INCLUDE__
+ 
+ #include <map>
++#include <vector>
+ #include <string.h>
+ #include <actions/Action.hpp>
++#include <common/FixedVector.hpp>
+ 
+ class ScorchedContext;
+ 
+@@ -51,6 +53,25 @@ public:
+ 	void simulate( fixed frameTime, fixed time );
+ 	void draw();
+ 
++	// Android port: a from-scratch minimal renderer (see renderer_jni.cpp)
++	// needs the live position of any in-flight shot/explosion to actually
++	// show that firing did something - real upstream renders each Action
++	// via a per-instance ActionRenderer callback (see Action::
++	// setActionRender()), wired up by the excluded src/client rendering
++	// machinery (ExplosionTextures, MissileActionRenderer, ...); this pull-
++	// based query matches how the renderer already reads tank positions
++	// directly from TargetContainer each frame, rather than building that
++	// whole callback/factory system just for two dot colors.
++	// shotPlayerIds, if given, receives the firing tank's player id per
++	// shot (parallel to shotPositions), so the renderer can draw each shot
++	// with that tank's own projectile model.
++	void getShotAndExplosionPositions(
++		std::vector<FixedVector> &shotPositions,
++		std::vector<FixedVector> &explosionPositions,
++		std::vector<unsigned int> *shotPlayerIds = nullptr,
++		std::vector<FixedVector> *shotVelocities = nullptr,
++		std::vector<unsigned int> *shotWeaponAccessoryIds = nullptr );
++
+ protected:
+ 	class ActionList
+ 	{
