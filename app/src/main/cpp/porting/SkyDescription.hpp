@@ -59,6 +59,11 @@ namespace ScorchDroidSky
 		// <nohorizonglow> in the landscape definition. Night maps set it,
 		// and a glowing horizon under a moon looks wrong.
 		bool horizonGlow = true;
+
+		// <nosunblend>: upstream draws the sun additively unless the
+		// landscape says otherwise. Night maps set it, because a moon that
+		// adds light to whatever is behind it looks like a hole.
+		bool sunBlendAdditive = true;
 	};
 
 	// Returns a Description with valid=false if there is no landscape yet
