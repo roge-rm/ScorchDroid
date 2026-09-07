@@ -151,6 +151,10 @@ namespace
 	std::vector<float> terrainHeights;          // kTerrainVerts1D^2, row-major by gz
 	std::vector<float> terrainWorldX, terrainWorldZ;
 	int    terrainSrcWidth = 0, terrainSrcHeight = 0;
+	// Set when a new landscape is built, cleared once the free-fly camera
+	// has been pointed at "my tank" for that round. One-shot, so it never
+	// fights the player's own panning afterwards.
+	bool   recentreOnMyTank = false;
 	int    terrainDeformLogsLeft = 0;
 	int    terrainScorchLogsLeft = 0;
 	int    effectLogsLeft = 0;
@@ -535,6 +539,13 @@ namespace
 			g_camera.targetY = (terrainMinHeight + terrainMaxHeight) / 2.0f;
 			g_camera.orbitDistance = std::max(mapWidthUnits, mapHeightUnits) * 0.9f;
 		}
+		// The map centre above is only a placeholder until the tanks are
+		// placed: a new round should open looking at your own tank, not at
+		// whatever happens to be in the middle of the map. Positions aren't
+		// known yet here (placement runs after the landscape is generated),
+		// so this asks the draw loop to do it on the first frame that has
+		// one - see recentreOnMyTank.
+		recentreOnMyTank = true;
 
 		terrainBuilt = true;
 		builtDefinitionNumber = defnNumber;
@@ -1385,6 +1396,24 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	float eyeX, eyeY, eyeZ, targetX, targetY, targetZ;
 	{
 		std::lock_guard<std::mutex> camLock(g_cameraMutex);
+
+		// First frame of a round that has a tank to look at: point the
+		// free-fly target at it. Done even while in follow mode, so that
+		// switching to free-fly later starts from your tank rather than
+		// from wherever the previous round left the target.
+		if (recentreOnMyTank && haveMyTank) {
+			recentreOnMyTank = false;
+			g_camera.targetX = myTankX;
+			g_camera.targetY = myTankY;
+			g_camera.targetZ = myTankZ;
+			// Pull in from the whole-map framing at the same time. Centred
+			// on your tank but still zoomed out far enough to see the whole
+			// map, the tank is a couple of pixels - centred on something
+			// invisible. A third of the map across shows it, the ground it
+			// is on, and plenty of the battlefield; pinch still goes wider.
+			g_camera.orbitDistance = std::max(mapWidthUnits, mapHeightUnits) * 0.35f;
+		}
+
 		bool useFollow = g_camera.followMode && haveMyTank;
 		targetX = useFollow ? myTankX : g_camera.targetX;
 		targetY = useFollow ? myTankY : g_camera.targetY;
