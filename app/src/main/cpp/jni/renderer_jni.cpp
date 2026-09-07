@@ -53,6 +53,7 @@
 #include <Mat4.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <MovementStore.h>
+#include <TargetModelStore.h>
 #include <DeformEventQueue.h>
 #include <EffectEventQueue.h>
 #include <TracerStore.h>
@@ -1365,7 +1366,11 @@ namespace
 		MeshGroup hull, turret, gun;
 		float scale = 1.0f;         // upstream's "don't let the model be huge" rule
 		float groundOffset = 0.0f;  // lifts the model so its base sits on the ground
+		// The same lift in raw model units. Non-tank targets carry their
+		// own scale from the landscape definition rather than the tank
+		// sizing rule above, so they scale this themselves.
 		// Gun pivot relative to the turret pivot, already in our Y-up space.
+		float baseOffset = 0.0f;
 		float gunOffsetX = 0.0f, gunOffsetY = 0.0f, gunOffsetZ = 0.0f;
 	};
 	std::map<Model *, GpuModel> g_modelCache;
@@ -1504,7 +1509,8 @@ namespace
 
 		// Vertices are now relative to the turret pivot, so "sit on the
 		// ground" is measured from there too.
-		gpu.groundOffset = (tcModelZ - minV[2].asFloat()) * gpu.scale;
+		gpu.baseOffset = tcModelZ - minV[2].asFloat();
+		gpu.groundOffset = gpu.baseOffset * gpu.scale;
 
 		LOGI("Model uploaded: hull %d, turret %d, gun %d tris, scale %.3f",
 			 gpu.hull.vertexCount / 3, gpu.turret.vertexCount / 3, gpu.gun.vertexCount / 3, gpu.scale);
@@ -1729,6 +1735,74 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		bool  parachuteOpen;
 	};
 	std::vector<TankInstance> tankInstances;
+
+	// M6: everything on the landscape that isn't a tank - trees, buildings,
+	// ships. These are ordinary Targets in the same container; the model to
+	// draw each one with comes from the hook in patch 0013 (see
+	// TargetModelStore.h), because upstream computes it and hands it
+	// straight to a client renderer this build doesn't have.
+	struct TargetInstance {
+		float x, y, z;
+		float rotationRadians;
+		float scale;
+		float brightness;
+		Model *model;
+	};
+	std::vector<TargetInstance> targetInstances;
+	{
+		int skipped = 0, nonTank = 0;
+		std::map<unsigned int, Target *> &allTargets = ctx->getTargetContainer().getTargets();
+		for (auto &entry : allTargets) {
+			Target *target = entry.second;
+			// Tanks are drawn below, with their turrets and name plates.
+			if (target->getType() == Target::TypeTank) continue;
+			nonTank++;
+			// Same guard upstream's drawParticle opens with: a destroyed
+			// target is gone, not drawn dark.
+			if (!target->getVisible()) continue;
+
+			ScorchDroidTargets::Info info;
+			if (!ScorchDroidTargets::get(target->getPlayerId(), info)) { skipped++; continue; }
+
+			Model *model = loadModelSafely(info.model);
+			if (!model) { skipped++; continue; }
+
+			FixedVector &pos = target->getLife().getTargetPosition();
+			TargetInstance inst;
+			inst.x = pos[0].asFloat();
+			inst.z = worldZFromEngineY(pos[1].asFloat());
+			// Targets carry a real height (they can be dropped, and they
+			// fall when the ground under them goes), so use it rather than
+			// re-sampling the heightmap the way tanks do.
+			inst.y = pos[2].asFloat();
+			inst.rotationRadians = info.rotationDegrees * (float) M_PI / 180.0f;
+			inst.scale = info.scale;
+			// Upstream multiplies the model by this grey ("color_", used as
+			// glColor3f(c,c,c)), randomising it when the definition asks by
+			// setting -1. But TargetDefinition's constructor never
+			// initialises modelbrightness_, so a definition that doesn't
+			// name one gets 0 rather than the -1 its own randomise check
+			// looks for - which would draw the model pure black. Anything
+			// non-positive is treated as "no tint" here; drawing scenery
+			// black is never what the data meant.
+			inst.brightness = (info.brightness > 0.0f) ? info.brightness : 1.0f;
+			inst.model = model;
+			targetInstances.push_back(inst);
+		}
+
+		// One line whenever the mix changes, which in practice is once per
+		// landscape. "skipped" means the hook never recorded a model for a
+		// live target, which would be a patch problem, not a data one.
+		static size_t lastDrawn = (size_t) -1;
+		static int lastSkipped = -1;
+		if (targetInstances.size() != lastDrawn || skipped != lastSkipped) {
+			lastDrawn = targetInstances.size();
+			lastSkipped = skipped;
+			LOGI("Landscape targets: %zu drawn, %d skipped (no model), %d non-tank total",
+				 targetInstances.size(), skipped, nonTank);
+		}
+	}
+
 	std::vector<float> myTankPositions, enemyTankPositions;  // fallback markers
 	bool haveMyTank = false;
 	bool myTankAlive = false;
@@ -1987,6 +2061,33 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// simply invisible.
 	glUseProgram(meshProgram);
 	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+
+	// Landscape targets first: they are scenery, so they should be behind
+	// everything that matters, and drawing them before the tanks keeps the
+	// per-target colour uniform out of the tank loop's way.
+	for (TargetInstance &inst : targetInstances) {
+		GpuModel *gpu = uploadModel(inst.model);
+		if (!gpu) continue;
+
+		// Upstream's "color" for a target is a grey multiplier, randomised
+		// per target when the definition doesn't fix one, so a stand of
+		// identical trees doesn't look stamped out.
+		glUniform4f(meshColorLoc, inst.brightness, inst.brightness, inst.brightness, 1.0f);
+
+		// The definition's own scale, not the tank sizing rule - a building
+		// is meant to dwarf a tank - so the base lift is scaled here too.
+		Mat4 model = Mat4::multiply(
+			Mat4::translate(inst.x, inst.y + gpu->baseOffset * inst.scale, inst.z),
+			Mat4::multiply(
+				Mat4::rotateY(inst.rotationRadians),
+				Mat4::scale(inst.scale)));
+		Mat4 targetMvp = Mat4::multiply(mvp, model);
+		// A target is one undivided model: uploadModel only splits meshes
+		// named turret/gun, which nothing but a tank has, so everything
+		// lands in the hull group.
+		drawMeshGroup(gpu->hull, meshMvpLoc, targetMvp);
+	}
+
 	std::vector<float> unmodelledMine, unmodelledOther;
 	bool haveSight = false;
 	Mat4 sightTransform = Mat4::identity();

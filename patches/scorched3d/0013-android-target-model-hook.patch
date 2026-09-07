@@ -1,0 +1,43 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: publish non-tank target model info for the port's renderer
+
+TargetDefinition::createTarget works out a target's model, scale,
+brightness and rotation, then hands all four to TargetRendererImplTarget
+inside `#ifndef S3D_SERVER`. This build compiles that block out, so those
+values are computed and immediately discarded and the target keeps no
+renderer to ask - which is why trees, buildings and every other landscape
+object were simulated (shots collide with them, MovementMap paths around
+them) but invisible.
+
+Adds an `#else` beside the existing split that records them for the
+port's own renderer, and nothing else. Same shape as the audio (0006),
+deform (0010), effect (0011) and tracer (0012) hooks.
+
+diff --git a/src/common/target/TargetDefinition.cpp b/src/common/target/TargetDefinition.cpp
+index 22ba22a0..3aa5ef40 100644
+--- a/src/common/target/TargetDefinition.cpp
++++ b/src/common/target/TargetDefinition.cpp
+@@ -23,6 +23,8 @@
+ #include <common/DefinesAssert.hpp>
+ #ifndef S3D_SERVER
+ 	#include <tankgraph/TargetRendererImplTarget.hpp>
++#else
++	#include <TargetModelStore.h>
+ #endif
+ #include <tanket/Tanket.hpp>
+ #include <tanket/TanketShotInfo.hpp>
+@@ -275,6 +277,14 @@ Target *TargetDefinition::createTarget(
+ 				finalModelScale.asFloat(), finalBrightness.asFloat(), 
+ 				billboard_));
+ 	}
++#else
++	// Android port: there is no client renderer to hand these to, and the
++	// target keeps none of them, so without this everything needed to draw
++	// a tree or a building is computed here and thrown away. Recorded for
++	// the port's own renderer instead. See TargetModelStore.h.
++	ScorchDroidTargets::push(playerId, modelId_,
++		finalModelScale.asFloat(), finalBrightness.asFloat(),
++		rotation.asFloat(), billboard_);
+ #endif // #ifndef S3D_SERVER
+ 
+ 	target->getLife().setTargetPosition(position);

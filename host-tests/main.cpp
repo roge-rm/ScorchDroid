@@ -49,6 +49,7 @@
 #include <landscapemap/HeightMap.hpp>
 #include <landscapemap/DeformLandscape.hpp>
 #include <landscapemap/MovementMap.hpp>
+#include <TargetModelStore.h>
 #include <weapons/WeaponMoveTank.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
@@ -682,6 +683,91 @@ namespace
 		// is passed true even on the S3D_SERVER path), so lighting/physics
 		// stay consistent - it's only the rendered mesh that goes stale.
 		check(true, "deform ran without needing any client-only code");
+	}
+
+	// M6 non-tank targets: trees, buildings and everything else a landscape
+	// scatters about. The simulation half was always present - they are
+	// ordinary Targets in the same container - but everything needed to
+	// *draw* one is computed in TargetDefinition::createTarget and handed
+	// straight to a client renderer that this build compiles out, so it was
+	// discarded. Patch 0013 records it instead; this checks the hook fired
+	// and carries usable values, which is the part that would break under a
+	// submodule bump.
+	void testLandscapeTargets()
+	{
+		printf("\nnon-tank landscape targets (patch 0013's model hook):\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+		std::map<unsigned int, Target *> &targets =
+			server->getTargetContainer().getTargets();
+
+		int nonTankTargets = 0, withModel = 0, drawable = 0, zeroBrightness = 0;
+		for (auto &entry : targets)
+		{
+			Target *target = entry.second;
+			if (target->getType() == Target::TypeTank) continue;
+			nonTankTargets++;
+
+			ScorchDroidTargets::Info info;
+			if (!ScorchDroidTargets::get(target->getPlayerId(), info)) continue;
+			withModel++;
+
+			// The values the renderer actually uses. A zero scale would
+			// draw nothing; an invalid model id would abort in ModelStore.
+			if (info.model.modelValid() && info.scale > 0.0f) drawable++;
+			// Not a failure - see the renderer's note. TargetDefinition
+			// never initialises modelbrightness_, so any definition without
+			// an explicit <modelbrightness> arrives as 0 instead of the -1
+			// that means "randomise", and would be drawn black. The
+			// renderer treats non-positive as untinted; this counts them so
+			// the quirk is visible rather than silently worked around.
+			if (info.brightness <= 0.0f) zeroBrightness++;
+
+		}
+
+		// Where are they? The renderer draws each at its target position, so
+		// a target still at the origin would be drawn in the map corner.
+		int atOrigin = 0, onMap = 0, buried = 0;
+		GroundMaps &ground = server->getLandscapeMaps().getGroundMaps();
+		for (auto &entry : targets)
+		{
+			Target *target = entry.second;
+			if (target->getType() == Target::TypeTank) continue;
+			FixedVector &pos = target->getLife().getTargetPosition();
+			if (pos[0] == fixed(0) && pos[1] == fixed(0)) atOrigin++;
+			// The renderer draws each target at pos[2]; if that is below the
+			// ground under it, the model is buried and invisible.
+			fixed groundHere = ground.getHeight(pos[0].asInt(), pos[1].asInt());
+			if (pos[2] < groundHere - fixed(1)) buried++;
+			if (pos[0] > fixed(0) && pos[0] < fixed(ground.getLandscapeWidth()) &&
+				pos[1] > fixed(0) && pos[1] < fixed(ground.getLandscapeHeight())) onMap++;
+		}
+
+		printf("  (%d non-tank targets, %d with recorded models, %d drawable, "
+			"%d at the origin, %d within the map)\n",
+			nonTankTargets, withModel, drawable, atOrigin, onMap);
+		printf("  (%d of %d sit below the ground under them)\n", buried, nonTankTargets);
+		// Not "all": upstream's own placement leaves a handful at the origin
+		// (map-wide effects rather than scenery). The check that matters is
+		// that the overwhelming majority are really placed, since a
+		// wholesale failure here would draw the entire landscape's scenery
+		// in one corner.
+		check(onMap > nonTankTargets * 9 / 10,
+			"almost every target is placed within the landscape, not left at the origin");
+		check(buried < nonTankTargets / 20,
+			"targets sit on the ground rather than under it");
+		check(nonTankTargets > 0,
+			"the generated landscape actually placed non-tank targets");
+		if (nonTankTargets == 0) return;
+
+		check(withModel == nonTankTargets,
+			"every non-tank target had its model recorded by the hook");
+		check(drawable == withModel,
+			"each recorded target carries a valid model and a non-zero scale");
+		printf("  (%d of %d have no brightness set - drawn untinted, see the renderer)\n",
+			zeroBrightness, withModel);
+		check(ScorchDroidTargets::size() >= (size_t) withModel,
+			"the store holds at least as many entries as there are live targets");
 	}
 
 	// M6 tank movement. Upstream has no "move" action: moving is firing a
@@ -1380,6 +1466,7 @@ int main(int argc, char **argv)
 	testNonShotMoves();
 	testTerrainDeformation();
 	testCameraPickRay();
+	testLandscapeTargets();
 	testTankMovement();
 	testRealTcpHostAndConnect();
 	testClientJoin();
