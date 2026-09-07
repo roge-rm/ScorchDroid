@@ -150,12 +150,50 @@ namespace
 	float  terrainMinHeight = 0.0f, terrainMaxHeight = 1.0f;
 	float  mapWidthUnits = 1.0f, mapHeightUnits = 1.0f;
 
+	// Landscape (x, y, height) -> render (x, height, z), the single place
+	// that mapping is defined.
+	//
+	// World Z runs *opposite* to landscape y. Mapping y straight onto Z
+	// would swap two axes without negating either, which is a reflection
+	// (determinant -1): the whole scene would be drawn as a mirror image of
+	// the world the engine is simulating, every rotation about "up" would
+	// come out backwards, and triangle winding would invert. It was built
+	// that way at first, and the mirror was paid for twice - a negated
+	// turret heading and a negated gun elevation, each "fixed" by
+	// measurement without the cause being understood.
+	//
+	// Subtracting from the map height rather than plain negation keeps the
+	// world in the same 0..mapSize box it was always in, so the camera
+	// target, its pan clamps and the pick bounds all keep working
+	// unchanged. Landscape y = 0 is at the far side of the world (world Z =
+	// mapHeight) and landscape y = mapHeight is nearest the origin.
+	inline float worldZFromEngineY(float engineY) { return mapHeightUnits - engineY; }
+	inline float engineYFromWorldZ(float worldZ) { return mapHeightUnits - worldZ; }
+
 	// M6 terrain destruction: the sampled grid is kept around after the
 	// initial build so a crater can re-sample and re-upload just the
 	// vertices it touched (see applyTerrainDeformations) instead of
 	// rebuilding the whole mesh. kGrid x kGrid quads => (kGrid+1)^2 verts.
 	constexpr int kGrid = 96;
 	constexpr int kTerrainVerts1D = kGrid + 1;
+
+	// Which heightmap cell a mesh grid vertex samples. The rows run
+	// backwards for the same reason worldZFromEngineY subtracts: grid row 0
+	// sits at world Z = 0, which is landscape y = mapHeight.
+	inline int heightMapRowForGridZ(int gz, int mapH) {
+		return std::min(std::max(mapH - gz * mapH / kGrid, 0), mapH - 1);
+	}
+	inline int heightMapColForGridX(int gx, int mapW) {
+		return std::min(std::max(gx * mapW / kGrid, 0), mapW - 1);
+	}
+	// ...and back, for turning a deformed heightmap region into the grid
+	// rows that need re-sampling.
+	inline int gridZForHeightMapRow(int row, int mapH) {
+		return (mapH > 0) ? ((mapH - row) * kGrid / mapH) : 0;
+	}
+	inline int gridXForHeightMapCol(int col, int mapW) {
+		return (mapW > 0) ? (col * kGrid / mapW) : 0;
+	}
 	constexpr int kTerrainFloatsPerVertex = 8;  // pos(3) + normal(3) + uv(2)
 	std::vector<float> terrainHeights;          // kTerrainVerts1D^2, row-major by gz
 	std::vector<float> terrainWorldX, terrainWorldZ;
@@ -476,7 +514,11 @@ namespace
 		// generated per-landscape at map resolution, not tiled here
 		// (LandscapeTextureBuilder already tiles its sources).
 		out[6] = (float) gx / (float) kGrid;
-		out[7] = (float) gz / (float) kGrid;
+		// V runs backwards for the same reason the heightmap rows do: the
+		// ground texture is generated in landscape orientation (row index =
+		// landscape y - see LandscapeTextureBuilder, and the scorch marks
+		// painted into it), while world Z runs the other way.
+		out[7] = 1.0f - (float) gz / (float) kGrid;
 	}
 
 	// Builds the real terrain mesh - a regular grid sampled from the real
@@ -520,6 +562,10 @@ namespace
 		const int verts1D = kTerrainVerts1D;
 		terrainSrcWidth = w;
 		terrainSrcHeight = h;
+		// Set before anything below converts a landscape coordinate -
+		// worldZFromEngineY reads mapHeightUnits.
+		mapWidthUnits = (float) w;
+		mapHeightUnits = (float) h;
 		terrainHeights.assign(verts1D * verts1D, 0.0f);
 		terrainWorldX.assign(verts1D, 0.0f);
 		terrainWorldZ.assign(verts1D, 0.0f);
@@ -530,9 +576,9 @@ namespace
 			terrainWorldZ[i] = (float) i / (float) kGrid * (float) h;
 		}
 		for (int gz = 0; gz < verts1D; gz++) {
-			int sy = std::min(gz * h / kGrid, h - 1);
+			int sy = heightMapRowForGridZ(gz, h);
 			for (int gx = 0; gx < verts1D; gx++) {
-				int sx = std::min(gx * w / kGrid, w - 1);
+				int sx = heightMapColForGridX(gx, w);
 				float height = heightMap.getHeight(sx, sy).asFloat();
 				terrainHeights[gz * verts1D + gx] = height;
 				terrainMinHeight = std::min(terrainMinHeight, height);
@@ -579,8 +625,6 @@ namespace
 		glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
 		glBindVertexArray(0);
 
-		mapWidthUnits = (float) w;
-		mapHeightUnits = (float) h;
 		{
 			std::lock_guard<std::mutex> camLock(g_cameraMutex);
 			g_camera.targetX = mapWidthUnits / 2.0f;
@@ -661,20 +705,24 @@ namespace
 		// central difference over its neighbours, so vertices just outside
 		// the crater still change, and integer division either way loses up
 		// to a cell.
+		//
+		// The row range flips end for end on the way across: grid rows run
+		// opposite to landscape y (see worldZFromEngineY), so the dirty
+		// region's *max* y is its lowest grid row.
 		const int last = kTerrainVerts1D - 1;
-		int gx0 = std::max((minX * kGrid) / w - 2, 0);
-		int gx1 = std::min((maxX * kGrid) / w + 2, last);
-		int gz0 = std::max((minY * kGrid) / h - 2, 0);
-		int gz1 = std::min((maxY * kGrid) / h + 2, last);
+		int gx0 = std::max(gridXForHeightMapCol(minX, w) - 2, 0);
+		int gx1 = std::min(gridXForHeightMapCol(maxX, w) + 2, last);
+		int gz0 = std::max(gridZForHeightMapRow(maxY, h) - 2, 0);
+		int gz1 = std::min(gridZForHeightMapRow(minY, h) + 2, last);
 		if (gx0 > gx1 || gz0 > gz1) return;  // entirely off-map
 
 		// Re-sample heights first (over a further 1-vertex margin, since
 		// writeTerrainVertex reads its neighbours' heights), then rebuild
 		// vertices - doing both in one pass would use stale neighbours.
 		for (int gz = std::max(gz0 - 1, 0); gz <= std::min(gz1 + 1, last); gz++) {
-			int sy = std::min(gz * h / kGrid, h - 1);
+			int sy = heightMapRowForGridZ(gz, h);
 			for (int gx = std::max(gx0 - 1, 0); gx <= std::min(gx1 + 1, last); gx++) {
-				int sx = std::min(gx * w / kGrid, w - 1);
+				int sx = heightMapColForGridX(gx, w);
 				float height = heightMap.getHeight(sx, sy).asFloat();
 				terrainHeights[gz * kTerrainVerts1D + gx] = height;
 				// The shader colours by height ratio, so let the range grow
@@ -896,8 +944,10 @@ namespace
 		}
 		for (size_t i = 0; i < events.size(); i++) {
 			const ScorchDroidEffects::EffectEvent &event = events[i];
-			const float x = event.x, y = event.z, z = event.y;  // engine -> render
-			const float endX = event.endX, endY = event.endZ, endZ = event.endY;
+			// engine (x, y, height) -> render (x, height, z)
+			const float x = event.x, y = event.z, z = worldZFromEngineY(event.y);
+			const float endX = event.endX, endY = event.endZ,
+						endZ = worldZFromEngineY(event.endY);
 
 			switch (event.type) {
 			case ScorchDroidEffects::eExplosion: {
@@ -1116,7 +1166,7 @@ namespace
 		if (w <= 0 || h <= 0) return 0.0f;
 
 		int sx = std::min(std::max((int) worldX, 0), w - 1);
-		int sy = std::min(std::max((int) worldZ, 0), h - 1);
+		int sy = std::min(std::max((int) engineYFromWorldZ(worldZ), 0), h - 1);
 		return heightMap.getHeight(sx, sy).asFloat();
 	}
 
@@ -1204,8 +1254,8 @@ namespace
 			if (color < 0.0f) color = 0.0f;
 			for (float radius : { 2.0f, 10.0f }) {
 				verts.push_back(side * 0.03f * color);
-				verts.push_back(radius * cosf(dx));   // upstream z -> our y
-				verts.push_back(radius * sinf(dx));   // upstream y -> our z
+				verts.push_back(radius * cosf(dx));    // upstream z -> our y
+				verts.push_back(-radius * sinf(dx));   // upstream y -> our -z
 				verts.push_back(1.0f * color);
 				verts.push_back(0.5f * color);
 				verts.push_back(0.5f * color);
@@ -1264,23 +1314,30 @@ namespace
 		return ModelStore::instance()->loadModel(id);
 	}
 
-	// Models are Z-up (upstream's world convention) while our renderer is
-	// Y-up, so vertices are remapped (x, y, z) -> (x, z, y) once here rather
-	// than fought with a transform at every draw.
+	// Models are Z-up with +y forward (upstream's world convention, the same
+	// one the landscape uses) while our renderer is Y-up, so vertices are
+	// remapped (x, y, z) -> (x, z, -y) once here rather than fought with a
+	// transform at every draw. The negation is the same one
+	// worldZFromEngineY carries and for the same reason: without it the
+	// remap is a reflection, and every model would be drawn mirrored, wound
+	// backwards for face culling, and turned the wrong way by rotateY.
+	//
+	// The pivot offsets are subtracted in *model* space, before the remap,
+	// so they stay in the model's own axes - hence the parameter names.
 	void uploadMeshGroup(MeshGroup &group, const std::vector<Mesh *> &meshes,
-						 float offX, float offY, float offZ)
+						 float offModelX, float offModelZ, float offModelY)
 	{
 		std::vector<float> verts;
 		for (Mesh *mesh : meshes) {
 			for (Face *face : mesh->getFaces()) {
 				for (int i = 0; i < 3; i++) {
 					Vertex *v = mesh->getVertexes()[face->v[i]];
-					verts.push_back(v->position[0].asFloat() - offX);
-					verts.push_back(v->position[2].asFloat() - offY);
-					verts.push_back(v->position[1].asFloat() - offZ);
+					verts.push_back(v->position[0].asFloat() - offModelX);
+					verts.push_back(v->position[2].asFloat() - offModelZ);
+					verts.push_back(-(v->position[1].asFloat() - offModelY));
 					verts.push_back(face->normal[i][0].asFloat());
 					verts.push_back(face->normal[i][2].asFloat());
-					verts.push_back(face->normal[i][1].asFloat());
+					verts.push_back(-face->normal[i][1].asFloat());
 				}
 			}
 		}
@@ -1355,17 +1412,24 @@ namespace
 
 		// Hull and turret sit on the turret pivot; the gun additionally
 		// sits on its own pivot so it elevates about the right point.
+		// Pivots stay in model axes for uploadMeshGroup, which subtracts
+		// them before the remap; the gun offset is *also* used as a world
+		// translate at draw time, so that copy carries the remap's negated
+		// forward axis.
 		float tcx = turretCenter[0].asFloat();
-		float tcy = turretCenter[2].asFloat();  // model Z -> our Y
-		float tcz = turretCenter[1].asFloat();
-		gpu.gunOffsetX = gunOffset[0].asFloat();
-		gpu.gunOffsetY = gunOffset[2].asFloat();
-		gpu.gunOffsetZ = gunOffset[1].asFloat();
+		float tcModelZ = turretCenter[2].asFloat();
+		float tcModelY = turretCenter[1].asFloat();
+		float gunModelX = gunOffset[0].asFloat();
+		float gunModelZ = gunOffset[2].asFloat();
+		float gunModelY = gunOffset[1].asFloat();
+		gpu.gunOffsetX = gunModelX;
+		gpu.gunOffsetY = gunModelZ;
+		gpu.gunOffsetZ = -gunModelY;
 
-		uploadMeshGroup(gpu.hull, hullMeshes, tcx, tcy, tcz);
-		uploadMeshGroup(gpu.turret, turretMeshes, tcx, tcy, tcz);
+		uploadMeshGroup(gpu.hull, hullMeshes, tcx, tcModelZ, tcModelY);
+		uploadMeshGroup(gpu.turret, turretMeshes, tcx, tcModelZ, tcModelY);
 		uploadMeshGroup(gpu.gun, gunMeshes,
-						tcx + gpu.gunOffsetX, tcy + gpu.gunOffsetY, tcz + gpu.gunOffsetZ);
+						tcx + gunModelX, tcModelZ + gunModelZ, tcModelY + gunModelY);
 
 		if (gpu.hull.vertexCount == 0 && gpu.turret.vertexCount == 0 && gpu.gun.vertexCount == 0) {
 			return nullptr;
@@ -1373,7 +1437,7 @@ namespace
 
 		// Vertices are now relative to the turret pivot, so "sit on the
 		// ground" is measured from there too.
-		gpu.groundOffset = (tcy - minV[2].asFloat()) * gpu.scale;
+		gpu.groundOffset = (tcModelZ - minV[2].asFloat()) * gpu.scale;
 
 		LOGI("Model uploaded: hull %d, turret %d, gun %d tris, scale %.3f",
 			 gpu.hull.vertexCount / 3, gpu.turret.vertexCount / 3, gpu.gun.vertexCount / 3, gpu.scale);
@@ -1602,29 +1666,30 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	for (auto &entry : tanks) {
 		Tank *tank = entry.second;
 		FixedVector &pos = tank->getLife().getTargetPosition();
-		float x = pos[0].asFloat(), z = pos[1].asFloat();
-		float groundY = heightAt(heightMap, mapW, mapH, x, z);
+		// heightAt samples the heightmap, so it wants landscape y; the
+		// instance carries world Z.
+		float x = pos[0].asFloat(), engineY = pos[1].asFloat();
+		float z = worldZFromEngineY(engineY);
+		float groundY = heightAt(heightMap, mapW, mapH, x, engineY);
 		bool mine = (tank->getDestinationId() == myDestinationId);
 
 		Model *model = nullptr;
 		TankModel *tankModel = tank->getModelContainer().getTankModel();
 		if (tankModel) model = loadModelSafely(tankModel->getTankModelID());
 
-		// The turret angle is the engine's own bearing (counterclockwise
-		// from world +Y - see engine_jni.cpp's handleTap comment), and our
-		// world maps landscape (x,y) onto (x,z), so it converts straight
-		// into a rotation about the world up axis.
-		// Negated. TankLib::getVelocityVector fires along
-		// (-sin(xy), cos(xy)), but rotateY(+xy) turns the model's forward
-		// axis to (+sin(xy), cos(xy)) - mirrored. So the drawn barrel, the
-		// aim sight and the shot disagreed: measured on device, a dial of
-		// 94 degrees put the crater 1.3 units *east* of the tank (correct)
-		// while the barrel pointed west.
+		// The turret angle is the engine's own bearing, and it goes into
+		// rotateY as-is. TankLib::getVelocityVector fires along
+		// (-sin(xy), cos(xy)) in landscape axes; the model's forward axis
+		// is landscape +y, which the upload maps to world -Z, and
+		// rotateY(xy) turns that to (-sin(xy), 0, -cos(xy)) - the same
+		// direction once world Z is read back through engineYFromWorldZ.
 		//
-		// Negating here rather than at each use fixes the turret, the gun
-		// and the sight together, since all three are built from this one
-		// value.
-		float heading = -tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
+		// This was negated for a long time, along with the gun's elevation
+		// below, because the landscape-to-world map was a reflection and
+		// reversed both. Both negations went when the map was corrected;
+		// re-adding one here would put the barrel back out of step with the
+		// shot.
+		float heading = tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
 		float elevation = tank->getShotInfo().getRotationGunYZ().asFloat() * (float) M_PI / 180.0f;
 		bool alive = (tank->getState().getState() == TankState::sNormal);
 		bool visible = tank->getVisible();
@@ -1664,7 +1729,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					shieldHalf = roundShield->getHalfShield();
 				} else {
 					FixedVector &size = ((ShieldSquare *) shieldAction)->getSize();
-					// Landscape (x, y, height) -> render (x, height, z).
+					// Half-extents, not a position: the axes swap the same
+					// way but the sign the position map carries doesn't
+					// matter for a symmetric box.
 					shieldX = size[0].asFloat();
 					shieldY = size[2].asFloat();
 					shieldZ = size[1].asFloat();
@@ -1862,10 +1929,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			turret,
 			Mat4::multiply(
 				Mat4::translate(gpu->gunOffsetX, gpu->gunOffsetY, gpu->gunOffsetZ),
-				// Negated: vertices are remapped Z-up -> Y-up at upload, so
-				// "forward" and "up" swap axes and a positive rotation about
-				// X tips the barrel *down* rather than elevating it.
-				Mat4::rotateX(-inst.elevationRadians)));
+				// Not negated: the barrel points along world -Z after the
+				// upload's remap, and rotateX(+e) lifts -Z towards +Y.
+				Mat4::rotateX(inst.elevationRadians)));
 		drawMeshGroup(gpu->gun, meshMvpLoc, Mat4::multiply(mvp, gun));
 
 		// Upstream draws the sight on the player's own tank while it's
@@ -1882,7 +1948,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
 				Mat4::multiply(
 					Mat4::rotateY(inst.headingRadians),
-					Mat4::rotateX(-inst.elevationRadians)));
+					Mat4::rotateX(inst.elevationRadians)));
 		}
 	}
 
@@ -1916,7 +1982,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	glUniform4f(meshColorLoc, 0.95f, 0.9f, 0.4f, 1.0f);
 	for (size_t i = 0; i < shotPositionsRaw.size(); i++) {
 		FixedVector &p = shotPositionsRaw[i];
-		float wx = p[0].asFloat(), wy = p[2].asFloat(), wz = p[1].asFloat();
+		float wx = p[0].asFloat(), wy = p[2].asFloat(), wz = worldZFromEngineY(p[1].asFloat());
 
 		// Upstream's precedence: the weapon's own model first, falling back
 		// to the firing tank's projectilemodel (see Accessory::getWeaponMesh).
@@ -1953,10 +2019,16 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			unmodelledShots.push_back(wx); unmodelledShots.push_back(wy); unmodelledShots.push_back(wz);
 			continue;
 		}
-		// Point the mesh along its actual flight path, using upstream's own
-		// direction-to-angles math (MissileMesh::draw): a bearing about the
-		// up axis, then a pitch about X. Velocity is in the engine's Z-up
-		// space, so the components are read in that order here.
+		// Point the mesh along its actual flight path: a bearing about the
+		// up axis, then a pitch about X, like upstream's MissileMesh::draw.
+		// Velocity is an engine-space (x, y, height) direction.
+		//
+		// Re-derived for the corrected landscape-to-world map rather than
+		// carried over: the mesh's forward axis is world -Z after the
+		// upload's remap, so rotateY(a) * rotateX(b) sends it to
+		// (-cos b * sin a, sin b, -cos b * cos a). Matching that to the
+		// world velocity (vx, vz, -vy) gives b = asin(vz) and
+		// a = atan2(-vx, vy).
 		Mat4 orientation = Mat4::identity();
 		if (i < shotVelocities.size()) {
 			FixedVector &vel = shotVelocities[i];
@@ -1964,8 +2036,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			float len = sqrtf(vx * vx + vy * vy + vz * vz);
 			if (len > 0.0001f) {
 				vx /= len; vy /= len; vz /= len;
-				float angXY = (float) M_PI - atan2f(vx, vy);
-				float angYZ = acosf(std::min(1.0f, std::max(-1.0f, vz)));
+				float angXY = atan2f(-vx, vy);
+				float angYZ = asinf(std::min(1.0f, std::max(-1.0f, vz)));
 				orientation = Mat4::multiply(Mat4::rotateY(angXY), Mat4::rotateX(angYZ));
 			}
 		}
@@ -1981,7 +2053,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	for (FixedVector &p : explosionPositionsRaw) {
 		explosionPositions.push_back(p[0].asFloat());
 		explosionPositions.push_back(p[2].asFloat());
-		explosionPositions.push_back(p[1].asFloat());
+		explosionPositions.push_back(worldZFromEngineY(p[1].asFloat()));
 	}
 	glUseProgram(pointProgram);
 	drawPoints(mvp, unmodelledShots, 14.0f, 1.0f, 1.0f, 0.2f);
@@ -2052,7 +2124,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				for (size_t i = 0; i < endPoints.size(); i++) {
 					// Upstream's marker is a 0.5-radius sphere.
 					Mat4 model = Mat4::multiply(
-						Mat4::translate(endPoints[i].x, endPoints[i].z, endPoints[i].y),
+						Mat4::translate(endPoints[i].x, endPoints[i].z,
+										worldZFromEngineY(endPoints[i].y)),
 						Mat4::scale(0.5f));
 					glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
 					glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
@@ -2068,9 +2141,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					for (size_t i = 0; i + 1 < path.size(); i++) {
 						const ScorchDroidTracer::Point &a = path[i];
 						const ScorchDroidTracer::Point &b = path[i + 1];
-						line.push_back(a.x); line.push_back(a.z); line.push_back(a.y);
+						line.push_back(a.x); line.push_back(a.z);
+						line.push_back(worldZFromEngineY(a.y));
 						line.push_back(myColorR); line.push_back(myColorG); line.push_back(myColorB);
-						line.push_back(b.x); line.push_back(b.z); line.push_back(b.y);
+						line.push_back(b.x); line.push_back(b.z);
+						line.push_back(worldZFromEngineY(b.y));
 						line.push_back(myColorR); line.push_back(myColorG); line.push_back(myColorB);
 					}
 				}
@@ -2216,8 +2291,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativePickTerrain(JNIEnv *env, jobject, jfl
 				return env->NewStringUTF("");
 			}
 			char buffer[64];
-			// Render (x, z) is landscape (x, y).
-			snprintf(buffer, sizeof(buffer), "%.2f|%.2f", hitX, hitZ);
+			snprintf(buffer, sizeof(buffer), "%.2f|%.2f",
+					 hitX, engineYFromWorldZ(hitZ));
 			return env->NewStringUTF(buffer);
 		}
 		wasAbove = above;
