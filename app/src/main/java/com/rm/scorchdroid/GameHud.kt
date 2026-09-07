@@ -27,7 +27,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.GpsFixed
-import androidx.compose.material.icons.filled.HelpOutline
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
@@ -116,7 +115,6 @@ class GameHudState {
 @Composable
 fun GameHud(
     state: GameHudState,
-    onHelp: () -> Unit,
     onFindGames: () -> Unit,
     onShop: () -> Unit,
     onWeapon: () -> Unit,
@@ -159,16 +157,23 @@ fun GameHud(
                 .windowInsetsPadding(WindowInsets.displayCutout)
                 .padding(12.dp),
         ) {
-            // The camera icon carries its own state (globe = free-fly over
-            // the whole map, focus reticle = locked to your tank), so it
-            // needs no "Cam: Free"/"Cam: Follow" caption next to it.
+            HudIconButton(Icons.Filled.Search, "Find LAN games", onFindGames)
+            // Outermost, in the corner: the camera toggle is the one control
+            // here reached mid-aim, so it gets the position the thumb finds
+            // without looking. The icon carries its own state (globe =
+            // free-fly over the whole map, focus reticle = locked to your
+            // tank), so it needs no caption.
+            //
+            // The tutorial button that used to sit here is gone: its content
+            // described the drag-to-fire gesture and the old plain-view
+            // controls, none of which exist any more, so it was actively
+            // misleading. Worth rewriting once the controls settle rather
+            // than keeping a stale one on screen.
             HudIconButton(
                 icon = if (state.cameraFollow) Icons.Filled.CenterFocusStrong else Icons.Filled.Public,
                 description = if (state.cameraFollow) "Camera: following your tank" else "Camera: free-fly",
                 onClick = onToggleCamera,
             )
-            HudIconButton(Icons.Filled.Search, "Find LAN games", onFindGames)
-            HudIconButton(Icons.Filled.HelpOutline, "How to play", onHelp)
         }
 
         // Everything else lives in a stacked strip along the bottom edge.
