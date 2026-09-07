@@ -1,23 +1,70 @@
-// M2 vertical slice: a from-scratch, minimal GLES3 renderer (top-down 2D
-// view, not a full 3D camera - out of scope for M2, see the porting plan)
-// that reads live state directly from the running ScorchedServer instance:
-// the real heightmap (as a luminance texture) and real tank positions, both
-// produced by completely unmodified upstream game logic. No upstream
-// rendering code (GLW/GLEXT) is reused - this is new code, per the
-// architecture decision to rewrite the client/rendering layer entirely.
+// M6: a real 3D GLES3 renderer - terrain mesh (built from the real
+// heightmap, with per-vertex normals and basic directional lighting) plus
+// an orbit/free-fly camera, replacing the M2/M5-era flat top-down 2D view
+// (a deliberate, explicitly-scoped-down stand-in used to validate the
+// NDK-reuse architecture early - see the porting plan's M6 entry for why
+// a real 3D presentation matters, especially once mod content (M7) needs
+// to actually be visible). No upstream rendering code (GLW/GLEXT) is
+// reused here either, same as the file it replaces - this is new code,
+// per the architecture decision to rewrite the client/rendering layer
+// entirely. Reads live state directly from whichever ScorchedContext this
+// process is driving - ScorchedServer if hosting, or a ClientContext if
+// joined as a client (see EngineState.hpp/engine_jni.cpp's EngineMode).
+//
+// Camera: this slice ships the orbit/free-fly camera only (the default per
+// the user's camera-style decision - see the porting plan). Third-person-
+// follow and a host-enforced camera-mode option are follow-up work, not
+// done here. Touch-to-fire-at-a-point (the old handleTap() aiming path)
+// doesn't carry over as-is - a screen tap no longer has an unambiguous
+// landscape-point meaning under a perspective camera without ray-casting
+// against the terrain mesh (not done in this slice) - so the battlefield
+// touch gesture now drives the camera (drag to orbit, pinch to zoom)
+// instead. Firing is reliably handled by the angle/elevation/power sliders
+// + Fire button (see GameHud.kt/MainActivity.kt), which don't depend on
+// screen-to-world mapping at all.
 #include <jni.h>
 #include <GLES3/gl3.h>
 #include <android/log.h>
 #include <vector>
 #include <mutex>
+#include <algorithm>
+#include <cmath>
 
-#include <server/ScorchedServer.hpp>
+#include <engine/ScorchedContext.hpp>
 #include <target/TargetContainer.hpp>
 #include <landscapemap/LandscapeMaps.hpp>
 #include <landscapemap/GroundMaps.hpp>
 #include <landscapemap/HeightMap.hpp>
+#include <landscapedef/LandscapeDefinitionCache.hpp>
+#include <landscapedef/LandscapeDefinition.hpp>
 #include <target/TargetLife.hpp>
 #include <tank/Tank.hpp>
+#include <tank/TankState.hpp>
+#include <engine/ActionController.hpp>
+#include <common/FixedVector.hpp>
+#include <EngineState.hpp>
+#include <Mat4.hpp>
+#include <LandscapeTextureBuilder.hpp>
+#include <DeformEventQueue.h>
+// M6: real .ase tank/projectile models. The whole 3dsparse parser plus
+// ModelStore are in src/common, so the actual model data is reusable -
+// only the rendering of it is ours to write.
+#include <3dsparse/ModelStore.hpp>
+#include <3dsparse/Model.hpp>
+#include <3dsparse/Mesh.hpp>
+#include <3dsparse/Face.hpp>
+#include <3dsparse/Vertex.hpp>
+#include <common/ModelID.hpp>
+#include <tank/TankModelContainer.hpp>
+#include <tank/TankModel.hpp>
+#include <tanket/Tanket.hpp>
+#include <weapons/AccessoryStore.hpp>
+#include <weapons/Accessory.hpp>
+#include <target/Target.hpp>
+#include <tanket/TanketShotInfo.hpp>
+#include <map>
+#include <string>
+#include <cstring>
 
 #define LOG_TAG "ScorchDroidRenderer"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -29,41 +76,76 @@ extern std::mutex g_engineMutex;
 
 namespace
 {
-	GLuint program = 0;
-	GLuint landscapeVao = 0, landscapeVbo = 0;
-	GLuint tankVao = 0, tankVbo = 0;
-	GLint  positionLoc = -1, colorLoc = -1, useColorLoc = -1, texCoordLoc = -1;
-	GLuint landscapeTexture = 0;
-	bool   landscapeBuilt = false;
+	GLuint terrainProgram = 0, pointProgram = 0;
+	GLint  terrainMvpLoc = -1, terrainMinHeightLoc = -1, terrainHeightRangeLoc = -1, terrainLightDirLoc = -1;
+	GLint  terrainGroundTexLoc = -1, terrainHasTextureLoc = -1;
+	GLuint groundTexture = 0;
+	bool   groundTextureBuilt = false;
+	GLint  pointMvpLoc = -1, pointColorLoc = -1, pointSizeLoc = -1;
+	GLuint meshProgram = 0;
+	GLint  meshMvpLoc = -1, meshLightDirLoc = -1, meshColorLoc = -1;
+	GLuint sightProgram = 0, sightVao = 0, sightVbo = 0;
+	GLint  sightMvpLoc = -1;
+	int    sightVertexCount = 0;
+
+	GLuint terrainVao = 0, terrainVbo = 0, terrainIbo = 0;
+	GLuint pointVao = 0, pointVbo = 0;
+
+	bool   terrainBuilt = false;
+	// M6: which landscape the current mesh/texture were built for. The
+	// landscape changes every round, so a one-shot "build once" would leave
+	// round 2 onwards rendering round 1's terrain. getDefinitionNumber() is
+	// a stable per-landscape id (0 = none chosen yet, which is the blank
+	// landscape the very first round uses).
+	unsigned int builtDefinitionNumber = 0xffffffffu;
+	int    terrainIndexCount = 0;
+	float  terrainMinHeight = 0.0f, terrainMaxHeight = 1.0f;
+	float  mapWidthUnits = 1.0f, mapHeightUnits = 1.0f;
+
+	// M6 terrain destruction: the sampled grid is kept around after the
+	// initial build so a crater can re-sample and re-upload just the
+	// vertices it touched (see applyTerrainDeformations) instead of
+	// rebuilding the whole mesh. kGrid x kGrid quads => (kGrid+1)^2 verts.
+	constexpr int kGrid = 96;
+	constexpr int kTerrainVerts1D = kGrid + 1;
+	constexpr int kTerrainFloatsPerVertex = 8;  // pos(3) + normal(3) + uv(2)
+	std::vector<float> terrainHeights;          // kTerrainVerts1D^2, row-major by gz
+	std::vector<float> terrainWorldX, terrainWorldZ;
+	int    terrainSrcWidth = 0, terrainSrcHeight = 0;
+	int    terrainDeformLogsLeft = 0;
+
 	int    surfaceWidth = 1, surfaceHeight = 1;
 
-	const char *kVertexShader = R"(#version 300 es
-		layout(location = 0) in vec2 aPosition;
-		layout(location = 1) in vec2 aTexCoord;
-		out vec2 vTexCoord;
-		void main() {
-			vTexCoord = aTexCoord;
-			gl_Position = vec4(aPosition, 0.0, 1.0);
-			gl_PointSize = 24.0;
-		}
-	)";
+	// Orbit/free-fly camera - the default per the user's camera-style
+	// decision (see the porting plan's M6 entry). Target defaults to the
+	// map center once a landscape exists; distance/pitch defaults give a
+	// reasonable overview on first frame. Touched by both the GL thread
+	// (read every frame) and the UI thread (nativeCameraDrag/Zoom below,
+	// called from touch handling in Kotlin) - guarded by its own mutex
+	// rather than g_engineMutex, since camera state has nothing to do with
+	// simulation state and shouldn't contend with the sim tick.
+	std::mutex g_cameraMutex;
+	struct OrbitCamera {
+		// Map-center target, used in free-fly mode only - follow mode
+		// retargets to "my tank"'s live position every frame instead (see
+		// nativeOnDrawFrame), so it doesn't need its own stored target.
+		float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
+		float yaw = 0.7f;    // radians - shared by both modes
+		float pitch = 0.7f;  // radians above the horizontal plane - shared by both modes
+		// Separate remembered distances per mode: free-fly defaults to a
+		// wide view of the whole map (set once the map size is known - see
+		// buildTerrainIfNeeded), which would be a useless too-far-away
+		// default for following a single tank up close, and vice versa.
+		float orbitDistance = 120.0f;
+		float followDistance = 14.0f;
+		bool followMode = false;
+	} g_camera;
 
-	const char *kFragmentShader = R"(#version 300 es
-		precision mediump float;
-		in vec2 vTexCoord;
-		out vec4 fragColor;
-		uniform sampler2D uTexture;
-		uniform vec4 uColor;
-		uniform int uUseTexture;
-		void main() {
-			if (uUseTexture == 1) {
-				float h = texture(uTexture, vTexCoord).r;
-				fragColor = vec4(0.2 + h * 0.3, 0.35 + h * 0.4, 0.15 + h * 0.15, 1.0);
-			} else {
-				fragColor = uColor;
-			}
-		}
-	)";
+	constexpr float kMinPitch = 0.15f;
+	constexpr float kMaxPitch = 1.45f;
+	constexpr float kMinDistance = 5.0f;
+	constexpr float kMaxFollowDistance = 150.0f;
+	constexpr float kDragSensitivity = 0.006f;  // radians per pixel
 
 	GLuint compileShader(GLenum type, const char *src)
 	{
@@ -100,88 +182,657 @@ namespace
 		return p;
 	}
 
-	// Builds a single-channel luminance texture from the real heightmap and
-	// a fullscreen-quad VBO to display it, once, the first time a landscape
-	// actually exists.
-	void buildLandscapeIfNeeded()
-	{
-		if (landscapeBuilt) return;
-		if (!ScorchedServer::serverStarted()) return;
+	const char *kTerrainVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec3 aNormal;
+		layout(location = 2) in vec2 aTexCoord;
+		uniform mat4 uMVP;
+		uniform float uMinHeight;
+		uniform float uHeightRange;
+		out vec3 vNormal;
+		out float vHeight01;
+		out vec2 vTexCoord;
+		void main() {
+			vNormal = aNormal;
+			vTexCoord = aTexCoord;
+			vHeight01 = clamp((aPosition.y - uMinHeight) / uHeightRange, 0.0, 1.0);
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+		}
+	)";
 
-		HeightMap &heightMap = ScorchedServer::instance()->getLandscapeMaps().getGroundMaps().getHeightMap();
+	// M6: the ground is now the real generated landscape texture (see
+	// LandscapeTextureBuilder - grass/rock/sand blended by height and
+	// slope, the same way upstream builds it), lit by the same directional
+	// light as before. uHasTexture falls back to the old flat height-ramp
+	// colouring if the landscape definition doesn't use generated textures
+	// or the images failed to load, so the ground is never invisible.
+	const char *kTerrainFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec3 vNormal;
+		in float vHeight01;
+		in vec2 vTexCoord;
+		out vec4 fragColor;
+		uniform vec3 uLightDir;
+		uniform sampler2D uGroundTexture;
+		uniform int uHasTexture;
+		void main() {
+			vec3 n = normalize(vNormal);
+			float diffuse = max(dot(n, uLightDir), 0.0);
+			vec3 baseColor;
+			if (uHasTexture == 1) {
+				baseColor = texture(uGroundTexture, vTexCoord).rgb;
+			} else {
+				baseColor = mix(vec3(0.22, 0.34, 0.13), vec3(0.58, 0.52, 0.42), vHeight01);
+			}
+			vec3 lit = baseColor * (0.55 + diffuse * 0.6);
+			fragColor = vec4(lit, 1.0);
+		}
+	)";
+
+	// M6: real .ase models (tanks, and later projectiles). Flat-lit with the
+	// same directional light as the terrain, plus a per-instance colour so
+	// "my tank" stays visually distinct from opponents the way the old
+	// point sprites were.
+	const char *kMeshVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec3 aNormal;
+		uniform mat4 uMVP;
+		out vec3 vNormal;
+		void main() {
+			vNormal = aNormal;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+		}
+	)";
+
+	const char *kMeshFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec3 vNormal;
+		out vec4 fragColor;
+		uniform vec3 uLightDir;
+		uniform vec4 uColor;
+		void main() {
+			vec3 n = normalize(vNormal);
+			float diffuse = max(dot(n, uLightDir), 0.0);
+			fragColor = vec4(uColor.rgb * (0.45 + diffuse * 0.75), uColor.a);
+		}
+	)";
+
+	// M6: the aim sight - upstream's "old sight" (TargetRendererImplTank::
+	// drawOldSight): a fan-shaped blade projecting from the gun, brightest
+	// along the exact aim line and fading out to either side. Per-vertex
+	// colour carries that fade, and it's drawn unlit so it reads as a UI
+	// overlay rather than part of the scene.
+	const char *kSightVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec3 aColor;
+		uniform mat4 uMVP;
+		out vec3 vColor;
+		void main() {
+			vColor = aColor;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+		}
+	)";
+
+	const char *kSightFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec3 vColor;
+		out vec4 fragColor;
+		void main() { fragColor = vec4(vColor, 1.0); }
+	)";
+
+	const char *kPointVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		uniform mat4 uMVP;
+		uniform float uPointSize;
+		void main() {
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+			gl_PointSize = uPointSize;
+		}
+	)";
+
+	const char *kPointFragmentShader = R"(#version 300 es
+		precision mediump float;
+		out vec4 fragColor;
+		uniform vec4 uColor;
+		void main() {
+			fragColor = uColor;
+		}
+	)";
+
+	// One terrain vertex: position, normal, UV. Normals via central
+	// differences on neighboring grid heights (clamped at the edges) - a
+	// standard heightmap-normal approximation, not anything upstream
+	// provides (its normal computation, if any, lives in the excluded
+	// client rendering code). Split out of the full build so a partial
+	// rebuild after a crater produces byte-identical vertices to a full
+	// one - the two paths can't drift apart.
+	void writeTerrainVertex(int gx, int gz, float *out)
+	{
+		const int last = kTerrainVerts1D - 1;
+		float py = terrainHeights[gz * kTerrainVerts1D + gx];
+		float pxL = terrainWorldX[std::max(gx - 1, 0)];
+		float pxR = terrainWorldX[std::min(gx + 1, last)];
+		float hL = terrainHeights[gz * kTerrainVerts1D + std::max(gx - 1, 0)];
+		float hR = terrainHeights[gz * kTerrainVerts1D + std::min(gx + 1, last)];
+		float pzT = terrainWorldZ[std::max(gz - 1, 0)];
+		float pzB = terrainWorldZ[std::min(gz + 1, last)];
+		float hT = terrainHeights[std::max(gz - 1, 0) * kTerrainVerts1D + gx];
+		float hB = terrainHeights[std::min(gz + 1, last) * kTerrainVerts1D + gx];
+
+		// Tangent along +X and along +Z, then normal = normalize(tZ x tX)
+		// (chosen order/signs give an outward/up-facing normal for a
+		// heightmap in this y-up, right-handed world).
+		float tXx = pxR - pxL, tXy = hR - hL, tXz = 0.0f;
+		float tZx = 0.0f, tZy = hB - hT, tZz = pzB - pzT;
+		float nx = tZy * tXz - tZz * tXy;
+		float ny = tZz * tXx - tZx * tXz;
+		float nz = tZx * tXy - tZy * tXx;
+		float nLen = sqrtf(nx * nx + ny * ny + nz * nz);
+		if (nLen < 1e-6f) { nx = 0; ny = 1; nz = 0; } else { nx /= nLen; ny /= nLen; nz /= nLen; }
+
+		out[0] = terrainWorldX[gx];
+		out[1] = py;
+		out[2] = terrainWorldZ[gz];
+		out[3] = nx;
+		out[4] = ny;
+		out[5] = nz;
+		// UV spans the whole landscape once - the ground texture is
+		// generated per-landscape at map resolution, not tiled here
+		// (LandscapeTextureBuilder already tiles its sources).
+		out[6] = (float) gx / (float) kGrid;
+		out[7] = (float) gz / (float) kGrid;
+	}
+
+	// Builds the real terrain mesh - a regular grid sampled from the real
+	// heightmap, downsampled to a fixed resolution (same reasoning as the
+	// old 2D renderer's texture downsample: the source heightmap can be
+	// far denser than a mobile GPU needs for a good-looking mesh).
+	// Vertices are in real landscape-space world units (x, height, z) -
+	// same coordinate space the tank/shot positions below use, so
+	// everything shares one world without extra scale-factor bookkeeping.
+	void buildTerrainIfNeeded(ScorchedContext &ctx)
+	{
+		// Rebuild whenever the landscape changes (a new round), not just
+		// once per process.
+		unsigned int defnNumber = ctx.getLandscapeMaps().getDefinitions().getDefinition().getDefinitionNumber();
+		if (terrainBuilt && defnNumber == builtDefinitionNumber) return;
+		if (terrainBuilt && defnNumber != builtDefinitionNumber) {
+			// Drop the old landscape's GL objects before rebuilding.
+			if (terrainVao) glDeleteVertexArrays(1, &terrainVao);
+			if (terrainVbo) glDeleteBuffers(1, &terrainVbo);
+			if (terrainIbo) glDeleteBuffers(1, &terrainIbo);
+			if (groundTexture) glDeleteTextures(1, &groundTexture);
+			terrainVao = terrainVbo = terrainIbo = groundTexture = 0;
+			terrainBuilt = false;
+			groundTextureBuilt = false;
+			// Any pending crater belongs to the landscape being thrown
+			// away - applying it to the new one would corrupt unrelated
+			// vertices.
+			ScorchDroidLandscape::clearDirtyRegion();
+			LOGI("Landscape changed (definition %u) - rebuilding terrain", defnNumber);
+		}
+
+		HeightMap &heightMap = ctx.getLandscapeMaps().getGroundMaps().getHeightMap();
 		int w = heightMap.getMapWidth();
 		int h = heightMap.getMapHeight();
 		if (w <= 0 || h <= 0) return;
 
-		// Downsample to a manageable texture size.
-		const int texSize = 128;
-		std::vector<unsigned char> pixels(texSize * texSize);
-		float minH = 1e9f, maxH = -1e9f;
-		std::vector<float> raw(texSize * texSize);
-		for (int ty = 0; ty < texSize; ty++) {
-			for (int tx = 0; tx < texSize; tx++) {
-				int sx = tx * w / texSize;
-				int sy = ty * h / texSize;
+		const int verts1D = kTerrainVerts1D;
+		terrainSrcWidth = w;
+		terrainSrcHeight = h;
+		terrainHeights.assign(verts1D * verts1D, 0.0f);
+		terrainWorldX.assign(verts1D, 0.0f);
+		terrainWorldZ.assign(verts1D, 0.0f);
+		terrainMinHeight = 1e9f;
+		terrainMaxHeight = -1e9f;
+		for (int i = 0; i < verts1D; i++) {
+			terrainWorldX[i] = (float) i / (float) kGrid * (float) w;
+			terrainWorldZ[i] = (float) i / (float) kGrid * (float) h;
+		}
+		for (int gz = 0; gz < verts1D; gz++) {
+			int sy = std::min(gz * h / kGrid, h - 1);
+			for (int gx = 0; gx < verts1D; gx++) {
+				int sx = std::min(gx * w / kGrid, w - 1);
 				float height = heightMap.getHeight(sx, sy).asFloat();
-				raw[ty * texSize + tx] = height;
-				if (height < minH) minH = height;
-				if (height > maxH) maxH = height;
+				terrainHeights[gz * verts1D + gx] = height;
+				terrainMinHeight = std::min(terrainMinHeight, height);
+				terrainMaxHeight = std::max(terrainMaxHeight, height);
 			}
 		}
-		float range = (maxH - minH) > 0.001f ? (maxH - minH) : 1.0f;
-		for (int i = 0; i < texSize * texSize; i++) {
-			pixels[i] = (unsigned char) (255.0f * (raw[i] - minH) / range);
+		if (terrainMaxHeight - terrainMinHeight < 0.001f) terrainMaxHeight = terrainMinHeight + 1.0f;
+
+		std::vector<float> vertexData(verts1D * verts1D * kTerrainFloatsPerVertex);
+		for (int gz = 0; gz < verts1D; gz++) {
+			for (int gx = 0; gx < verts1D; gx++) {
+				writeTerrainVertex(gx, gz,
+					&vertexData[(gz * verts1D + gx) * kTerrainFloatsPerVertex]);
+			}
 		}
 
-		glGenTextures(1, &landscapeTexture);
-		glBindTexture(GL_TEXTURE_2D, landscapeTexture);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, texSize, texSize, 0, GL_RED, GL_UNSIGNED_BYTE, pixels.data());
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		std::vector<unsigned int> indices;
+		indices.reserve(kGrid * kGrid * 6);
+		for (int gz = 0; gz < kGrid; gz++) {
+			for (int gx = 0; gx < kGrid; gx++) {
+				unsigned int i00 = gz * verts1D + gx;
+				unsigned int i10 = i00 + 1;
+				unsigned int i01 = i00 + verts1D;
+				unsigned int i11 = i01 + 1;
+				indices.push_back(i00); indices.push_back(i01); indices.push_back(i10);
+				indices.push_back(i10); indices.push_back(i01); indices.push_back(i11);
+			}
+		}
+		terrainIndexCount = (int) indices.size();
+
+		glGenVertexArrays(1, &terrainVao);
+		glBindVertexArray(terrainVao);
+		glGenBuffers(1, &terrainVbo);
+		glBindBuffer(GL_ARRAY_BUFFER, terrainVbo);
+		glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float), vertexData.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (6 * sizeof(float)));
+		glGenBuffers(1, &terrainIbo);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, terrainIbo);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+		glBindVertexArray(0);
+
+		mapWidthUnits = (float) w;
+		mapHeightUnits = (float) h;
+		{
+			std::lock_guard<std::mutex> camLock(g_cameraMutex);
+			g_camera.targetX = mapWidthUnits / 2.0f;
+			g_camera.targetZ = mapHeightUnits / 2.0f;
+			g_camera.targetY = (terrainMinHeight + terrainMaxHeight) / 2.0f;
+			g_camera.orbitDistance = std::max(mapWidthUnits, mapHeightUnits) * 0.9f;
+		}
+
+		terrainBuilt = true;
+		builtDefinitionNumber = defnNumber;
+		terrainDeformLogsLeft = 5;
+		LOGI("Terrain mesh built: %dx%d source -> %dx%d grid, height range [%.1f, %.1f]",
+			 w, h, verts1D, verts1D, terrainMinHeight, terrainMaxHeight);
+	}
+
+	// M6: generates and uploads the real ground texture once a landscape
+	// exists (see LandscapeTextureBuilder). Failure is non-fatal - the
+	// terrain shader falls back to its old height-ramp colouring rather
+	// than drawing nothing, so a landscape definition we can't texture
+	// still renders.
+	void buildGroundTextureIfNeeded(ScorchedContext &ctx)
+	{
+		if (groundTextureBuilt) return;
+		groundTextureBuilt = true;  // one attempt per landscape, success or not
+
+		std::string groundError;
+		LandscapeTextureBuilder::Texture ground = LandscapeTextureBuilder::build(ctx, 512, &groundError);
+		if (!ground.valid()) {
+			LOGE("ground texture generation failed (%s) - falling back to flat height colours", groundError.c_str());
+			return;
+		}
+
+		glGenTextures(1, &groundTexture);
+		glBindTexture(GL_TEXTURE_2D, groundTexture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, ground.width, ground.height, 0,
+					 GL_RGB, GL_UNSIGNED_BYTE, ground.rgb.data());
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		LOGI("Ground texture built: %dx%d", ground.width, ground.height);
+	}
 
-		float quad[] = {
-			// x,    y,    u,   v
-			-0.9f, -0.9f, 0.0f, 1.0f,
-			 0.9f, -0.9f, 1.0f, 1.0f,
-			-0.9f,  0.9f, 0.0f, 0.0f,
-			 0.9f,  0.9f, 1.0f, 0.0f,
+	// M6 terrain destruction: craters are carved into the real heightmap by
+	// DeformLandscape (which runs under S3D_SERVER - the simulation half was
+	// never client-only), but the mesh was built once per round, so the
+	// ground silently changed shape under a static picture. The patched
+	// engine now reports each deformed region (see DeformEventQueue.h); this
+	// re-samples just those grid vertices and re-uploads them.
+	//
+	// Only the affected rows are touched, one glBufferSubData per row - a
+	// crater is a handful of grid cells across, so this is a few hundred
+	// bytes per blast rather than the ~300KB a full re-upload would cost.
+	void applyTerrainDeformations(ScorchedContext &ctx)
+	{
+		if (!terrainBuilt) return;
+
+		int minX, minY, maxX, maxY;
+		if (!ScorchDroidLandscape::takeDirtyRegion(minX, minY, maxX, maxY)) return;
+
+		HeightMap &heightMap = ctx.getLandscapeMaps().getGroundMaps().getHeightMap();
+		const int w = heightMap.getMapWidth();
+		const int h = heightMap.getMapHeight();
+		if (w != terrainSrcWidth || h != terrainSrcHeight) return;  // mid-rebuild
+
+		// Heightmap cells -> grid vertices. Pad by 2: a vertex's normal is a
+		// central difference over its neighbours, so vertices just outside
+		// the crater still change, and integer division either way loses up
+		// to a cell.
+		const int last = kTerrainVerts1D - 1;
+		int gx0 = std::max((minX * kGrid) / w - 2, 0);
+		int gx1 = std::min((maxX * kGrid) / w + 2, last);
+		int gz0 = std::max((minY * kGrid) / h - 2, 0);
+		int gz1 = std::min((maxY * kGrid) / h + 2, last);
+		if (gx0 > gx1 || gz0 > gz1) return;  // entirely off-map
+
+		// Re-sample heights first (over a further 1-vertex margin, since
+		// writeTerrainVertex reads its neighbours' heights), then rebuild
+		// vertices - doing both in one pass would use stale neighbours.
+		for (int gz = std::max(gz0 - 1, 0); gz <= std::min(gz1 + 1, last); gz++) {
+			int sy = std::min(gz * h / kGrid, h - 1);
+			for (int gx = std::max(gx0 - 1, 0); gx <= std::min(gx1 + 1, last); gx++) {
+				int sx = std::min(gx * w / kGrid, w - 1);
+				float height = heightMap.getHeight(sx, sy).asFloat();
+				terrainHeights[gz * kTerrainVerts1D + gx] = height;
+				// The shader colours by height ratio, so let the range grow
+				// with a crater rather than clamping new extremes flat.
+				terrainMinHeight = std::min(terrainMinHeight, height);
+				terrainMaxHeight = std::max(terrainMaxHeight, height);
+			}
+		}
+
+		const int rowVerts = gx1 - gx0 + 1;
+		std::vector<float> row(rowVerts * kTerrainFloatsPerVertex);
+		glBindBuffer(GL_ARRAY_BUFFER, terrainVbo);
+		for (int gz = gz0; gz <= gz1; gz++) {
+			for (int i = 0; i < rowVerts; i++) {
+				writeTerrainVertex(gx0 + i, gz, &row[i * kTerrainFloatsPerVertex]);
+			}
+			GLintptr offset = (GLintptr) (gz * kTerrainVerts1D + gx0)
+				* kTerrainFloatsPerVertex * sizeof(float);
+			glBufferSubData(GL_ARRAY_BUFFER, offset,
+							row.size() * sizeof(float), row.data());
+		}
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+		// Only the first few per landscape: sustained weapons (napalm above
+		// all) deform every simulation step, so an unconditional log here
+		// would be one line per rendered frame.
+		if (terrainDeformLogsLeft > 0) {
+			terrainDeformLogsLeft--;
+			LOGI("Terrain deformed: map [%d,%d]-[%d,%d] -> grid [%d,%d]-[%d,%d], %d verts",
+				 minX, minY, maxX, maxY, gx0, gz0, gx1, gz1, rowVerts * (gz1 - gz0 + 1));
+		}
+	}
+
+	// The aim sight blade. Upstream sweeps ~36-45deg of arc either side
+	// (126deg -> 90deg and 90deg -> 135deg in 9deg steps, fading out over
+	// 45deg), which reads as an uncomfortably wide wedge on a phone-sized
+	// screen - so the span is narrowed here, with the fade tied to it so
+	// the blade still fades to nothing exactly at its edge. Geometry is
+	// otherwise upstream's: a quad strip from radius 2 to 10, mirrored
+	// about the aim line, brightest along it.
+	constexpr float kSightSpanDegrees = 16.0f;  // arc either side of the aim line
+	constexpr int   kSightSteps = 4;
+
+	void buildSightGeometry()
+	{
+		if (sightVertexCount > 0) return;
+
+		std::vector<float> verts;
+		auto emit = [&](float angleDeg, float side) {
+			float dx = angleDeg * (float) M_PI / 180.0f;
+			float color = 1.0f - fabsf(90.0f - angleDeg) / kSightSpanDegrees;
+			if (color < 0.0f) color = 0.0f;
+			for (float radius : { 2.0f, 10.0f }) {
+				verts.push_back(side * 0.03f * color);
+				verts.push_back(radius * cosf(dx));   // upstream z -> our y
+				verts.push_back(radius * sinf(dx));   // upstream y -> our z
+				verts.push_back(1.0f * color);
+				verts.push_back(0.5f * color);
+				verts.push_back(0.5f * color);
+			}
 		};
-		glGenVertexArrays(1, &landscapeVao);
-		glBindVertexArray(landscapeVao);
-		glGenBuffers(1, &landscapeVbo);
-		glBindBuffer(GL_ARRAY_BUFFER, landscapeVbo);
-		glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *) 0);
-		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *) (2 * sizeof(float)));
-		glBindVertexArray(0);
+		const float step = kSightSpanDegrees / (float) kSightSteps;
+		for (int i = kSightSteps; i >= 0; i--) emit(90.0f + i * step, +1.0f);
+		for (int i = 0; i <= kSightSteps; i++) emit(90.0f + i * step, -1.0f);
 
-		landscapeBuilt = true;
-		LOGI("Landscape texture built: %dx%d source -> %dx%d texture", w, h, texSize, texSize);
+		sightVertexCount = (int) (verts.size() / 6);
+		glGenVertexArrays(1, &sightVao);
+		glBindVertexArray(sightVao);
+		glGenBuffers(1, &sightVbo);
+		glBindBuffer(GL_ARRAY_BUFFER, sightVbo);
+		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+		glBindVertexArray(0);
+	}
+
+	// M6: a model uploaded to the GPU, plus the placement info needed to
+	// draw it at the right size. Cached per Model* - several tanks usually
+	// share one model, and reparsing/re-uploading per frame would be
+	// pointless.
+	//
+	// Tank models are articulated: upstream splits the meshes into hull,
+	// turret and gun by *name* and rotates each group separately, so the
+	// turret swings to the firing bearing and the barrel lifts to the
+	// elevation (ModelRendererTank::setupModelRendererTank/draw). We do the
+	// same, with each group's vertices pre-translated onto its own pivot at
+	// upload time - exactly as upstream does with setVertexTranslation -
+	// so drawing is just three transforms rather than any per-vertex work.
+	struct MeshGroup {
+		GLuint vao = 0, vbo = 0;
+		int vertexCount = 0;
+	};
+	struct GpuModel {
+		MeshGroup hull, turret, gun;
+		float scale = 1.0f;         // upstream's "don't let the model be huge" rule
+		float groundOffset = 0.0f;  // lifts the model so its base sits on the ground
+		// Gun pivot relative to the turret pivot, already in our Y-up space.
+		float gunOffsetX = 0.0f, gunOffsetY = 0.0f, gunOffsetZ = 0.0f;
+	};
+	std::map<Model *, GpuModel> g_modelCache;
+
+	// ModelStore::getModel() calls DIALOG_ASSERT (i.e. abort, in this port -
+	// see the porting plan's dialogAssert note) when handed a ModelID it
+	// can't resolve, rather than returning null. Not every tank defines a
+	// projectile model, so an unguarded loadModel() on an empty id takes
+	// the whole process down - hence checking modelValid() first.
+	Model *loadModelSafely(ModelID &id)
+	{
+		if (!id.modelValid()) return nullptr;
+		return ModelStore::instance()->loadModel(id);
+	}
+
+	// Models are Z-up (upstream's world convention) while our renderer is
+	// Y-up, so vertices are remapped (x, y, z) -> (x, z, y) once here rather
+	// than fought with a transform at every draw.
+	void uploadMeshGroup(MeshGroup &group, const std::vector<Mesh *> &meshes,
+						 float offX, float offY, float offZ)
+	{
+		std::vector<float> verts;
+		for (Mesh *mesh : meshes) {
+			for (Face *face : mesh->getFaces()) {
+				for (int i = 0; i < 3; i++) {
+					Vertex *v = mesh->getVertexes()[face->v[i]];
+					verts.push_back(v->position[0].asFloat() - offX);
+					verts.push_back(v->position[2].asFloat() - offY);
+					verts.push_back(v->position[1].asFloat() - offZ);
+					verts.push_back(face->normal[i][0].asFloat());
+					verts.push_back(face->normal[i][2].asFloat());
+					verts.push_back(face->normal[i][1].asFloat());
+				}
+			}
+		}
+		group.vertexCount = (int) (verts.size() / 6);
+		if (verts.empty()) return;
+
+		glGenVertexArrays(1, &group.vao);
+		glBindVertexArray(group.vao);
+		glGenBuffers(1, &group.vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, group.vbo);
+		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+		glBindVertexArray(0);
+	}
+
+	GpuModel *uploadModel(Model *model)
+	{
+		if (!model) return nullptr;
+		auto existing = g_modelCache.find(model);
+		if (existing != g_modelCache.end()) return &existing->second;
+
+		// Classify meshes exactly the way upstream does. Note the leading
+		// quote: .ase mesh names arrive quoted, so the prefix really is
+		// "\"Turret" / "\"Gun".
+		std::vector<Mesh *> hullMeshes, turretMeshes, gunMeshes;
+		Mesh *turretPivot = nullptr, *gunPivot = nullptr;
+		FixedVector turretCenter;
+		int turretCount = 0;
+		for (Mesh *mesh : model->getMeshes()) {
+			const char *name = mesh->getName();
+			bool isPivot = (strstr(name, "pivot") || strstr(name, "Pivot"));
+			if (strstr(name, "\"Turret") == name || strstr(name, "\"turret") == name) {
+				if (isPivot) {
+					turretPivot = mesh;
+				} else {
+					turretCount++;
+					turretCenter += (mesh->getMax() + mesh->getMin()) / fixed(2);
+				}
+				turretMeshes.push_back(mesh);
+			} else if (strstr(name, "\"Gun") == name || strstr(name, "\"gun") == name) {
+				if (isPivot) gunPivot = mesh;
+				gunMeshes.push_back(mesh);
+			} else {
+				hullMeshes.push_back(mesh);
+			}
+		}
+
+		if (turretPivot) {
+			turretCenter = (turretPivot->getMax() + turretPivot->getMin()) / fixed(2);
+		} else if (turretCount > 0) {
+			turretCenter /= fixed(turretCount);
+		}
+		FixedVector gunCenter = turretCenter;
+		turretCenter[2] = fixed(0);  // turret spins about the model's up axis
+		if (gunPivot) gunCenter = (gunPivot->getMax() + gunPivot->getMin()) / fixed(2);
+		FixedVector gunOffset = gunCenter - turretCenter;
+
+		GpuModel gpu;
+
+		// Same sizing rule upstream uses (ModelRendererTank::setup): keep
+		// models from dwarfing the battlefield.
+		FixedVector minV = model->getMin(), maxV = model->getMax();
+		float dx = (maxV[0] - minV[0]).asFloat();
+		float dy = (maxV[1] - minV[1]).asFloat();
+		float dz = (maxV[2] - minV[2]).asFloat();
+		float size = sqrtf(dx * dx + dy * dy + dz * dz);
+		const float kMaxSize = 3.0f;
+		if (size > kMaxSize) gpu.scale = 2.2f / size;
+
+		// Hull and turret sit on the turret pivot; the gun additionally
+		// sits on its own pivot so it elevates about the right point.
+		float tcx = turretCenter[0].asFloat();
+		float tcy = turretCenter[2].asFloat();  // model Z -> our Y
+		float tcz = turretCenter[1].asFloat();
+		gpu.gunOffsetX = gunOffset[0].asFloat();
+		gpu.gunOffsetY = gunOffset[2].asFloat();
+		gpu.gunOffsetZ = gunOffset[1].asFloat();
+
+		uploadMeshGroup(gpu.hull, hullMeshes, tcx, tcy, tcz);
+		uploadMeshGroup(gpu.turret, turretMeshes, tcx, tcy, tcz);
+		uploadMeshGroup(gpu.gun, gunMeshes,
+						tcx + gpu.gunOffsetX, tcy + gpu.gunOffsetY, tcz + gpu.gunOffsetZ);
+
+		if (gpu.hull.vertexCount == 0 && gpu.turret.vertexCount == 0 && gpu.gun.vertexCount == 0) {
+			return nullptr;
+		}
+
+		// Vertices are now relative to the turret pivot, so "sit on the
+		// ground" is measured from there too.
+		gpu.groundOffset = (tcy - minV[2].asFloat()) * gpu.scale;
+
+		LOGI("Model uploaded: hull %d, turret %d, gun %d tris, scale %.3f",
+			 gpu.hull.vertexCount / 3, gpu.turret.vertexCount / 3, gpu.gun.vertexCount / 3, gpu.scale);
+		g_modelCache[model] = gpu;
+		return &g_modelCache[model];
+	}
+
+	void drawMeshGroup(const MeshGroup &group, GLint mvpLoc, const Mat4 &mvp)
+	{
+		if (group.vertexCount == 0) return;
+		glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
+		glBindVertexArray(group.vao);
+		glDrawArrays(GL_TRIANGLES, 0, group.vertexCount);
+	}
+
+	// Draws a set of real world-space positions (already x,y,z in the same
+	// units as the terrain mesh) as colored point sprites - tanks, shots,
+	// and explosions. Reused for all three, same as the old 2D renderer's
+	// drawPoints() - see ActionController::getShotAndExplosionPositions()
+	// for why shots/explosions need this at all (nothing was visibly
+	// happening on a fired shot before that hookup existed).
+	void drawPoints(const Mat4 &mvp, const std::vector<float> &worldPositions, float size, float r, float g, float b)
+	{
+		if (worldPositions.empty()) return;
+
+		glUniformMatrix4fv(pointMvpLoc, 1, GL_FALSE, mvp.m);
+		glUniform1f(pointSizeLoc, size);
+		glUniform4f(pointColorLoc, r, g, b, 1.0f);
+		glBindVertexArray(pointVao);
+		glBindBuffer(GL_ARRAY_BUFFER, pointVbo);
+		glBufferData(GL_ARRAY_BUFFER, worldPositions.size() * sizeof(float), worldPositions.data(), GL_DYNAMIC_DRAW);
+		glDrawArrays(GL_POINTS, 0, (GLsizei) (worldPositions.size() / 3));
+	}
+
+	// Real height at an arbitrary landscape-space (x,z), nearest-sample
+	// (no interpolation - fine for placing a tank/shot marker a little
+	// above the ground, not for anything precision-sensitive).
+	float heightAt(HeightMap &heightMap, int mapW, int mapH, float x, float z)
+	{
+		int sx = std::min(std::max((int) x, 0), mapW - 1);
+		int sz = std::min(std::max((int) z, 0), mapH - 1);
+		return heightMap.getHeight(sx, sz).asFloat();
 	}
 }  // namespace
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
-	program = linkProgram(kVertexShader, kFragmentShader);
-	positionLoc = 0;
-	texCoordLoc = 1;
-	colorLoc = glGetUniformLocation(program, "uColor");
-	useColorLoc = glGetUniformLocation(program, "uUseTexture");
-	landscapeBuilt = false;
+	terrainProgram = linkProgram(kTerrainVertexShader, kTerrainFragmentShader);
+	terrainMvpLoc = glGetUniformLocation(terrainProgram, "uMVP");
+	terrainMinHeightLoc = glGetUniformLocation(terrainProgram, "uMinHeight");
+	terrainHeightRangeLoc = glGetUniformLocation(terrainProgram, "uHeightRange");
+	terrainLightDirLoc = glGetUniformLocation(terrainProgram, "uLightDir");
+	terrainGroundTexLoc = glGetUniformLocation(terrainProgram, "uGroundTexture");
+	terrainHasTextureLoc = glGetUniformLocation(terrainProgram, "uHasTexture");
 
-	glGenVertexArrays(1, &tankVao);
-	glBindVertexArray(tankVao);
-	glGenBuffers(1, &tankVbo);
-	glBindBuffer(GL_ARRAY_BUFFER, tankVbo);
+	sightProgram = linkProgram(kSightVertexShader, kSightFragmentShader);
+	sightMvpLoc = glGetUniformLocation(sightProgram, "uMVP");
+	sightVertexCount = 0;
+
+	meshProgram = linkProgram(kMeshVertexShader, kMeshFragmentShader);
+	meshMvpLoc = glGetUniformLocation(meshProgram, "uMVP");
+	meshLightDirLoc = glGetUniformLocation(meshProgram, "uLightDir");
+	meshColorLoc = glGetUniformLocation(meshProgram, "uColor");
+
+	pointProgram = linkProgram(kPointVertexShader, kPointFragmentShader);
+	pointMvpLoc = glGetUniformLocation(pointProgram, "uMVP");
+	pointColorLoc = glGetUniformLocation(pointProgram, "uColor");
+	pointSizeLoc = glGetUniformLocation(pointProgram, "uPointSize");
+
+	terrainBuilt = false;
+	groundTextureBuilt = false;
+	g_modelCache.clear();
+
+	glGenVertexArrays(1, &pointVao);
+	glBindVertexArray(pointVao);
+	glGenBuffers(1, &pointVbo);
+	glBindBuffer(GL_ARRAY_BUFFER, pointVbo);
 	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void *) 0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
 	glBindVertexArray(0);
 
-	glClearColor(0.05f, 0.05f, 0.08f, 1.0f);
+	glClearColor(0.5f, 0.65f, 0.85f, 1.0f);  // sky
+	glEnable(GL_DEPTH_TEST);
+	glEnable(GL_CULL_FACE);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -193,48 +844,305 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceChanged(JNIEnv *, jobject, j
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
-	glClear(GL_COLOR_BUFFER_BIT);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
 	std::lock_guard<std::mutex> lock(g_engineMutex);
-	if (!ScorchedServer::serverStarted()) return;
+	ScorchedContext *ctx = engineActiveContext();
+	if (!ctx) return;
 
-	buildLandscapeIfNeeded();
-	glUseProgram(program);
+	buildTerrainIfNeeded(*ctx);
+	if (!terrainBuilt) return;
+	buildGroundTextureIfNeeded(*ctx);
+	applyTerrainDeformations(*ctx);
 
-	if (landscapeBuilt) {
-		glUniform1i(useColorLoc, 1);
-		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, landscapeTexture);
-		glBindVertexArray(landscapeVao);
-		glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-	}
-
-	// Real tank positions, straight from the running simulation.
-	HeightMap &heightMap = ScorchedServer::instance()->getLandscapeMaps().getGroundMaps().getHeightMap();
+	HeightMap &heightMap = ctx->getLandscapeMaps().getGroundMaps().getHeightMap();
 	int mapW = heightMap.getMapWidth();
 	int mapH = heightMap.getMapHeight();
 	if (mapW <= 0) mapW = 1;
 	if (mapH <= 0) mapH = 1;
 
-	std::map<unsigned int, Tank *> &tanks = ScorchedServer::instance()->getTargetContainer().getTanks();
-	std::vector<float> tankVerts;
-	tankVerts.reserve(tanks.size() * 2);
+	// Gather tank positions first (needed both for drawing and, in follow
+	// mode, as the camera's target) - split by ownership so "my tank" is
+	// visually distinct from everyone else's, same as the M5-era 2D view.
+	unsigned int myDestinationId = engineMyDestinationId();
+	std::map<unsigned int, Tank *> &tanks = ctx->getTargetContainer().getTanks();
+	// M6: tanks are real .ase models now (see uploadModel) rather than
+	// coloured point sprites. Each one still gets a tint so "my tank"
+	// stays instantly identifiable, which the point sprites were good at
+	// and a uniformly-coloured model would lose.
+	struct TankInstance {
+		float x, y, z;
+		float headingRadians;
+		float elevationRadians;
+		bool mine;
+		bool alive;
+		Model *model;
+	};
+	std::vector<TankInstance> tankInstances;
+	std::vector<float> myTankPositions, enemyTankPositions;  // fallback markers
+	bool haveMyTank = false;
+	float myTankX = 0.0f, myTankY = 0.0f, myTankZ = 0.0f;
 	for (auto &entry : tanks) {
 		Tank *tank = entry.second;
 		FixedVector &pos = tank->getLife().getTargetPosition();
-		float nx = pos[0].asFloat() / (float) mapW;
-		float ny = pos[1].asFloat() / (float) mapH;
-		// Map landscape-space [0,1] into the same -0.9..0.9 quad used above.
-		tankVerts.push_back(-0.9f + nx * 1.8f);
-		tankVerts.push_back(-0.9f + ny * 1.8f);
+		float x = pos[0].asFloat(), z = pos[1].asFloat();
+		float groundY = heightAt(heightMap, mapW, mapH, x, z);
+		bool mine = (tank->getDestinationId() == myDestinationId);
+
+		Model *model = nullptr;
+		TankModel *tankModel = tank->getModelContainer().getTankModel();
+		if (tankModel) model = loadModelSafely(tankModel->getTankModelID());
+
+		// The turret angle is the engine's own bearing (counterclockwise
+		// from world +Y - see engine_jni.cpp's handleTap comment), and our
+		// world maps landscape (x,y) onto (x,z), so it converts straight
+		// into a rotation about the world up axis.
+		float heading = tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
+		float elevation = tank->getShotInfo().getRotationGunYZ().asFloat() * (float) M_PI / 180.0f;
+		bool alive = (tank->getState().getState() == TankState::sNormal);
+		tankInstances.push_back({ x, groundY, z, heading, elevation, mine, alive, model });
+
+		float markerY = groundY + 1.5f;
+		if (mine) {
+			myTankPositions.push_back(x); myTankPositions.push_back(markerY); myTankPositions.push_back(z);
+			haveMyTank = true;
+			myTankX = x; myTankY = markerY; myTankZ = z;
+		} else {
+			enemyTankPositions.push_back(x); enemyTankPositions.push_back(markerY); enemyTankPositions.push_back(z);
+		}
 	}
 
-	if (!tankVerts.empty()) {
-		glUniform1i(useColorLoc, 0);
-		glUniform4f(colorLoc, 0.95f, 0.25f, 0.2f, 1.0f);
-		glBindVertexArray(tankVao);
-		glBindBuffer(GL_ARRAY_BUFFER, tankVbo);
-		glBufferData(GL_ARRAY_BUFFER, tankVerts.size() * sizeof(float), tankVerts.data(), GL_DYNAMIC_DRAW);
-		glDrawArrays(GL_POINTS, 0, (GLsizei) (tankVerts.size() / 2));
+	// Camera: free-fly orbits the map center; follow mode retargets to "my
+	// tank"'s live position every frame instead (falling back to free-fly
+	// framing if there's no tank yet - e.g. still spectating/loading) - see
+	// the porting plan's M6 entry for why both modes exist. Yaw/pitch are
+	// shared between modes so switching modes mid-look doesn't jar the view
+	// around; only the target and remembered distance differ.
+	float eyeX, eyeY, eyeZ, targetX, targetY, targetZ;
+	{
+		std::lock_guard<std::mutex> camLock(g_cameraMutex);
+		bool useFollow = g_camera.followMode && haveMyTank;
+		targetX = useFollow ? myTankX : g_camera.targetX;
+		targetY = useFollow ? myTankY : g_camera.targetY;
+		targetZ = useFollow ? myTankZ : g_camera.targetZ;
+		float distance = g_camera.followMode ? g_camera.followDistance : g_camera.orbitDistance;
+		eyeX = targetX + distance * cosf(g_camera.pitch) * sinf(g_camera.yaw);
+		eyeY = targetY + distance * sinf(g_camera.pitch);
+		eyeZ = targetZ + distance * cosf(g_camera.pitch) * cosf(g_camera.yaw);
 	}
+
+	float aspect = (float) surfaceWidth / (float) surfaceHeight;
+	float farPlane = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
+	Mat4 proj = Mat4::perspective(1.0472f /* 60 deg */, aspect, 1.0f, farPlane);
+	Mat4 view = Mat4::lookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
+	Mat4 mvp = Mat4::multiply(proj, view);
+
+	glUseProgram(terrainProgram);
+	glUniformMatrix4fv(terrainMvpLoc, 1, GL_FALSE, mvp.m);
+	glUniform1f(terrainMinHeightLoc, terrainMinHeight);
+	glUniform1f(terrainHeightRangeLoc, terrainMaxHeight - terrainMinHeight);
+	glUniform3f(terrainLightDirLoc, 0.4f, 0.82f, 0.35f);
+	glUniform1i(terrainHasTextureLoc, groundTexture != 0 ? 1 : 0);
+	if (groundTexture != 0) {
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, groundTexture);
+		glUniform1i(terrainGroundTexLoc, 0);
+	}
+	glBindVertexArray(terrainVao);
+	glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
+
+	glUseProgram(pointProgram);
+	glDisable(GL_CULL_FACE);  // point sprites have no winding
+
+	// Real tank models where we have one; a point sprite is kept as the
+	// fallback for any tank whose model wouldn't load, so a tank is never
+	// simply invisible.
+	glUseProgram(meshProgram);
+	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+	std::vector<float> unmodelledMine, unmodelledOther;
+	bool haveSight = false;
+	Mat4 sightTransform = Mat4::identity();
+	for (TankInstance &inst : tankInstances) {
+		GpuModel *gpu = uploadModel(inst.model);
+		if (!gpu) {
+			auto &bucket = inst.mine ? unmodelledMine : unmodelledOther;
+			bucket.push_back(inst.x); bucket.push_back(inst.y + 1.5f); bucket.push_back(inst.z);
+			continue;
+		}
+
+		if (inst.mine) {
+			glUniform4f(meshColorLoc, 0.45f, 0.85f, 0.95f, 1.0f);  // cyan-ish - mine
+		} else {
+			glUniform4f(meshColorLoc, 0.9f, 0.45f, 0.4f, 1.0f);    // red-ish - opponents
+		}
+
+		// Hull sits still; the turret swings to the firing bearing and the
+		// gun additionally lifts to the elevation, each about its own pivot
+		// (see uploadModel) - the same articulation upstream does.
+		Mat4 base = Mat4::multiply(
+			Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
+			Mat4::scale(gpu->scale));
+		Mat4 hullMvp = Mat4::multiply(mvp, base);
+		drawMeshGroup(gpu->hull, meshMvpLoc, hullMvp);
+
+		Mat4 turret = Mat4::multiply(base, Mat4::rotateY(inst.headingRadians));
+		drawMeshGroup(gpu->turret, meshMvpLoc, Mat4::multiply(mvp, turret));
+
+		Mat4 gun = Mat4::multiply(
+			turret,
+			Mat4::multiply(
+				Mat4::translate(gpu->gunOffsetX, gpu->gunOffsetY, gpu->gunOffsetZ),
+				// Negated: vertices are remapped Z-up -> Y-up at upload, so
+				// "forward" and "up" swap axes and a positive rotation about
+				// X tips the barrel *down* rather than elevating it.
+				Mat4::rotateX(-inst.elevationRadians)));
+		drawMeshGroup(gpu->gun, meshMvpLoc, Mat4::multiply(mvp, gun));
+
+		// Upstream draws the sight on the player's own tank while it's
+		// playing (TargetRendererImplTank::drawParticle: currentTank &&
+		// StatePlaying, and it bails entirely unless the tank is sNormal).
+		// Our nearest equivalent is "my tank, alive" - this config has no
+		// strict turn order, so every live moment is your turn.
+		if (inst.mine && inst.alive) {
+			haveSight = true;
+			// The blade lives in the gun's own frame, so it inherits the
+			// bearing and elevation for free - but not the model scale,
+			// since its radii are already in world units.
+			sightTransform = Mat4::multiply(
+				Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
+				Mat4::multiply(
+					Mat4::rotateY(inst.headingRadians),
+					Mat4::rotateX(-inst.elevationRadians)));
+		}
+	}
+
+	if (haveSight) {
+		buildSightGeometry();
+		glUseProgram(sightProgram);
+		Mat4 sightMvp = Mat4::multiply(mvp, sightTransform);
+		glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, sightMvp.m);
+		glBindVertexArray(sightVao);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, sightVertexCount);
+	}
+
+	glUseProgram(pointProgram);
+	drawPoints(mvp, unmodelledOther, 26.0f, 0.95f, 0.25f, 0.2f);
+	drawPoints(mvp, unmodelledMine, 26.0f, 0.2f, 0.9f, 0.95f);
+
+	// Real in-flight shot/explosion positions, straight from the running
+	// simulation's ActionController. Shots also report which tank fired
+	// them, so each one can use that tank's own projectile model (see the
+	// shotPlayerIds addition in patch 0009) rather than one shared mesh.
+	std::vector<FixedVector> shotPositionsRaw, explosionPositionsRaw;
+	std::vector<unsigned int> shotPlayerIds;
+	std::vector<FixedVector> shotVelocities;
+	std::vector<unsigned int> shotWeaponIds;
+	ctx->getActionController().getShotAndExplosionPositions(
+		shotPositionsRaw, explosionPositionsRaw, &shotPlayerIds, &shotVelocities, &shotWeaponIds);
+
+	std::vector<float> unmodelledShots, explosionPositions;
+	glUseProgram(meshProgram);
+	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+	glUniform4f(meshColorLoc, 0.95f, 0.9f, 0.4f, 1.0f);
+	for (size_t i = 0; i < shotPositionsRaw.size(); i++) {
+		FixedVector &p = shotPositionsRaw[i];
+		float wx = p[0].asFloat(), wy = p[2].asFloat(), wz = p[1].asFloat();
+
+		// Upstream's precedence: the weapon's own model first, falling back
+		// to the firing tank's projectilemodel (see Accessory::getWeaponMesh).
+		// Most tanks define no projectilemodel, so consulting only the
+		// fallback - as this did at first - means almost no shot ever gets
+		// a mesh.
+		Model *projectileModel = nullptr;
+		if (i < shotWeaponIds.size() && shotWeaponIds[i] != 0) {
+			Accessory *weapon = ctx->getAccessoryStore().findByAccessoryId(shotWeaponIds[i]);
+			if (weapon) projectileModel = loadModelSafely(weapon->getModel());
+		}
+		if (!projectileModel && i < shotPlayerIds.size()) {
+			Tanket *firer = ctx->getTargetContainer().getTanketById(shotPlayerIds[i]);
+			Tank *firerTank = (firer && firer->getType() == Target::TypeTank) ? (Tank *) firer : nullptr;
+			if (firerTank) {
+				TankModel *tankModel = firerTank->getModelContainer().getTankModel();
+				if (tankModel) {
+					projectileModel = loadModelSafely(tankModel->getProjectileModelID());
+				}
+			}
+		}
+
+		GpuModel *gpu = uploadModel(projectileModel);
+		if (!gpu) {
+			unmodelledShots.push_back(wx); unmodelledShots.push_back(wy); unmodelledShots.push_back(wz);
+			continue;
+		}
+		// Point the mesh along its actual flight path, using upstream's own
+		// direction-to-angles math (MissileMesh::draw): a bearing about the
+		// up axis, then a pitch about X. Velocity is in the engine's Z-up
+		// space, so the components are read in that order here.
+		Mat4 orientation = Mat4::identity();
+		if (i < shotVelocities.size()) {
+			FixedVector &vel = shotVelocities[i];
+			float vx = vel[0].asFloat(), vy = vel[1].asFloat(), vz = vel[2].asFloat();
+			float len = sqrtf(vx * vx + vy * vy + vz * vz);
+			if (len > 0.0001f) {
+				vx /= len; vy /= len; vz /= len;
+				float angXY = (float) M_PI - atan2f(vx, vy);
+				float angYZ = acosf(std::min(1.0f, std::max(-1.0f, vz)));
+				orientation = Mat4::multiply(Mat4::rotateY(angXY), Mat4::rotateX(angYZ));
+			}
+		}
+		Mat4 model = Mat4::multiply(
+			Mat4::translate(wx, wy, wz),
+			Mat4::multiply(orientation, Mat4::scale(gpu->scale)));
+		Mat4 shotMvp = Mat4::multiply(mvp, model);
+		drawMeshGroup(gpu->hull, meshMvpLoc, shotMvp);
+		drawMeshGroup(gpu->turret, meshMvpLoc, shotMvp);
+		drawMeshGroup(gpu->gun, meshMvpLoc, shotMvp);
+	}
+
+	for (FixedVector &p : explosionPositionsRaw) {
+		explosionPositions.push_back(p[0].asFloat());
+		explosionPositions.push_back(p[2].asFloat());
+		explosionPositions.push_back(p[1].asFloat());
+	}
+	glUseProgram(pointProgram);
+	drawPoints(mvp, unmodelledShots, 14.0f, 1.0f, 1.0f, 0.2f);
+	drawPoints(mvp, explosionPositions, 20.0f, 1.0f, 0.5f, 0.0f);
+}
+
+// M6: battlefield touch now drives the orbit camera (see the file-level
+// comment above for why tap-to-fire-at-a-point doesn't carry over as-is) -
+// called from MainActivity's touch handling on the GLSurfaceView.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeCameraDrag(JNIEnv *, jobject, jfloat dx, jfloat dy) {
+	std::lock_guard<std::mutex> lock(g_cameraMutex);
+	g_camera.yaw += dx * kDragSensitivity;
+	g_camera.pitch = std::min(std::max(g_camera.pitch - dy * kDragSensitivity, kMinPitch), kMaxPitch);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeCameraZoom(JNIEnv *, jobject, jfloat scaleFactor) {
+	if (scaleFactor <= 0.0f) return;
+	std::lock_guard<std::mutex> lock(g_cameraMutex);
+	if (g_camera.followMode) {
+		g_camera.followDistance = std::min(std::max(g_camera.followDistance / scaleFactor, kMinDistance), kMaxFollowDistance);
+	} else {
+		float maxDistance = std::max(mapWidthUnits, mapHeightUnits) * 2.5f + 50.0f;
+		g_camera.orbitDistance = std::min(std::max(g_camera.orbitDistance / scaleFactor, kMinDistance), maxDistance);
+	}
+}
+
+// M6: toggles between free-fly (orbit the map) and third-person-follow
+// (orbit "my tank", retargeted every frame - see nativeOnDrawFrame) camera
+// modes - the per-user toggle from the porting plan's camera-style
+// decision. Returns the new mode (true = follow) so the Kotlin caller can
+// update the HUD label without a separate query call. A host-enforced
+// "force everyone into follow mode" option is deliberately not done here -
+// see the porting plan's M6 notes for why that's a separate, bigger piece
+// of work (a real game-option + network sync + UI, not just a rendering
+// change).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeToggleCameraMode(JNIEnv *, jobject) {
+	std::lock_guard<std::mutex> lock(g_cameraMutex);
+	g_camera.followMode = !g_camera.followMode;
+	return g_camera.followMode ? JNI_TRUE : JNI_FALSE;
 }
