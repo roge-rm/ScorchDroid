@@ -1,5 +1,5 @@
 diff --git a/src/common/landscapemap/DeformLandscape.cpp b/src/common/landscapemap/DeformLandscape.cpp
-index 0387b8dd..eb13f56b 100644
+index 0387b8dd..136061b5 100644
 --- a/src/common/landscapemap/DeformLandscape.cpp
 +++ b/src/common/landscapemap/DeformLandscape.cpp
 @@ -39,6 +39,13 @@
@@ -16,7 +16,7 @@ index 0387b8dd..eb13f56b 100644
  #endif
  
  class DeformLandscapeCache
-@@ -149,7 +156,15 @@ void DeformLandscape::deformLandscape(
+@@ -149,7 +156,28 @@ void DeformLandscape::deformLandscape(
  	}
  
  #ifdef S3D_SERVER
@@ -29,11 +29,24 @@ index 0387b8dd..eb13f56b 100644
 +		int iradius = radius.asInt() + 1;
 +		if (49 < iradius) iradius = 49;
 +		ScorchDroidLandscape::pushDeform(pos[0].asInt(), pos[1].asInt(), iradius);
++
++		// The scorch mark the branch below paints into the landscape
++		// texture. Gated on deformTexture for the same reason upstream
++		// gates on it: a deform with no texture named leaves no mark.
++		// deformMap is deliberately NOT passed on - its contents are a
++		// pure function of the radius (see DeformLandscapeCache), so the
++		// presentation layer recomputes the falloff rather than copying
++		// a 100x100 fixed array per blast.
++		if (deformTexture)
++		{
++			ScorchDroidLandscape::pushScorch(
++				pos[0].asInt(), pos[1].asInt(), radius.asFloat(), deformTexture);
++		}
 +	}
  #else
  	bool hits = deformLandscapeInternal(context, pos, radius, down, deformMap, true, depthScale);
  	if ( hits && !context.getServerMode() && deformTexture )
-@@ -383,6 +398,14 @@ void DeformLandscape::flattenArea(
+@@ -383,6 +411,14 @@ void DeformLandscape::flattenArea(
  	}
  
  	flattenAreaInternal(context, tankPos, removeObjects, size, true);

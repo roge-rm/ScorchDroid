@@ -37,6 +37,46 @@ namespace
 		dest[1] += bits[1] * amount;
 		dest[2] += bits[2] * amount;
 	}
+
+	// How strongly a scorch mark covers the ground at [distance] cells from
+	// the blast centre. This reproduces the `explosionDistance` curve
+	// DeformLandscapeCache precomputes and DeformLandscape hands to
+	// DeformTextures as its blend weight:
+	//
+	//     depth    = sin((radius - distance) / radius * PI/2) * radius
+	//     coverage = min(depth / radius * 3, 1)
+	//
+	// which simplifies to the below. The *3 then clamp is what makes the
+	// mark mostly solid with a soft edge, rather than a smooth dome - so
+	// dropping it would visibly change the look, not just the maths.
+	float scorchFalloff(float distance, float radius)
+	{
+		if (radius <= 0.0f || distance >= radius) return 0.0f;
+		const float kHalfPi = 1.5707963268f;
+		float coverage = std::sin((radius - distance) / radius * kHalfPi) * 3.0f;
+		return std::min(coverage, 1.0f);
+	}
+
+	// Upstream's ExplosionTextures::getScorchBitmap: a weapon can name its
+	// own <deformtexture>, otherwise the landscape definition's <scorch>
+	// image is used. Both are ordinary mod files, so ImageFactory (which is
+	// in src/common, unlike the rest of that class) loads either.
+	//
+	// Not cached: a scorch is painted once per blast into a persistent
+	// buffer, so the load happens at most a few times a round, and caching
+	// would mean owning invalidation across landscape changes for no real
+	// gain.
+	Image loadScorchImage(ScorchedContext &context, const std::string &textureName)
+	{
+		if (!textureName.empty() && S3D::fileExists(S3D::getModFile(textureName)))
+		{
+			return ImageFactory::loadImage(S3D::eModLocation, textureName);
+		}
+
+		LandscapeTex *tex = context.getLandscapeMaps().getDefinitions().getTex();
+		if (!tex || tex->scorch.empty()) return Image();
+		return ImageFactory::loadImage(S3D::eModLocation, tex->scorch);
+	}
 }
 
 namespace LandscapeTextureBuilder
@@ -201,6 +241,76 @@ Texture build(ScorchedContext &context, int size, std::string *error)
 	}
 
 	return result;
+}
+
+Rect applyScorch(ScorchedContext &context, Texture &texture,
+				 int centreX, int centreY, float radius,
+				 const std::string &textureName)
+{
+	Rect touched;
+	if (!texture.valid() || radius <= 0.0f) return touched;
+
+	HeightMap &hmap = context.getLandscapeMaps().getGroundMaps().getHeightMap();
+	if (hmap.getMapWidth() <= 0 || hmap.getMapHeight() <= 0) return touched;
+
+	Image scorch = loadScorchImage(context, textureName);
+	if (scorch.getWidth() <= 0 || scorch.getHeight() <= 0 || scorch.getComponents() < 1) return touched;
+
+	// Upstream's own radius clamp - DeformLandscape refuses to work with a
+	// bigger one, so a mark can never be wider than the crater under it.
+	int iradius = (int) radius + 1;
+	if (iradius > 49) iradius = 49;
+
+	// Heightmap cells -> texture pixels. The texture is stretched over the
+	// whole landscape (see the mesh UVs in renderer_jni.cpp), so this is
+	// just the ratio of the two resolutions.
+	const float pixelsPerCellX = (float) texture.width / (float) hmap.getMapWidth();
+	const float pixelsPerCellY = (float) texture.height / (float) hmap.getMapHeight();
+
+	int x0 = (int) std::floor((centreX - iradius) * pixelsPerCellX);
+	int y0 = (int) std::floor((centreY - iradius) * pixelsPerCellY);
+	int x1 = (int) std::ceil((centreX + iradius) * pixelsPerCellX);
+	int y1 = (int) std::ceil((centreY + iradius) * pixelsPerCellY);
+	x0 = std::max(x0, 0);
+	y0 = std::max(y0, 0);
+	x1 = std::min(x1, texture.width - 1);
+	y1 = std::min(y1, texture.height - 1);
+	if (x0 > x1 || y0 > y1) return touched;  // entirely off the map
+
+	for (int py = y0; py <= y1; py++) {
+		// Pixel centre back in heightmap-cell space, relative to the blast.
+		const float cellY = ((float) py + 0.5f) / pixelsPerCellY - (float) centreY;
+		for (int px = x0; px <= x1; px++) {
+			const float cellX = ((float) px + 0.5f) / pixelsPerCellX - (float) centreX;
+
+			const float distance = std::sqrt(cellX * cellX + cellY * cellY);
+			const float mag = scorchFalloff(distance, radius);
+			if (mag <= 0.0f) continue;
+
+			// Tile the scorch image in texture space, exactly as upstream
+			// does - so two craters side by side don't show the same stamp.
+			const int sx = ((px % scorch.getWidth()) + scorch.getWidth()) % scorch.getWidth();
+			const int sy = ((py % scorch.getHeight()) + scorch.getHeight()) % scorch.getHeight();
+			unsigned char *src = scorch.getBitsPos(sx, sy);
+			unsigned char *dest = &texture.rgb[(size_t(py) * texture.width + px) * 3];
+
+			// A single-component scorch image is greyscale, so the one
+			// value drives all three channels (upstream branches the same
+			// way rather than assuming RGB).
+			const bool greyscale = (scorch.getComponents() == 1);
+			for (int c = 0; c < 3; c++) {
+				const float s = (float) src[greyscale ? 0 : c];
+				dest[c] = (unsigned char) std::min(255.0f, std::max(0.0f,
+					s * mag + (float) dest[c] * (1.0f - mag)));
+			}
+		}
+	}
+
+	touched.x = x0;
+	touched.y = y0;
+	touched.width = x1 - x0 + 1;
+	touched.height = y1 - y0 + 1;
+	return touched;
 }
 
 }  // namespace LandscapeTextureBuilder

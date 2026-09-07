@@ -56,6 +56,8 @@
 #include <ClientSync.hpp>
 
 #include <cstdio>
+#include <cmath>
+#include <vector>
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
@@ -555,6 +557,65 @@ namespace
 			}
 			check(maxC > minC, "the generated ground texture actually varies (height/slope blending ran)");
 			check(total > 0, "the generated ground texture isn't entirely black (source images loaded)");
+
+			// M6 scorch marks - the other half of terrain destruction, and
+			// the half upstream keeps in the client layer
+			// (DeformTextures::deformLandscape + ExplosionTextures::
+			// getScorchBitmap). Checked here rather than on-device because
+			// it is deliberately GL-free; the renderer only uploads what
+			// this produces.
+			std::vector<unsigned char> before = ground.rgb;
+			const float scorchRadius = 8.0f;
+			LandscapeTextureBuilder::Rect rect = LandscapeTextureBuilder::applyScorch(
+				server->getContext(), ground, cx, cy, scorchRadius, "");
+			check(rect.valid(), "a scorch mark reports the texture rectangle it touched");
+
+			if (rect.valid())
+			{
+				// The blast centre must actually change, or the mark is
+				// invisible - the failure mode a "did it run" check misses.
+				const float pixelsPerCellX = (float) ground.width / (float) hmap.getMapWidth();
+				const float pixelsPerCellY = (float) ground.height / (float) hmap.getMapHeight();
+				size_t centreIndex = ((size_t) (cy * pixelsPerCellY) * ground.width
+					+ (size_t) (cx * pixelsPerCellX)) * 3;
+				bool centreChanged =
+					before[centreIndex] != ground.rgb[centreIndex] ||
+					before[centreIndex + 1] != ground.rgb[centreIndex + 1] ||
+					before[centreIndex + 2] != ground.rgb[centreIndex + 2];
+				check(centreChanged, "the scorch mark actually changes pixels at the blast centre");
+
+				// And nothing outside the crater may change - a mark that
+				// bleeds across the whole map would still "work" by the
+				// check above.
+				size_t changedOutside = 0, changedInside = 0;
+				for (int py = 0; py < ground.height; py++)
+				{
+					for (int px = 0; px < ground.width; px++)
+					{
+						size_t i = ((size_t) py * ground.width + px) * 3;
+						if (before[i] == ground.rgb[i] &&
+							before[i + 1] == ground.rgb[i + 1] &&
+							before[i + 2] == ground.rgb[i + 2]) continue;
+
+						float dx = ((float) px + 0.5f) / pixelsPerCellX - (float) cx;
+						float dy = ((float) py + 0.5f) / pixelsPerCellY - (float) cy;
+						if (std::sqrt(dx * dx + dy * dy) <= scorchRadius + 1.0f) changedInside++;
+						else changedOutside++;
+					}
+				}
+				check(changedOutside == 0, "the scorch mark stays inside the blast radius");
+				check(changedInside > 0, "the scorch mark covers a real area, not a single pixel");
+
+				// Marks must accumulate: upstream blends each blast into the
+				// result of every earlier one, which is why the renderer
+				// keeps a CPU-side copy of the texture rather than
+				// regenerating it. A second mark on the same spot must
+				// therefore still be able to change it.
+				std::vector<unsigned char> afterFirst = ground.rgb;
+				LandscapeTextureBuilder::applyScorch(
+					server->getContext(), ground, cx + 4, cy, scorchRadius, "");
+				check(afterFirst != ground.rgb, "a second overlapping scorch blends onto the first");
+			}
 		}
 
 		// Normals are recalculated inside the same shared call (setNormals
