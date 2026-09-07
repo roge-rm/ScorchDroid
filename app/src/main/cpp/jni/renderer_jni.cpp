@@ -712,7 +712,14 @@ namespace
 	const char *kWaterVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
 		uniform mat4 uMVP;
-		uniform float uTime;
+		// Explicitly highp, and matched in the fragment shader below. A
+		// uniform of the same name must have the same precision in both
+		// stages or the program will not link - and a vertex shader's
+		// default for float is highp while a fragment shader's is whatever
+		// its `precision` line says. Time also genuinely needs the range:
+		// it runs to 3600, where mediump's ~10-bit mantissa steps in units
+		// of about 4 and the waves would stop moving.
+		uniform highp float uTime;
 		uniform float uWaveAmplitude;
 		uniform vec2  uWaveCentre;
 		uniform float uWaveReach;
@@ -766,7 +773,7 @@ namespace
 		uniform vec3 uDeepColor;
 		uniform vec3 uShallowColor;
 		uniform float uAlpha;
-		uniform float uTime;
+		uniform highp float uTime;  // must match the vertex shader's, see above
 		uniform vec2 uEye;
 		uniform sampler2D uShore;
 		uniform vec2 uMapSize;
@@ -1350,6 +1357,11 @@ namespace
 			LOGI("Sky: gradient loaded, sun towards (%.2f, %.2f, %.2f), glow %d",
 				 skyDescription.sunDirection[0], skyDescription.sunDirection[1],
 				 skyDescription.sunDirection[2], skyDescription.horizonGlow ? 1 : 0);
+			LOGI("Sky: horizon (%.2f, %.2f, %.2f), zenith (%.2f, %.2f, %.2f), fog density %.4f",
+				 skyDescription.gradient[0][0], skyDescription.gradient[0][1],
+				 skyDescription.gradient[0][2],
+				 skyDescription.gradient[15][0], skyDescription.gradient[15][1],
+				 skyDescription.gradient[15][2], skyDescription.fogDensity);
 		} else {
 			LOGI("Sky: no usable colour map for this landscape - keeping the flat fallback");
 		}
@@ -1561,6 +1573,9 @@ namespace
 		waterVisible = true;
 		LOGI("Water surface at height %.1f, alpha %.2f, shore mask %s",
 			 waterHeight, waterAlpha, shore.empty() ? "none" : "built");
+		LOGI("Water colours: deep (%.2f, %.2f, %.2f), shallow (%.2f, %.2f, %.2f)",
+			 waterDeep[0], waterDeep[1], waterDeep[2],
+			 waterShallow[0], waterShallow[1], waterShallow[2]);
 	}
 
 	// M6 terrain destruction: craters are carved into the real heightmap by
@@ -2609,6 +2624,22 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	glEnableVertexAttribArray(0);
 	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
 	glBindVertexArray(0);
+
+	// Every draw is guarded by `program != 0`, so a program that fails to
+	// link doesn't crash - the thing it drew just quietly stops appearing,
+	// and looks like a shading bug rather than a missing draw. That cost a
+	// while with the water (a uTime precision mismatch across the two
+	// stages), so say so once, plainly, at the point it happens.
+	const struct { const char *name; GLuint program; } programs[] = {
+		{ "terrain", terrainProgram }, { "shadow", shadowProgram },
+		{ "sprite", spriteProgram },   { "cloud", cloudProgram },
+		{ "sky", skyProgram },         { "water", waterProgram },
+		{ "sight", sightProgram },     { "mesh", meshProgram },
+		{ "point", pointProgram },     { "particle", particleProgram },
+	};
+	for (const auto &p : programs) {
+		if (p.program == 0) LOGE("Shader program '%s' FAILED to link - it will draw nothing", p.name);
+	}
 
 	glClearColor(0.5f, 0.65f, 0.85f, 1.0f);  // sky
 	glEnable(GL_DEPTH_TEST);
