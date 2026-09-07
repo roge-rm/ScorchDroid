@@ -18,6 +18,18 @@ class GameRenderer : GLSurfaceView.Renderer {
     external fun nativeOnSurfaceCreated()
     external fun nativeOnSurfaceChanged(width: Int, height: Int)
     external fun nativeOnDrawFrame()
+    /**
+     * M6 name plates: the last frame's tank positions projected to screen
+     * pixels, one row each:
+     * "screenX|screenY|onScreen|alive|mine|life|shield|r|g|b|name".
+     *
+     * Projected natively because the renderer is the only place with the
+     * finished MVP - redoing the camera maths in Kotlin would be a second
+     * implementation to keep in step. The *text* stays on this side: this
+     * port has no GL font renderer and its UI layer is Compose.
+     */
+    external fun nativeGetTankOverlays(): Array<String>
+
     external fun nativeCameraDrag(dx: Float, dy: Float)
     external fun nativeCameraZoom(scaleFactor: Float)
 
