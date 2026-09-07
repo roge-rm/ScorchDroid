@@ -16,6 +16,7 @@ import java.util.Collections
 import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -555,6 +556,49 @@ class MainActivity : AppCompatActivity() {
     // The battlefield tap was free - since the 3D camera landed, dragging
     // orbits and a plain tap did nothing at all.
     /**
+     * Acknowledges a purchase at once, then reconciles it with the engine.
+     *
+     * A buy is a queued simulator action, not an immediate one:
+     * ServerSimulator only promotes it at a send boundary a couple of
+     * fixed-seconds out, so the real count can take several seconds to
+     * appear. The shop used to read straight back after sending and so
+     * showed the *old* row - during a ~20 second buying phase that reads as
+     * "the tap did nothing", and there is no time to close and reopen the
+     * shop to find out otherwise.
+     *
+     * So the row goes to "buying..." and flashes immediately (the money is
+     * deducted locally too), and this then polls until the engine confirms.
+     * Whatever the engine reports wins in the end, so a purchase the server
+     * rejects corrects itself rather than leaving a lie on screen.
+     */
+    private suspend fun awaitPurchase(shop: HudDialog.Shop, weapon: WeaponShopEntry) {
+        shop.markPending(weapon.accessoryId, weapon.price)
+
+        // ~4s at 120ms. Longer than the couple of seconds a send boundary
+        // needs, short enough that a rejected buy doesn't sit as
+        // "buying..." for the rest of the phase.
+        repeat(34) {
+            delay(120)
+            val money = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
+            val entries = withContext(Dispatchers.Default) {
+                parseWeaponShop(NativeBridge.getWeaponShop())
+            }
+            val updated = entries.firstOrNull { it.accessoryId == weapon.accessoryId }
+            if (updated != null && updated.ownedCount != weapon.ownedCount) {
+                shop.settle(weapon.accessoryId, money, entries)
+                return
+            }
+        }
+
+        // Never confirmed - show whatever is actually true now.
+        val money = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
+        val entries = withContext(Dispatchers.Default) {
+            parseWeaponShop(NativeBridge.getWeaponShop())
+        }
+        shop.settle(weapon.accessoryId, money, entries)
+    }
+
+    /**
      * A tap on the battlefield: normally aims, but with a position-select
      * weapon current (Fuel, Rocket Fuel, Teleport) it *uses* that weapon on
      * the tapped square instead - which for the fuel weapons means driving
@@ -730,20 +774,19 @@ class MainActivity : AppCompatActivity() {
                             // there's at least a visible reason why.
                             val status = withContext(Dispatchers.Default) { NativeBridge.getMyStatusLabel() }
                             if (status.startsWith("Buying")) {
-                                withContext(Dispatchers.Default) { NativeBridge.buyAccessory(weapon.accessoryId, true) }
+                                val sent = withContext(Dispatchers.Default) {
+                                    NativeBridge.buyAccessory(weapon.accessoryId, true)
+                                }
                                 // Stay open and refresh rather than close:
                                 // the buying phase is for kitting out, and
-                                // reopening the shop after every single
-                                // purchase (then finding your place in the
-                                // list again) was needless work. money and
+                                // reopening the shop after every purchase
+                                // (then finding your place in the list
+                                // again) was needless work. money and
                                 // entries are dialog state precisely so this
                                 // can update in place.
                                 val shop = hudState.dialog
-                                if (shop is HudDialog.Shop) {
-                                    shop.money = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
-                                    shop.entries = withContext(Dispatchers.Default) {
-                                        parseWeaponShop(NativeBridge.getWeaponShop())
-                                    }
+                                if (sent && shop is HudDialog.Shop) {
+                                    awaitPurchase(shop, weapon)
                                 }
                             } else {
                                 hudState.dialog = HudDialog.Message(

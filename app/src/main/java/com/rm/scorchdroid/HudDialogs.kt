@@ -1,5 +1,7 @@
 package com.rm.scorchdroid
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -29,9 +31,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -108,6 +112,35 @@ sealed class HudDialog {
     ) : HudDialog() {
         var money by mutableIntStateOf(money)
         var entries by mutableStateOf(entries)
+
+        /**
+         * Accessories bought but not yet confirmed by the engine. A buy is
+         * a queued simulator action, and the round it lands on can be a
+         * couple of seconds out (ServerSimulator's send boundary), which is
+         * a long time against a ~20 second buying phase - long enough that
+         * the row still showing a price reads as "the tap did nothing".
+         * These rows say so instead, and become a real count when the
+         * engine confirms.
+         */
+        var pending by mutableStateOf(emptySet<Int>())
+
+        /** The row to flash, and a token that changes on every purchase so
+         *  buying the same thing twice flashes twice. */
+        var flashAccessoryId by mutableIntStateOf(0)
+        var flashToken by mutableIntStateOf(0)
+
+        fun markPending(accessoryId: Int, price: Int) {
+            pending = pending + accessoryId
+            money -= price
+            flashAccessoryId = accessoryId
+            flashToken++
+        }
+
+        fun settle(accessoryId: Int, money: Int, entries: List<WeaponShopEntry>) {
+            pending = pending - accessoryId
+            this.money = money
+            this.entries = entries
+        }
     }
 }
 
@@ -150,7 +183,15 @@ private fun ShopContent(dialog: HudDialog.Shop) {
         Box(Modifier.heightIn(max = 400.dp)) {
             LazyColumn(state = listState, modifier = Modifier.padding(end = 10.dp)) {
                 items(visible) { entry ->
-                    ShopRow(entry) { dialog.onSelect(entry) }
+                    ShopRow(
+                        entry = entry,
+                        pending = dialog.pending.contains(entry.accessoryId),
+                        flashToken = if (dialog.flashAccessoryId == entry.accessoryId) {
+                            dialog.flashToken
+                        } else {
+                            0
+                        },
+                    ) { dialog.onSelect(entry) }
                 }
             }
             ListScrollbar(listState, Modifier.align(Alignment.CenterEnd))
@@ -164,10 +205,34 @@ private fun ShopContent(dialog: HudDialog.Shop) {
  * dash in each row - which is what the old single-string rows forced.
  */
 @Composable
-private fun ShopRow(entry: WeaponShopEntry, onClick: () -> Unit) {
+private fun ShopRow(
+    entry: WeaponShopEntry,
+    pending: Boolean,
+    flashToken: Int,
+    onClick: () -> Unit,
+) {
+    // A purchase needs an acknowledgement the eye catches without being
+    // watched for: the row lights up at once and fades over about half a
+    // second. Keyed on a token rather than a boolean so buying the same
+    // accessory twice in a row flashes twice.
+    var lit by remember { mutableStateOf(false) }
+    LaunchedEffect(flashToken) {
+        if (flashToken != 0) {
+            lit = true
+            delay(100)
+            lit = false
+        }
+    }
+    val flash by animateFloatAsState(
+        targetValue = if (lit) 0.5f else 0f,
+        animationSpec = tween(durationMillis = if (lit) 0 else 550),
+        label = "shopRowFlash",
+    )
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = flash))
             .clickable(onClick = onClick)
             .padding(vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -189,12 +254,19 @@ private fun ShopRow(entry: WeaponShopEntry, onClick: () -> Unit) {
             // long enough to need eliding. Unlimited is spelled out rather
             // than run through the "x{n}" form, which read as "xunlimited".
             text = when {
+                // Says something changed the instant it is tapped, without
+                // claiming a count the engine hasn't granted yet.
+                pending -> "buying..."
                 entry.ownedCount < 0 -> "unlimited"
                 entry.ownedCount > 0 -> "x${entry.ownedCount}"
                 else -> "$${entry.price}"
             },
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (pending) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
         )
     }
 }
