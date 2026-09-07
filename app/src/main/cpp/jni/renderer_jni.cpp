@@ -1372,7 +1372,17 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// from world +Y - see engine_jni.cpp's handleTap comment), and our
 		// world maps landscape (x,y) onto (x,z), so it converts straight
 		// into a rotation about the world up axis.
-		float heading = tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
+		// Negated. TankLib::getVelocityVector fires along
+		// (-sin(xy), cos(xy)), but rotateY(+xy) turns the model's forward
+		// axis to (+sin(xy), cos(xy)) - mirrored. So the drawn barrel, the
+		// aim sight and the shot disagreed: measured on device, a dial of
+		// 94 degrees put the crater 1.3 units *east* of the tank (correct)
+		// while the barrel pointed west.
+		//
+		// Negating here rather than at each use fixes the turret, the gun
+		// and the sight together, since all three are built from this one
+		// value.
+		float heading = -tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
 		float elevation = tank->getShotInfo().getRotationGunYZ().asFloat() * (float) M_PI / 180.0f;
 		bool alive = (tank->getState().getState() == TankState::sNormal);
 		tankInstances.push_back({ x, groundY, z, heading, elevation, mine, alive, model });
