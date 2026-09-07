@@ -121,8 +121,12 @@ private enum class ShopTab(val label: String) {
     WEAPONS("Weapons"),
     DEFENSES("Defenses");
 
+    // Upstream's own <tabgroup>, not the accessory type: Fuel and Rocket
+    // Fuel are weapons that upstream files under defense, and they belong
+    // there - you buy them for the same reason you buy a shield, and you
+    // never pick one when choosing what to shoot with.
     fun matches(entry: WeaponShopEntry): Boolean =
-        if (this == WEAPONS) entry.isWeapon else !entry.isWeapon
+        if (this == WEAPONS) entry.tabGroup == "weapon" else entry.tabGroup != "weapon"
 }
 
 @Composable

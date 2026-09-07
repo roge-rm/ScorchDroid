@@ -5,6 +5,7 @@ import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -280,6 +281,14 @@ class MainActivity : AppCompatActivity() {
             // "clockwise from up" convention (see fireFromSliders).
             val wind = withContext(Dispatchers.Default) { NativeBridge.getWindInfo() }
             hudState.windLabel = formatWindLabel(wind)
+            // M6 tank movement: Fuel and friends are used by tapping the
+            // ground rather than by aiming, so the HUD needs to know which
+            // mode the battlefield tap is in - see handleBattlefieldTap.
+            val positionSelect = withContext(Dispatchers.Default) {
+                NativeBridge.getPositionSelect()
+            }
+            hudState.positionSelectWeapon =
+                positionSelect.split("|").getOrNull(1).orEmpty()
             // M6: seed the aiming sliders from where the tank is actually
             // pointing, once, as soon as we have a tank - the engine gives
             // every tank a real starting turret rotation, so leaving the
@@ -488,7 +497,7 @@ class MainActivity : AppCompatActivity() {
                     val moved = kotlin.math.hypot(movedX, movedY)
                     val heldMs = event.eventTime - downTime
                     if (!multiTouched && moved <= tapSlopPx && heldMs <= TAP_MAX_MS) {
-                        aimAtScreenPoint(event.x, event.y)
+                        handleBattlefieldTap(event.x, event.y)
                     }
                     dragging = false
                     panning = false
@@ -545,7 +554,17 @@ class MainActivity : AppCompatActivity() {
     //
     // The battlefield tap was free - since the 3D camera landed, dragging
     // orbits and a plain tap did nothing at all.
-    private fun aimAtScreenPoint(screenX: Float, screenY: Float) {
+    /**
+     * A tap on the battlefield: normally aims, but with a position-select
+     * weapon current (Fuel, Rocket Fuel, Teleport) it *uses* that weapon on
+     * the tapped square instead - which for the fuel weapons means driving
+     * the tank there. Upstream splits the same way, in
+     * TargetCamera::landIntersect.
+     *
+     * The pick is done once here and handed to whichever branch, rather
+     * than in each, so a tap can't ray-cast twice.
+     */
+    private fun handleBattlefieldTap(screenX: Float, screenY: Float) {
         CoroutineScope(Dispatchers.Main).launch {
             val hit = withContext(Dispatchers.Default) {
                 gameRenderer.nativePickTerrain(screenX, screenY)
@@ -554,16 +573,39 @@ class MainActivity : AppCompatActivity() {
             val landscapeX = parts.getOrNull(0)?.toFloatOrNull() ?: return@launch
             val landscapeY = parts.getOrNull(1)?.toFloatOrNull() ?: return@launch
 
-            val angle = withContext(Dispatchers.Default) {
-                NativeBridge.aimAtPoint(landscapeX, landscapeY)
+            if (hudState.positionSelectWeapon.isNotEmpty()) {
+                val used = withContext(Dispatchers.Default) {
+                    NativeBridge.firePositionSelect(landscapeX, landscapeY)
+                }
+                // Upstream's click handler simply returns when the square is
+                // out of reach, which on a touch screen is indistinguishable
+                // from a missed tap - so say it instead. The reachable area
+                // is painted on the ground either way.
+                if (!used) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Out of range for ${hudState.positionSelectWeapon}",
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
+                return@launch
             }
-            if (angle < 0f) return@launch
 
-            // aimAtPoint has already moved the real turret; this just keeps
-            // the dial showing what the tank is actually doing.
-            currentAngleDegrees = dialAngleFromEngine(angle)
-            hudState.angleDegrees = currentAngleDegrees
+            aimAtLandscapePoint(landscapeX, landscapeY)
         }
+    }
+
+    /** Swings the turret to face an already-picked landscape point. */
+    private suspend fun aimAtLandscapePoint(landscapeX: Float, landscapeY: Float) {
+        val angle = withContext(Dispatchers.Default) {
+            NativeBridge.aimAtPoint(landscapeX, landscapeY)
+        }
+        if (angle < 0f) return
+
+        // aimAtPoint has already moved the real turret; this just keeps
+        // the dial showing what the tank is actually doing.
+        currentAngleDegrees = dialAngleFromEngine(angle)
+        hudState.angleDegrees = currentAngleDegrees
     }
 
     // M6: pushes the current slider values onto "my tank"'s real turret so
