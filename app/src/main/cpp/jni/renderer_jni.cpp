@@ -1598,7 +1598,11 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeCameraDrag(JNIEnv *, jobject, jfloat dx, jfloat dy) {
 	std::lock_guard<std::mutex> lock(g_cameraMutex);
 	g_camera.yaw += dx * kDragSensitivity;
-	g_camera.pitch = std::min(std::max(g_camera.pitch - dy * kDragSensitivity, kMinPitch), kMaxPitch);
+	// Vertical drag raises the camera as the finger moves down, i.e. the
+	// view tips the way the far side of the ground would if you had hold of
+	// it. The opposite (drag down, camera drops toward the horizon) was
+	// tried first and reported backwards.
+	g_camera.pitch = std::min(std::max(g_camera.pitch + dy * kDragSensitivity, kMinPitch), kMaxPitch);
 }
 
 // M6: two-finger drag slides the free-fly camera's look-at point across the
@@ -1631,8 +1635,15 @@ Java_com_rm_scorchdroid_GameRenderer_nativeCameraPan(JNIEnv *, jobject, jfloat d
 	// which is not noticeable in practice.)
 	const float visibleHeight = 2.0f * g_camera.orbitDistance * tanf(kFovYRadians * 0.5f);
 	const float scale = visibleHeight / (float) std::max(surfaceHeight, 1);
-	g_camera.targetX -= (rightX * dx + fwdX * dy) * scale;
-	g_camera.targetZ -= (rightZ * dx + fwdZ * dy) * scale;
+
+	// Vertical drag is inverted relative to the horizontal one, matching
+	// the pitch direction in nativeCameraDrag - the first version moved the
+	// view the other way and was reported backwards. Negated once here
+	// rather than by flipping a sign in each axis below, so the two lines
+	// stay symmetrical and can't drift apart.
+	const float dragUp = -dy;
+	g_camera.targetX -= (rightX * dx + fwdX * dragUp) * scale;
+	g_camera.targetZ -= (rightZ * dx + fwdZ * dragUp) * scale;
 
 	// Keep the target near the map. Panning off into empty space is never
 	// useful and is easy to do by accident, leaving nothing on screen and
