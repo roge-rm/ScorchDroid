@@ -53,4 +53,22 @@
     <name>StartTime</name>
     <value>5</value>
   </option>
+
+  <!-- ############################################################
+       TESTING ONLY - REMOVE BEFORE RELEASE
+       ############################################################
+       Starting money raised from the engine default of 10000 to 100000 so
+       the whole shop is reachable in round one while the weapon effects
+       (napalm, laser, lightning) are still being checked on device - most
+       of them cost far more than a real starting balance affords.
+
+       This trivialises the economy, which is a real part of the game: with
+       this in place there is no reason to save, and the buying phase stops
+       being a decision. Delete this whole block before any release build.
+       Tracked in the porting plan under "temporary testing settings".
+       ############################################################ -->
+  <option>
+    <name>MoneyStarting</name>
+    <value>100000</value>
+  </option>
 </options>
