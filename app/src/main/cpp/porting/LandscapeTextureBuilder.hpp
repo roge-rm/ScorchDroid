@@ -45,6 +45,42 @@ namespace LandscapeTextureBuilder
 	// non-generated texture style, an image that wouldn't load) and they
 	// need very different fixes, so the caller shouldn't have to guess.
 	Texture build(ScorchedContext &context, int size, std::string *error = nullptr);
+
+	// The rectangle of [texture] a scorch touched, in texture pixels, so
+	// the caller can re-upload just that part.
+	struct Rect
+	{
+		int x = 0, y = 0, width = 0, height = 0;
+
+		bool valid() const { return width > 0 && height > 0; }
+	};
+
+	// Burns one scorch mark into an already-built ground texture, at a
+	// blast centred on heightmap cell (centreX, centreY). A port of
+	// DeformTextures::deformLandscape, which is client-only upstream.
+	//
+	// [textureName] is the weapon's own <deformtexture> if it named one;
+	// empty falls back to the landscape definition's <scorch> image, which
+	// is what upstream's ExplosionTextures::getScorchBitmap does. The image
+	// is tiled across the landscape rather than fitted to the blast, again
+	// matching upstream - so neighbouring craters get visibly different
+	// patches of it instead of the same stamp repeated.
+	//
+	// Two deliberate differences from upstream, neither visual:
+	//  - The falloff is evaluated directly per pixel rather than bilinearly
+	//    interpolated out of DeformLandscape's precomputed 100x100 map.
+	//    That map's values are a pure function of the radius (see
+	//    DeformLandscapeCache), so this computes the same curve without
+	//    having to ship 80KB per blast through the event queue.
+	//  - Blending is straight CPU work on the pixel buffer; upstream folds
+	//    it into a glTexSubImage2D of its own. Keeping it GL-free is what
+	//    lets host-tests check it.
+	//
+	// Returns the touched rectangle, or an invalid Rect if the blast missed
+	// the texture entirely or the scorch image wouldn't load.
+	Rect applyScorch(ScorchedContext &context, Texture &texture,
+					 int centreX, int centreY, float radius,
+					 const std::string &textureName);
 }
 
 #endif  // __INCLUDE_LandscapeTextureBuilder_hpp_INCLUDE__
