@@ -42,6 +42,10 @@
 #include <tank/TankState.hpp>
 #include <target/TargetShield.hpp>
 #include <weapons/Shield.hpp>
+#include <weapons/ShieldRound.hpp>
+#include <weapons/ShieldSquare.hpp>
+#include <target/TargetState.hpp>
+#include <actions/TargetFalling.hpp>
 #include <lang/LangString.hpp>
 #include <engine/ActionController.hpp>
 #include <common/FixedVector.hpp>
@@ -681,6 +685,107 @@ namespace
 		}
 	}
 
+	// M6 shield bubbles and parachutes. Upstream builds these from GLU
+	// quadrics and display lists (TargetRendererImpl::drawShield /
+	// drawParachute), neither of which exists in GLES3, so the shapes are
+	// generated once here as plain vertex buffers instead. Positions and
+	// normals only - both are drawn with the existing mesh shader.
+	GLuint sphereVao = 0, sphereVbo = 0;   int sphereVertexCount = 0;
+	GLuint hemiVao = 0, hemiVbo = 0;       int hemiVertexCount = 0;
+	GLuint cubeVao = 0, cubeVbo = 0;       int cubeVertexCount = 0;
+	GLuint chuteVao = 0, chuteVbo = 0;     int chuteVertexCount = 0;
+	GLuint chuteCordVao = 0, chuteCordVbo = 0; int chuteCordVertexCount = 0;
+
+	void uploadPosNormal(GLuint &vao, GLuint &vbo, const std::vector<float> &data)
+	{
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+		glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+		glBindVertexArray(0);
+	}
+
+	// A unit sphere as triangles. `startRow` at half the stacks yields the
+	// upper hemisphere, which is upstream's half-shield.
+	std::vector<float> buildSphere(int stacks, int slices, int startRow)
+	{
+		std::vector<float> data;
+		auto point = [&](int stack, int slice) {
+			const float phi = (float) M_PI * (float) stack / (float) stacks;
+			const float theta = 2.0f * (float) M_PI * (float) slice / (float) slices;
+			const float y = cosf(phi), r = sinf(phi);
+			const float x = r * cosf(theta), z = r * sinf(theta);
+			// Unit sphere, so the position doubles as the normal.
+			for (float v : { x, y, z, x, y, z }) data.push_back(v);
+		};
+		for (int stack = startRow; stack < stacks; stack++) {
+			for (int slice = 0; slice < slices; slice++) {
+				point(stack, slice);     point(stack + 1, slice); point(stack, slice + 1);
+				point(stack, slice + 1); point(stack + 1, slice); point(stack + 1, slice + 1);
+			}
+		}
+		return data;
+	}
+
+	std::vector<float> buildCube()
+	{
+		std::vector<float> data;
+		const float f[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+		for (const auto &n : f) {
+			// Two in-plane axes for this face.
+			float a[3] = { n[1], n[2], n[0] };
+			float b[3] = { n[2], n[0], n[1] };
+			auto corner = [&](float sa, float sb) {
+				for (int i = 0; i < 3; i++) data.push_back(n[i] + a[i] * sa + b[i] * sb);
+				for (int i = 0; i < 3; i++) data.push_back(n[i]);
+			};
+			corner(-1,-1); corner(1,-1); corner(1,1);
+			corner(-1,-1); corner(1,1);  corner(-1,1);
+		}
+		return data;
+	}
+
+	// The canopy: a cone from an apex at y=3 down to a ring of radius 2 at
+	// y=2, matching upstream's triangle fan.
+	std::vector<float> buildParachuteCanopy(int slices)
+	{
+		std::vector<float> data;
+		for (int i = 0; i < slices; i++) {
+			const float t0 = 2.0f * (float) M_PI * (float) i / (float) slices;
+			const float t1 = 2.0f * (float) M_PI * (float) (i + 1) / (float) slices;
+			const float x0 = sinf(t0) * 2.0f, z0 = cosf(t0) * 2.0f;
+			const float x1 = sinf(t1) * 2.0f, z1 = cosf(t1) * 2.0f;
+			const float verts[3][3] = {{0.0f, 3.0f, 0.0f}, {x0, 2.0f, z0}, {x1, 2.0f, z1}};
+			for (const auto &v : verts) {
+				data.push_back(v[0]); data.push_back(v[1]); data.push_back(v[2]);
+				// Outward-ish normal; the canopy is unlit enough that a
+				// per-face approximation is plenty.
+				data.push_back(v[0] * 0.4f); data.push_back(0.8f); data.push_back(v[2] * 0.4f);
+			}
+		}
+		return data;
+	}
+
+	// Eight cords from the tank up to the canopy rim, as upstream draws.
+	std::vector<float> buildParachuteCords(int count)
+	{
+		std::vector<float> data;
+		for (int i = 0; i < count; i++) {
+			const float t = 2.0f * (float) M_PI * (float) i / (float) count;
+			const float pts[2][3] = {{0.0f, 0.0f, 0.0f}, {sinf(t) * 2.0f, 2.0f, cosf(t) * 2.0f}};
+			for (const auto &v : pts) {
+				data.push_back(v[0]); data.push_back(v[1]); data.push_back(v[2]);
+				data.push_back(0.0f); data.push_back(1.0f); data.push_back(0.0f);
+			}
+		}
+		return data;
+	}
+
 	// M6 effects. The engine raises one event per explosion / napalm flame /
 	// laser / lightning arc / shield impact (see EffectEventQueue.h, fed by
 	// patch 0011); this turns each into particles or beams. Upstream's own
@@ -1293,6 +1398,18 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
 	glBindVertexArray(0);
 
+	// Shield bubbles and parachutes - static shapes, uploaded once.
+	uploadPosNormal(sphereVao, sphereVbo, buildSphere(12, 16, 0));
+	sphereVertexCount = 12 * 16 * 6;
+	uploadPosNormal(hemiVao, hemiVbo, buildSphere(12, 16, 6));
+	hemiVertexCount = 6 * 16 * 6;
+	uploadPosNormal(cubeVao, cubeVbo, buildCube());
+	cubeVertexCount = 36;
+	uploadPosNormal(chuteVao, chuteVbo, buildParachuteCanopy(12));
+	chuteVertexCount = 12 * 3;
+	uploadPosNormal(chuteCordVao, chuteCordVbo, buildParachuteCords(8));
+	chuteCordVertexCount = 8 * 2;
+
 	particles.clear();
 	beams.clear();
 	lastFrameSeconds = 0.0;
@@ -1380,6 +1497,16 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float life;
 		float shield;
 		float colorR, colorG, colorB;
+		// Shield bubble (upstream's TargetRendererImpl::drawShield) and
+		// parachute (drawParachute). shieldRound distinguishes a sphere
+		// from a box; shieldHalf is upstream's half-shield hemisphere.
+		bool  hasShield;
+		bool  shieldRound;
+		bool  shieldHalf;
+		float shieldRadius;                        // round shields
+		float shieldX, shieldY, shieldZ;           // square shields (half-extents)
+		float shieldR, shieldG, shieldB;
+		bool  parachuteOpen;
 	};
 	std::vector<TankInstance> tankInstances;
 	std::vector<float> myTankPositions, enemyTankPositions;  // fallback markers
@@ -1432,12 +1559,49 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 		Vector &tankColor = tank->getColor();
 
+		// Shield bubble geometry, straight off the raised shield's own
+		// accessory - upstream reads exactly these (getRound /
+		// getActualRadius / getHalfShield / getSize / getColor).
+		bool hasShield = false, shieldRound = true, shieldHalf = false;
+		float shieldRadius = 0.0f, shieldX = 0.0f, shieldY = 0.0f, shieldZ = 0.0f;
+		float shieldR = 1.0f, shieldG = 1.0f, shieldB = 1.0f;
+		if (Accessory *shieldAcc = tank->getShield().getCurrentShield()) {
+			if (Shield *shieldAction = (Shield *) shieldAcc->getAction()) {
+				hasShield = true;
+				Vector &sc = shieldAction->getColor();
+				shieldR = sc[0]; shieldG = sc[1]; shieldB = sc[2];
+				shieldRound = shieldAction->getRound();
+				if (shieldRound) {
+					ShieldRound *roundShield = (ShieldRound *) shieldAction;
+					shieldRadius = roundShield->getActualRadius().asFloat();
+					shieldHalf = roundShield->getHalfShield();
+				} else {
+					FixedVector &size = ((ShieldSquare *) shieldAction)->getSize();
+					// Landscape (x, y, height) -> render (x, height, z).
+					shieldX = size[0].asFloat();
+					shieldY = size[2].asFloat();
+					shieldZ = size[1].asFloat();
+				}
+			}
+		}
+
+		// Upstream shows a parachute only while actually falling *with* one
+		// deployed - not merely for owning them.
+		bool parachuteOpen = false;
+		if (TargetFalling *falling = tank->getTargetState().getFalling()) {
+			parachuteOpen = (falling->getParachute() != nullptr);
+		}
+
 		tankInstances.push_back({
 			x, groundY, z, heading, elevation, mine, alive, model,
 			LangStringUtil::convertFromLang(tank->getTargetName()),
 			std::min(std::max(lifeFraction, 0.0f), 1.0f),
 			std::min(std::max(shieldFraction, 0.0f), 1.0f),
 			tankColor[0], tankColor[1], tankColor[2],
+			hasShield, shieldRound, shieldHalf,
+			shieldRadius, shieldX, shieldY, shieldZ,
+			shieldR, shieldG, shieldB,
+			parachuteOpen,
 		});
 
 		float markerY = groundY + 1.5f;
@@ -1701,6 +1865,57 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// action for as long as it lives, whereas the particle burst below is
 	// raised once at detonation and then flies on its own.
 	drawPoints(mvp, explosionPositions, 20.0f, 1.0f, 0.5f, 0.0f);
+
+	// Shield bubbles and parachutes, after the solid tanks so they blend
+	// over them. Translucent and depth-write-off, so a bubble never hides
+	// the tank inside it or another bubble behind it.
+	{
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDepthMask(GL_FALSE);
+		glUseProgram(meshProgram);
+		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+
+		for (TankInstance &inst : tankInstances) {
+			if (!inst.alive) continue;
+
+			if (inst.hasShield) {
+				// Upstream centres the bubble on the tank's own position.
+				Mat4 scale = inst.shieldRound
+					? Mat4::scale(inst.shieldRadius)
+					: Mat4::scale(inst.shieldX, inst.shieldY, inst.shieldZ);
+				Mat4 model = Mat4::multiply(Mat4::translate(inst.x, inst.y, inst.z), scale);
+				glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
+				glUniform4f(meshColorLoc, inst.shieldR, inst.shieldG, inst.shieldB, 0.35f);
+
+				if (!inst.shieldRound) {
+					glBindVertexArray(cubeVao);
+					glDrawArrays(GL_TRIANGLES, 0, cubeVertexCount);
+				} else if (inst.shieldHalf) {
+					glBindVertexArray(hemiVao);
+					glDrawArrays(GL_TRIANGLES, 0, hemiVertexCount);
+				} else {
+					glBindVertexArray(sphereVao);
+					glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
+				}
+			}
+
+			if (inst.parachuteOpen) {
+				Mat4 model = Mat4::translate(inst.x, inst.y, inst.z);
+				glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
+				glUniform4f(meshColorLoc, 0.85f, 0.85f, 0.9f, 0.9f);
+				glBindVertexArray(chuteVao);
+				glDrawArrays(GL_TRIANGLES, 0, chuteVertexCount);
+				glUniform4f(meshColorLoc, 1.0f, 1.0f, 1.0f, 0.9f);
+				glBindVertexArray(chuteCordVao);
+				glDrawArrays(GL_LINES, 0, chuteCordVertexCount);
+			}
+		}
+
+		glBindVertexArray(0);
+		glDepthMask(GL_TRUE);
+		glDisable(GL_BLEND);
+	}
 
 	// Effects last, so they blend additively over the finished scene.
 	drawEffects(mvp, eyeX, eyeY, eyeZ, kFovYRadians);
