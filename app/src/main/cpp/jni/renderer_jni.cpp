@@ -1356,6 +1356,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	std::vector<TankInstance> tankInstances;
 	std::vector<float> myTankPositions, enemyTankPositions;  // fallback markers
 	bool haveMyTank = false;
+	bool myTankAlive = false;
 	float myTankX = 0.0f, myTankY = 0.0f, myTankZ = 0.0f;
 	for (auto &entry : tanks) {
 		Tank *tank = entry.second;
@@ -1391,6 +1392,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		if (mine) {
 			myTankPositions.push_back(x); myTankPositions.push_back(markerY); myTankPositions.push_back(z);
 			haveMyTank = true;
+			myTankAlive = alive;
 			myTankX = x; myTankY = markerY; myTankZ = z;
 		} else {
 			enemyTankPositions.push_back(x); enemyTankPositions.push_back(markerY); enemyTankPositions.push_back(z);
@@ -1411,7 +1413,14 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// free-fly target at it. Done even while in follow mode, so that
 		// switching to free-fly later starts from your tank rather than
 		// from wherever the previous round left the target.
-		if (recentreOnMyTank && haveMyTank) {
+		// Gated on the tank being *alive*, not merely present. At the
+		// instant a new landscape appears the tank still carries its
+		// previous round's position - placement runs later, in
+		// ServerTankNewGameState, after buying. Consuming the flag on mere
+		// presence pointed the camera at where the tank used to be last
+		// round and then cleared itself, which is why this appeared to work
+		// on the very first landscape and never again.
+		if (recentreOnMyTank && haveMyTank && myTankAlive) {
 			recentreOnMyTank = false;
 			g_camera.targetX = myTankX;
 			g_camera.targetY = myTankY;
