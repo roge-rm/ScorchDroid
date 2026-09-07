@@ -183,9 +183,11 @@ namespace
 	std::vector<TankOverlay> g_tankOverlays;
 
 	// M6 terrain picking. Rather than invert the MVP, the camera basis is
-	// published each frame and the pick ray is rebuilt from it - the same
-	// vectors lookAt was built from, so there is no second derivation to
-	// keep in step and no matrix inversion to get subtly wrong.
+	// published each frame and the pick ray is rebuilt from it. The basis
+	// is read out of the view matrix that was actually drawn with (its rows
+	// are the camera axes), so there is no second derivation to keep in
+	// step and no matrix inversion to get subtly wrong - see the publish
+	// site in nativeOnDrawFrame for what a second derivation cost.
 	struct PickCamera {
 		bool  valid = false;
 		float eyeX = 0, eyeY = 0, eyeZ = 0;
@@ -1751,38 +1753,36 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 
 	float aspect = (float) surfaceWidth / (float) surfaceHeight;
-	{
-		// Same basis lookAt uses below: forward towards the target, right
-		// perpendicular to it and world up, true up completing the frame.
-		float fx = targetX - eyeX, fy = targetY - eyeY, fz = targetZ - eyeZ;
-		float flen = sqrtf(fx * fx + fy * fy + fz * fz);
-		if (flen > 0.0001f) {
-			fx /= flen; fy /= flen; fz /= flen;
-			// right = forward x worldUp(0,1,0)
-			float rx = fz, ry = 0.0f, rz = -fx;
-			float rlen = sqrtf(rx * rx + rz * rz);
-			if (rlen > 0.0001f) {
-				rx /= rlen; rz /= rlen;
-				// up = right x forward
-				const float ux = ry * fz - rz * fy;
-				const float uy = rz * fx - rx * fz;
-				const float uz = rx * fy - ry * fx;
-
-				std::lock_guard<std::mutex> lock(g_pickMutex);
-				g_pickCamera.valid = true;
-				g_pickCamera.eyeX = eyeX; g_pickCamera.eyeY = eyeY; g_pickCamera.eyeZ = eyeZ;
-				g_pickCamera.fwdX = fx; g_pickCamera.fwdY = fy; g_pickCamera.fwdZ = fz;
-				g_pickCamera.rightX = rx; g_pickCamera.rightY = ry; g_pickCamera.rightZ = rz;
-				g_pickCamera.upX = ux; g_pickCamera.upY = uy; g_pickCamera.upZ = uz;
-				g_pickCamera.tanHalfFov = tanf(kFovYRadians * 0.5f);
-				g_pickCamera.aspect = aspect;
-			}
-		}
-	}
 	float farPlane = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
 	Mat4 proj = Mat4::perspective(kFovYRadians, aspect, 1.0f, farPlane);
 	Mat4 view = Mat4::lookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
 	Mat4 mvp = Mat4::multiply(proj, view);
+
+	{
+		// Publish the pick basis by reading it straight out of the view
+		// matrix that was just drawn with, rather than deriving the same
+		// vectors a second time. A view matrix's upper 3x3 is the world ->
+		// eye rotation, so its rows are exactly the camera axes: row 0 is
+		// right, row 1 is up, row 2 is -forward (Mat4 is column-major, so
+		// row r of column c is m[c * 4 + r]).
+		//
+		// The second derivation this replaces had right and up both
+		// negated - a 180 degree rotation of the screen about its centre,
+		// so every tap picked the landscape point diametrically opposite
+		// the one under the finger. With the tank near the middle of the
+		// screen that reads as "the turret aims away from the tap", and it
+		// is what made upstream's own autoAim expression look like it
+		// needed a half-turn added (see aimAtPoint in engine_jni.cpp).
+		// Two derivations of one basis can drift apart; one cannot.
+		std::lock_guard<std::mutex> lock(g_pickMutex);
+		g_pickCamera.valid = true;
+		g_pickCamera.eyeX = eyeX; g_pickCamera.eyeY = eyeY; g_pickCamera.eyeZ = eyeZ;
+		g_pickCamera.rightX = view.m[0]; g_pickCamera.rightY = view.m[4]; g_pickCamera.rightZ = view.m[8];
+		g_pickCamera.upX    = view.m[1]; g_pickCamera.upY    = view.m[5]; g_pickCamera.upZ    = view.m[9];
+		g_pickCamera.fwdX  = -view.m[2]; g_pickCamera.fwdY  = -view.m[6]; g_pickCamera.fwdZ  = -view.m[10];
+		g_pickCamera.tanHalfFov = tanf(kFovYRadians * 0.5f);
+		g_pickCamera.aspect = aspect;
+	}
 
 	glUseProgram(terrainProgram);
 	glUniformMatrix4fv(terrainMvpLoc, 1, GL_FALSE, mvp.m);
