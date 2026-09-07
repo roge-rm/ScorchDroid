@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- M4: the overlay UI (status/HUD, Shop/weapon buttons, elevation
+     control) is now real Compose (see GameHud.kt), not plain XML views -
+     this layout is just the GL surface plus a single ComposeView covering
+     it. See the porting plan for why this replaces the earlier M4
+     stopgap. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -8,13 +13,9 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <TextView
-        android:id="@+id/status_text"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|start"
-        android:layout_margin="16dp"
-        android:textColor="#FFFFFF"
-        android:textSize="14sp" />
+    <androidx.compose.ui.platform.ComposeView
+        android:id="@+id/hud_compose_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
 
 </FrameLayout>
