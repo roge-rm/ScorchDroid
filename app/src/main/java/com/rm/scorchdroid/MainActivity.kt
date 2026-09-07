@@ -294,26 +294,25 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * The player-facing compass dial (0 up, 90 right, clockwise) converted
-     * to the angle the engine takes. They turn out to be the *same* sense,
-     * so this only normalises the range - but it stays a named function
-     * because every native call taking an angle goes through it, and the
-     * one time these two ends disagreed the shot flew where the compass
-     * said while the turret rotated the other way.
+     * The player-facing compass dial (0 up/north, 90 right/east, clockwise)
+     * converted to the bearing the engine takes, which turns the other way:
+     * `TankLib::getVelocityVector` fires along `(-sin(xy), cos(xy))`, so
+     * engine 0 is north and engine 90 is *west*. A compass and a
+     * counter-clockwise bearing are mirror images, hence `360 - d`.
      *
-     * This used to mirror (360 - d). Reading TankLib::getVelocityVector's
-     * `-xy` inside the sin/cos says it should, and that argument is what
-     * put the mirror here in the first place - but measured on a top-down
-     * view, raising the dial with the mirror in place swung the barrel
-     * *counter*-clockwise. Whatever compensating sign lives in the model or
-     * the rotation, the composed result is what matters, and the composed
-     * result wants no mirror. Verified by watching the sight sweep through
-     * 0/90/180/270 rather than by re-deriving it.
+     * This was an identity mapping for a while, and it genuinely measured
+     * correct at the time - because the renderer was drawing the whole world
+     * mirrored (see worldZFromEngineY in renderer_jni.cpp), which reversed
+     * the apparent sweep on screen and cancelled this one. Correcting the
+     * renderer's handedness uncovered it: the dial started sweeping the
+     * barrel backwards again. Two mirrors cancelling is exactly the trap
+     * this port kept falling into, so: this one is derived, and the sweep
+     * was then checked on a top-down view.
      */
     private fun engineAngleFromDial(dialDegrees: Float): Float =
-        ((dialDegrees % 360f) + 360f) % 360f
+        ((360f - dialDegrees) % 360f + 360f) % 360f
 
-    /** Inverse of [engineAngleFromDial]; identical, since the senses match. */
+    /** Inverse of [engineAngleFromDial] - a mirror is its own inverse. */
     private fun dialAngleFromEngine(engineDegrees: Float): Float =
         engineAngleFromDial(engineDegrees)
 
@@ -512,10 +511,8 @@ class MainActivity : AppCompatActivity() {
     //
     // The angle slider is deliberately a "clockwise from up" dial for the
     // player (0=forward/up, 90=right, 180=back, 270=left - the usual
-    // clock/compass-face reading), but the engine's own fire angle rotates
-    // the same way round as the engine's - see engineAngleFromDial, which
-    // is where that was pinned down by measurement rather than by reading
-    // the velocity formula.
+    // clock/compass-face reading), while the engine's bearing runs
+    // counter-clockwise - see engineAngleFromDial for the conversion.
     private fun fireFromSliders() {
         val engineAngle = engineAngleFromDial(currentAngleDegrees)
         CoroutineScope(Dispatchers.Main).launch {
