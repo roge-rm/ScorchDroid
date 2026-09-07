@@ -69,14 +69,6 @@ sealed class HudDialog {
         val onDismiss: () -> Unit,
     ) : HudDialog()
 
-    data class TutorialStep(
-        val title: String,
-        val message: String,
-        val isLast: Boolean,
-        val onNext: () -> Unit,
-        val onSkip: (() -> Unit)?,
-    ) : HudDialog()
-
     /**
      * A titled, cancelable list of tappable rows - used for the Shop, the
      * weapon quick-select, and LAN game discovery. [title] and [items] are
@@ -257,18 +249,6 @@ fun HudDialogHost(dialog: HudDialog) {
             onDismissRequest = dialog.onDismiss,
             text = { Text(dialog.text) },
             confirmButton = { TextButton(onClick = dialog.onDismiss) { Text("OK") } },
-        )
-
-        is HudDialog.TutorialStep -> AlertDialog(
-            onDismissRequest = {},
-            title = { Text(dialog.title) },
-            text = { Text(dialog.message) },
-            confirmButton = {
-                TextButton(onClick = dialog.onNext) { Text(if (dialog.isLast) "Got it" else "Next") }
-            },
-            dismissButton = dialog.onSkip?.let { skip ->
-                { TextButton(onClick = skip) { Text("Skip") } }
-            },
         )
 
         is HudDialog.ListChoice -> AlertDialog(
