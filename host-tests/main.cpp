@@ -736,33 +736,23 @@ namespace
 
 			if (parsed)
 			{
-				// KNOWN GAP (see the porting plan's M5 Phase 1 notes): the
-				// client is missing exactly its own just-added tank, not
-				// any other tank. Root cause, traced via temporary
-				// instrumentation (since removed): ServerConnectAuthHandler
-				// queues this client's own TankAddSimAction essentially
-				// immediately on connect, but promotion (ServerSimulator::
-				// nextSendTime(), which is what actually broadcasts it and
-				// buffers it into the level-message history everyone who
-				// joins later replays) runs on its own ~1-2-fixed-second
-				// cycle independent of the rest of the handshake. This
-				// client's mod-file/init-mod/load-level round trip
-				// completes fast enough over loopback to request
-				// ComsLoadLevelMessage *before* that promotion cycle has
-				// run - so the one-time tanks snapshot (taken back at the
-				// last real round start) predates it, and the buffered
-				// simulate-message history captured for this specific
-				// snapshot does too. The corresponding TankLoadedSimAction
-				// (queued once this client acks ComsLevelLoadedMessage)
-				// then silently no-ops on replay (its own invokeAction()
-				// just returns false if the tank doesn't exist yet - see
-				// TankLoadedSimAction.cpp), so nothing ever re-syncs it.
-				// Every *other* tank (added long before this client
-				// connected) is unaffected, which is exactly what's
-				// asserted below - a regression here would mean a bigger,
-				// new problem, not this known one.
-				check(clientTanks == server->getTargetContainer().getTanks().size() - 1,
-					"client sees every tank except its own (known Phase 1 gap - see comment above)");
+				// The client must see every tank, including its own. An
+				// earlier version of this check asserted `size() - 1` and
+				// called the missing tank a "known promotion-timing gap";
+				// tracing the real message flow showed the diagnosis was
+				// wrong. The client's own TankAddSimAction arrives fine -
+				// either in the ComsLoadLevelMessage's buffered history or
+				// as a live ComsSimulateMessage (sendToAllLoadedClients
+				// includes sLoadingLevel destinations) - and fires once
+				// the client simulator reaches its event time, which needs
+				// the *next* live message to lift ClientSync's
+				// waitingEventTime_ cap (the same one-message lag upstream's
+				// ClientSimulator has). The old test sampled after a fixed
+				// 2s, a coin flip against the host's send-step schedule, so
+				// the assertion "passed" exactly when the sample was too
+				// early. runClientProcess() now waits for the tank itself.
+				check(clientTanks == server->getTargetContainer().getTanks().size(),
+					"client sees every tank, including its own");
 				check(clientWidth == (unsigned int) server->getLandscapeMaps().getGroundMaps().getHeightMap().getMapWidth(),
 					"client's landscape width matches the host's");
 				check(clientHeight == (unsigned int) server->getLandscapeMaps().getGroundMaps().getHeightMap().getMapHeight(),
@@ -807,14 +797,35 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 		if (!joined && !failed) usleep(100 * 1000);
 	}
 
-	// A few more ticks after joining so any in-flight ComsSimulateMessage
-	// traffic settles before reporting state - see testClientJoin()'s
-	// comment on the one known gap this doesn't resolve (this client's own
-	// just-added tank, missed by a promotion-timing race, never a later
-	// resync).
+	// Joining is not the end of the handshake from the client's point of
+	// view: its own TankAddSimAction is queued for a future event time and
+	// only fires once a later ComsSimulateMessage lifts ClientSync's
+	// waitingEventTime_ cap, plus the client clock starts ~its own
+	// level-load time behind the host. So wait for the tank itself rather
+	// than a fixed number of ticks - a fixed 2s wait was a coin flip against
+	// the host's send-step schedule (see testClientJoin()'s check). Bounded
+	// so a genuine regression still fails instead of hanging.
 	if (joined)
 	{
-		for (int i = 0; i < 20; i++)
+		bool ownTankSeen = false;
+		for (int i = 0; i < 100 && !ownTankSeen; i++)
+		{
+			client.tick();
+			std::map<unsigned int, Tank *> &tanks = client.getTargetContainer().getTanks();
+			std::map<unsigned int, Tank *>::iterator itor;
+			for (itor = tanks.begin(); itor != tanks.end(); ++itor)
+			{
+				if (itor->second->getDestinationId() == client.getMyDestinationId())
+				{
+					ownTankSeen = true;
+					break;
+				}
+			}
+			if (!ownTankSeen) usleep(100 * 1000);
+		}
+		// A couple more ticks so the TankLoaded/TankChange actions that
+		// follow the add have settled too before the count is reported.
+		for (int i = 0; i < 5; i++)
 		{
 			client.tick();
 			usleep(100 * 1000);
