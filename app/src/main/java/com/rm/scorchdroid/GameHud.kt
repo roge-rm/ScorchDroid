@@ -44,6 +44,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -286,6 +288,11 @@ fun GameHud(
                 orientation = SliderOrientation.Horizontal,
                 onValueChange = onAngleChange,
                 modifier = Modifier.size(width = 220.dp, height = 40.dp),
+                // A compass has no ends: dragging off either side keeps
+                // turning the turret and the value wraps, so the whole 360
+                // is reachable in one continuous swipe instead of having to
+                // lift off and restart from the far side of the track.
+                wrapAround = true,
             )
         }
 
@@ -309,8 +316,10 @@ private fun AxisSlider(
     orientation: SliderOrientation,
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
+    wrapAround: Boolean = false,
 ) {
     val isVertical = orientation == SliderOrientation.Vertical
+    val span = valueRange.endInclusive - valueRange.start
     BoxWithConstraints(modifier = modifier) {
         val lengthPx = if (isVertical) constraints.maxHeight.toFloat() else constraints.maxWidth.toFloat()
 
@@ -319,7 +328,34 @@ private fun AxisSlider(
 
         fun applyOffset(pos: Float) {
             val fraction = fractionFromOffset(pos)
-            onValueChange(valueRange.start + fraction * (valueRange.endInclusive - valueRange.start))
+            onValueChange(valueRange.start + fraction * span)
+        }
+
+        // Where the finger went down, and what the value was there. A drag
+        // is applied as a delta from this anchor rather than as an absolute
+        // position, which is what lets a [wrapAround] slider keep turning
+        // past either end: the finger runs off the track but the offset
+        // keeps growing, and the value wraps instead of sticking at 0/360.
+        //
+        // Inside the track this is identical to absolute positioning (the
+        // anchor value is itself the absolute value at the anchor point),
+        // so nothing changes for the non-wrapping sliders.
+        var anchorPos by remember { mutableFloatStateOf(0f) }
+        var anchorValue by remember { mutableFloatStateOf(0f) }
+        // Read through rememberUpdatedState so onDragStart always sees the
+        // latest value without the gesture detector being keyed on it -
+        // keying pointerInput on a value the drag itself changes would tear
+        // down and restart the detector on every frame of the drag.
+        val currentValue by rememberUpdatedState(value)
+
+        fun applyDrag(pos: Float) {
+            if (!wrapAround) {
+                applyOffset(pos)
+                return
+            }
+            val travelled = (pos - anchorPos) / lengthPx * span
+            val raw = anchorValue + if (isVertical) -travelled else travelled
+            onValueChange(((raw - valueRange.start) % span + span) % span + valueRange.start)
         }
 
         Box(
@@ -328,10 +364,19 @@ private fun AxisSlider(
                 .pointerInput(Unit) {
                     detectTapGestures { offset -> applyOffset(if (isVertical) offset.y else offset.x) }
                 }
-                .pointerInput(Unit) {
-                    detectDragGestures { change, _ ->
+                .pointerInput(wrapAround, lengthPx) {
+                    detectDragGestures(
+                        onDragStart = { offset ->
+                            anchorPos = if (isVertical) offset.y else offset.x
+                            // Anchor on the *current* value, not on where the
+                            // finger landed, so grabbing the thumb anywhere
+                            // nudges from where the turret already points
+                            // rather than jumping first.
+                            anchorValue = currentValue
+                        },
+                    ) { change, _ ->
                         change.consume()
-                        applyOffset(if (isVertical) change.position.y else change.position.x)
+                        applyDrag(if (isVertical) change.position.y else change.position.x)
                     }
                 },
         ) {
