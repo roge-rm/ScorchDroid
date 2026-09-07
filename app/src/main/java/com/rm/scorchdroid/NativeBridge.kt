@@ -154,6 +154,14 @@ object NativeBridge {
      * (counterclockwise from world +Y) and needs the same mirroring the
      * fire path applies to turn it into the player-facing dial.
      */
+    /**
+     * M6 HUD: seconds left in the current timed phase (buying, or the shot
+     * clock), or -1 where a countdown would be meaningless - no game yet,
+     * joined as a client (the host owns the clock and doesn't send it), or
+     * a phase that ends on an event rather than a deadline.
+     */
+    external fun getPhaseSecondsRemaining(): Int
+
     external fun getMyAim(): String
 
     /**
