@@ -81,6 +81,11 @@ namespace
 	GLint  terrainGroundTexLoc = -1, terrainHasTextureLoc = -1;
 	GLuint groundTexture = 0;
 	bool   groundTextureBuilt = false;
+	// M6 scorch marks: the CPU-side copy of the ground texture is kept, not
+	// discarded after upload, because each blast blends into the *result of*
+	// every earlier one - marks accumulate over a round the way upstream's
+	// do. Re-reading it back off the GPU each time would be far worse.
+	LandscapeTextureBuilder::Texture groundTextureData;
 	GLint  pointMvpLoc = -1, pointColorLoc = -1, pointSizeLoc = -1;
 	GLuint meshProgram = 0;
 	GLint  meshMvpLoc = -1, meshLightDirLoc = -1, meshColorLoc = -1;
@@ -113,6 +118,7 @@ namespace
 	std::vector<float> terrainWorldX, terrainWorldZ;
 	int    terrainSrcWidth = 0, terrainSrcHeight = 0;
 	int    terrainDeformLogsLeft = 0;
+	int    terrainScorchLogsLeft = 0;
 
 	int    surfaceWidth = 1, surfaceHeight = 1;
 
@@ -137,13 +143,22 @@ namespace
 		// buildTerrainIfNeeded), which would be a useless too-far-away
 		// default for following a single tank up close, and vice versa.
 		float orbitDistance = 120.0f;
-		float followDistance = 14.0f;
+		// Far enough back to frame the tank *and* the ground it is shooting
+		// over - at ~2.2 units per tank this shows roughly a fifth of the
+		// map, so craters, the aim sight and nearby terrain are all visible
+		// without pinching out first. It was 14, which filled the screen
+		// with the tank and whatever hillside it happened to be standing
+		// against; pinch-zoom still goes closer for anyone who wants that.
+		float followDistance = 45.0f;
 		bool followMode = false;
 	} g_camera;
 
 	constexpr float kMinPitch = 0.15f;
 	constexpr float kMaxPitch = 1.45f;
 	constexpr float kMinDistance = 5.0f;
+	// How far the camera stays above the ground beneath it - comfortably
+	// more than the near plane, so nothing clips even on a steep slope.
+	constexpr float kCameraGroundClearance = 4.0f;
 	constexpr float kMaxFollowDistance = 150.0f;
 	constexpr float kDragSensitivity = 0.006f;  // radians per pixel
 
@@ -363,6 +378,7 @@ namespace
 			if (terrainIbo) glDeleteBuffers(1, &terrainIbo);
 			if (groundTexture) glDeleteTextures(1, &groundTexture);
 			terrainVao = terrainVbo = terrainIbo = groundTexture = 0;
+			groundTextureData = LandscapeTextureBuilder::Texture();
 			terrainBuilt = false;
 			groundTextureBuilt = false;
 			// Any pending crater belongs to the landscape being thrown
@@ -452,6 +468,7 @@ namespace
 		terrainBuilt = true;
 		builtDefinitionNumber = defnNumber;
 		terrainDeformLogsLeft = 5;
+		terrainScorchLogsLeft = 5;
 		LOGI("Terrain mesh built: %dx%d source -> %dx%d grid, height range [%.1f, %.1f]",
 			 w, h, verts1D, verts1D, terrainMinHeight, terrainMaxHeight);
 	}
@@ -467,7 +484,8 @@ namespace
 		groundTextureBuilt = true;  // one attempt per landscape, success or not
 
 		std::string groundError;
-		LandscapeTextureBuilder::Texture ground = LandscapeTextureBuilder::build(ctx, 512, &groundError);
+		groundTextureData = LandscapeTextureBuilder::build(ctx, 512, &groundError);
+		LandscapeTextureBuilder::Texture &ground = groundTextureData;
 		if (!ground.valid()) {
 			LOGE("ground texture generation failed (%s) - falling back to flat height colours", groundError.c_str());
 			return;
@@ -555,6 +573,85 @@ namespace
 			terrainDeformLogsLeft--;
 			LOGI("Terrain deformed: map [%d,%d]-[%d,%d] -> grid [%d,%d]-[%d,%d], %d verts",
 				 minX, minY, maxX, maxY, gx0, gz0, gx1, gz1, rowVerts * (gz1 - gz0 + 1));
+		}
+	}
+
+	// Ground height at an arbitrary world (x, z), clamped to the map -
+	// outside the landscape the edge height is returned rather than
+	// nothing, so the camera clearance check below still has a sane floor
+	// when the view swings off the map.
+	float terrainHeightAt(ScorchedContext &ctx, float worldX, float worldZ)
+	{
+		HeightMap &heightMap = ctx.getLandscapeMaps().getGroundMaps().getHeightMap();
+		const int w = heightMap.getMapWidth();
+		const int h = heightMap.getMapHeight();
+		if (w <= 0 || h <= 0) return 0.0f;
+
+		int sx = std::min(std::max((int) worldX, 0), w - 1);
+		int sy = std::min(std::max((int) worldZ, 0), h - 1);
+		return heightMap.getHeight(sx, sy).asFloat();
+	}
+
+	// M6 scorch marks: the burnt patch a blast leaves on the ground.
+	// Upstream paints these straight into the landscape texture
+	// (DeformTextures::deformLandscape, client-only), and so do we - into
+	// the CPU-side copy, so marks accumulate on top of each other across a
+	// round, then re-upload only the affected rectangles.
+	void applyScorchMarks(ScorchedContext &ctx)
+	{
+		if (!groundTextureBuilt || groundTexture == 0 || !groundTextureData.valid()) return;
+
+		std::vector<ScorchDroidLandscape::ScorchEvent> events =
+			ScorchDroidLandscape::drainScorchEvents();
+		if (events.empty()) return;
+
+		glBindTexture(GL_TEXTURE_2D, groundTexture);
+
+		// The patch rows below are tightly packed, but GL defaults to
+		// expecting each row padded to a 4-byte boundary. An RGB rectangle
+		// only satisfies that when its width happens to be a multiple of 4,
+		// so an arbitrary crater (33px wide = 99 bytes) gets read with every
+		// row shifted a byte or two - which renders as diagonal rainbow
+		// banding, since the shift also rotates the colour channels. The
+		// full-texture upload never hit this only because 512*3 is divisible
+		// by 4. Restored afterwards so nothing else inherits the change.
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+		int painted = 0;
+		for (size_t i = 0; i < events.size(); i++) {
+			const ScorchDroidLandscape::ScorchEvent &event = events[i];
+			LandscapeTextureBuilder::Rect rect = LandscapeTextureBuilder::applyScorch(
+				ctx, groundTextureData, event.centreX, event.centreY, event.radius, event.texture);
+			if (!rect.valid()) continue;
+
+			// GLES3 has no GL_UNPACK_ROW_LENGTH-free way to upload a
+			// sub-rectangle of a wider buffer, so copy the rows out
+			// contiguously first. (GLES3 does have UNPACK_ROW_LENGTH, but
+			// setting and restoring it per mark is no cheaper than this for
+			// rectangles this small, and this way the pixel-store state is
+			// left exactly as the rest of the renderer expects it.)
+			std::vector<unsigned char> patch(size_t(rect.width) * rect.height * 3);
+			for (int row = 0; row < rect.height; row++) {
+				const unsigned char *src = &groundTextureData.rgb[
+					(size_t(rect.y + row) * groundTextureData.width + rect.x) * 3];
+				memcpy(&patch[size_t(row) * rect.width * 3], src, size_t(rect.width) * 3);
+			}
+			glTexSubImage2D(GL_TEXTURE_2D, 0, rect.x, rect.y, rect.width, rect.height,
+							GL_RGB, GL_UNSIGNED_BYTE, patch.data());
+			painted++;
+		}
+
+		// The texture is sampled with mipmapping (see buildGroundTextureIfNeeded),
+		// so the lower levels are stale until regenerated - a scorch would
+		// otherwise vanish as the camera pulls back. Done once per frame
+		// rather than per mark.
+		if (painted > 0) glGenerateMipmap(GL_TEXTURE_2D);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		glBindTexture(GL_TEXTURE_2D, 0);
+
+		if (painted > 0 && terrainScorchLogsLeft > 0) {
+			terrainScorchLogsLeft--;
+			LOGI("Scorch marks painted: %d of %zu queued", painted, events.size());
 		}
 	}
 
@@ -854,6 +951,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	if (!terrainBuilt) return;
 	buildGroundTextureIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
+	applyScorchMarks(*ctx);
 
 	HeightMap &heightMap = ctx->getLandscapeMaps().getGroundMaps().getHeightMap();
 	int mapW = heightMap.getMapWidth();
@@ -929,6 +1027,18 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		eyeX = targetX + distance * cosf(g_camera.pitch) * sinf(g_camera.yaw);
 		eyeY = targetY + distance * sinf(g_camera.pitch);
 		eyeZ = targetZ + distance * cosf(g_camera.pitch) * cosf(g_camera.yaw);
+	}
+
+	// Keep the eye above ground. Orbiting swings the camera to wherever the
+	// yaw points, which is regularly inside a hill - the near plane then
+	// slices through it and the view fills with a smear of magnified
+	// terrain, which reads as a rendering bug rather than as "you are
+	// standing in a mountain". Lifting the eye is the cheap fix and behaves
+	// sensibly: the shot stays framed, the camera just rides over the ridge.
+	{
+		float groundAtEye = terrainHeightAt(*ctx, eyeX, eyeZ);
+		float minEyeY = groundAtEye + kCameraGroundClearance;
+		if (eyeY < minEyeY) eyeY = minEyeY;
 	}
 
 	float aspect = (float) surfaceWidth / (float) surfaceHeight;
