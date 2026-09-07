@@ -68,6 +68,7 @@
 #include <tanket/Tanket.hpp>
 #include <weapons/AccessoryStore.hpp>
 #include <weapons/Accessory.hpp>
+#include <weapons/WeaponProjectile.hpp>
 #include <target/Target.hpp>
 #include <tanket/TanketShotInfo.hpp>
 #include <map>
@@ -813,6 +814,55 @@ namespace
 		particles.push_back(particle);
 	}
 
+	// Trail behind an in-flight projectile: upstream's MissileActionRenderer
+	// hangs a flame emitter and a smoke emitter off each shot, both enabled
+	// by default (WeaponProjectile's createFlame_/createSmoke_ start true and
+	// are only turned off by an explicit <nocreateflame>/<nocreatesmoke>).
+	// Emission is rate-limited by elapsed time rather than by frame, so the
+	// trail has the same density whatever the frame rate.
+	double lastTrailSeconds = 0.0;
+	bool   trailDueThisFrame = false;
+
+	void emitProjectileTrail(WeaponProjectile *weapon, float x, float y, float z)
+	{
+		if (!weapon || !trailDueThisFrame) return;
+
+		if (weapon->getCreateFlame()) {
+			// Upstream randomises between two start colours and two end
+			// colours; one sample per puff gives the same mottled look.
+			Vector &c1 = weapon->getFlameStartColor1();
+			Vector &c2 = weapon->getFlameStartColor2();
+			const float mix = randomUnit();
+			Particle flame = {};
+			flame.x = x; flame.y = y; flame.z = z;
+			flame.vy = 0.6f;
+			flame.r = c1[0] + (c2[0] - c1[0]) * mix;
+			flame.g = c1[1] + (c2[1] - c1[1]) * mix;
+			flame.b = c1[2] + (c2[2] - c1[2]) * mix;
+			flame.worldSize = std::max(weapon->getFlameStartSize(), 0.05f);
+			flame.life = std::max(weapon->getFlameLife(), 0.1f);
+			flame.drag = 0.2f;
+			addParticle(flame);
+		}
+
+		if (weapon->getCreateSmoke()) {
+			Particle smoke = {};
+			smoke.x = x + randomSigned() * 0.15f;
+			smoke.y = y + randomSigned() * 0.15f;
+			smoke.z = z + randomSigned() * 0.15f;
+			smoke.vy = 0.9f;
+			// Upstream's smoke is a grey particle texture; additive blending
+			// makes pure grey glow, so it is kept dim and cool rather than
+			// bright white.
+			const float grey = 0.25f + randomUnit() * 0.15f;
+			smoke.r = grey; smoke.g = grey; smoke.b = grey * 1.1f;
+			smoke.worldSize = std::max(weapon->getSmokeStartSize(), 0.05f);
+			smoke.life = std::max(weapon->getSmokeLife(), 0.1f);
+			smoke.drag = 0.5f;
+			addParticle(smoke);
+		}
+	}
+
 	void spawnEffects()
 	{
 		std::vector<ScorchDroidEffects::EffectEvent> events = ScorchDroidEffects::drain();
@@ -1465,6 +1515,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		if (delta < 0.0f) delta = 0.0f;
 		if (delta > 0.1f) delta = 0.1f;
 
+		// One puff per shot per ~40ms rather than per frame, so a fast
+		// device doesn't lay down a denser trail than a slow one.
+		trailDueThisFrame = (nowSeconds - lastTrailSeconds) >= 0.04;
+		if (trailDueThisFrame) lastTrailSeconds = nowSeconds;
+
 		spawnEffects();
 		updateEffects(delta);
 	}
@@ -1811,7 +1866,16 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		Model *projectileModel = nullptr;
 		if (i < shotWeaponIds.size() && shotWeaponIds[i] != 0) {
 			Accessory *weapon = ctx->getAccessoryStore().findByAccessoryId(shotWeaponIds[i]);
-			if (weapon) projectileModel = loadModelSafely(weapon->getModel());
+			if (weapon) {
+				projectileModel = loadModelSafely(weapon->getModel());
+				// Flame and smoke trail. Upstream emits these from particle
+				// emitters attached to the shot (MissileActionRenderer), and
+				// both default to *on* for every projectile - so this is what
+				// makes an ordinary missile read as a missile rather than a
+				// travelling dot. Per-weapon colours, sizes and lifetimes are
+				// the weapon's own.
+				emitProjectileTrail((WeaponProjectile *) weapon->getAction(), wx, wy, wz);
+			}
 		}
 		if (!projectileModel && i < shotPlayerIds.size()) {
 			Tanket *firer = ctx->getTargetContainer().getTanketById(shotPlayerIds[i]);
