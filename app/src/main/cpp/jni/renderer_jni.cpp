@@ -54,6 +54,7 @@
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
 #include <EffectEventQueue.h>
+#include <TracerStore.h>
 // M6: real .ase tank/projectile models. The whole 3dsparse parser plus
 // ModelStore are in src/common, so the actual model data is reusable -
 // only the rendering of it is ours to write.
@@ -487,6 +488,9 @@ namespace
 			// away - applying it to the new one would corrupt unrelated
 			// vertices.
 			ScorchDroidLandscape::clearDirtyRegion();
+			// Ranging tracers belong to the round that made them
+			// (upstream clears them in RenderTracer::newGame).
+			ScorchDroidTracer::clearAll();
 			LOGI("Landscape changed (definition %u) - rebuilding terrain", defnNumber);
 		}
 
@@ -1567,6 +1571,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	std::vector<float> myTankPositions, enemyTankPositions;  // fallback markers
 	bool haveMyTank = false;
 	bool myTankAlive = false;
+	unsigned int myPlayerId = 0;
+	float myColorR = 1.0f, myColorG = 1.0f, myColorB = 1.0f;
 	float myTankX = 0.0f, myTankY = 0.0f, myTankZ = 0.0f;
 	for (auto &entry : tanks) {
 		Tank *tank = entry.second;
@@ -1664,6 +1670,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			myTankPositions.push_back(x); myTankPositions.push_back(markerY); myTankPositions.push_back(z);
 			haveMyTank = true;
 			myTankAlive = alive;
+			myPlayerId = tank->getPlayerId();
+			myColorR = tankColor[0]; myColorG = tankColor[1]; myColorB = tankColor[2];
 			myTankX = x; myTankY = markerY; myTankZ = z;
 		} else {
 			enemyTankPositions.push_back(x); enemyTankPositions.push_back(markerY); enemyTankPositions.push_back(z);
@@ -1973,6 +1981,56 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				glUniform4f(meshColorLoc, 1.0f, 1.0f, 1.0f, 0.9f);
 				glBindVertexArray(chuteCordVao);
 				glDrawArrays(GL_LINES, 0, chuteCordVertexCount);
+			}
+		}
+
+		// Ranging tracers - the marks left by "Tracer" and "Smoke Tracer"
+		// shots. Upstream draws only the *current* tank's, in that tank's
+		// colour (RenderTracer::draw looks up getCurrentTank), because they
+		// are a private aid for ranging your own next shot rather than a
+		// shared map marker. Same here.
+		if (haveMyTank && myPlayerId != 0) {
+			std::vector<ScorchDroidTracer::Point> endPoints;
+			std::vector<std::vector<ScorchDroidTracer::Point> > paths;
+			ScorchDroidTracer::getFor(myPlayerId, endPoints, paths);
+
+			if (!endPoints.empty()) {
+				glUniform4f(meshColorLoc, myColorR, myColorG, myColorB, 0.85f);
+				glBindVertexArray(sphereVao);
+				for (size_t i = 0; i < endPoints.size(); i++) {
+					// Upstream's marker is a 0.5-radius sphere.
+					Mat4 model = Mat4::multiply(
+						Mat4::translate(endPoints[i].x, endPoints[i].z, endPoints[i].y),
+						Mat4::scale(0.5f));
+					glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
+					glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
+				}
+			}
+
+			if (!paths.empty()) {
+				// Upstream draws the path as a textured ribbon; a line strip
+				// reads the same at these widths and needs no texture.
+				std::vector<float> line;
+				for (size_t p = 0; p < paths.size(); p++) {
+					const std::vector<ScorchDroidTracer::Point> &path = paths[p];
+					for (size_t i = 0; i + 1 < path.size(); i++) {
+						const ScorchDroidTracer::Point &a = path[i];
+						const ScorchDroidTracer::Point &b = path[i + 1];
+						line.push_back(a.x); line.push_back(a.z); line.push_back(a.y);
+						line.push_back(myColorR); line.push_back(myColorG); line.push_back(myColorB);
+						line.push_back(b.x); line.push_back(b.z); line.push_back(b.y);
+						line.push_back(myColorR); line.push_back(myColorG); line.push_back(myColorB);
+					}
+				}
+				if (!line.empty()) {
+					glUseProgram(sightProgram);
+					glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, mvp.m);
+					glBindVertexArray(beamVao);
+					glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
+					glBufferData(GL_ARRAY_BUFFER, line.size() * sizeof(float), line.data(), GL_DYNAMIC_DRAW);
+					glLineWidth(2.0f);
+					glDrawArrays(GL_LINES, 0, (GLsizei) (line.size() / 6));
+				}
 			}
 		}
 

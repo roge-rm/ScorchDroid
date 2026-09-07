@@ -1,0 +1,64 @@
+diff --git a/src/common/actions/ShotProjectile.cpp b/src/common/actions/ShotProjectile.cpp
+index 7d0c7944..7aae4e0d 100644
+--- a/src/common/actions/ShotProjectile.cpp
++++ b/src/common/actions/ShotProjectile.cpp
+@@ -19,6 +19,9 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #include <actions/ShotProjectile.hpp>
++#ifdef S3D_SERVER
++#include <TracerStore.h>
++#endif
+ #include <actions/CameraPositionAction.hpp>
+ #ifndef S3D_SERVER
+ 	#include <sprites/MissileActionRenderer.hpp>
+@@ -319,6 +322,24 @@ void ShotProjectile::simulate(fixed frameTime, bool &remove)
+ 			}
+ 		}
+ 	}
++#else
++	// Android build: upstream records the flight path for its ranging
++	// tracers here, but both the recording and the member holding it are
++	// client-only (see ShotProjectile.hpp), so the path is accumulated in
++	// the porting layer instead - keyed by this shot. Same 0.1s sampling
++	// and the same getShowShotPath() gate as the block above.
++	if (getWeapon()->getShowShotPath())
++	{
++		snapTime_ += frameTime;
++		if (snapTime_.asFloat() > 0.1f || remove)
++		{
++			FixedVector &p = getPhysics().getPosition();
++			ScorchDroidTracer::addPathPoint(
++				(uintptr_t) this, weaponContext_.getPlayerId(),
++				p[0].asFloat(), p[1].asFloat(), p[2].asFloat());
++			snapTime_ = 0;
++		}
++	}
+ #endif	// #ifndef S3D_SERVER
+ 
+ 	simulateTime_ += frameTime;
+@@ -360,6 +381,24 @@ void ShotProjectile::doCollision(FixedVector &position)
+ 			);
+ 		}
+ 	}
++#else
++	// Android build: the same two cases the client block above handles -
++	// a full flight path for <showshotpath>, a bare impact marker for
++	// <showendpoint> - handed to the porting-layer store the renderer
++	// draws from.
++	if (getWeapon()->getShowShotPath())
++	{
++		ScorchDroidTracer::addPathPoint(
++			(uintptr_t) this, weaponContext_.getPlayerId(),
++			position[0].asFloat(), position[1].asFloat(), position[2].asFloat());
++		ScorchDroidTracer::finishPath((uintptr_t) this);
++	}
++	else if (getWeapon()->getShowEndPoint())
++	{
++		ScorchDroidTracer::addEndPoint(
++			weaponContext_.getPlayerId(),
++			position[0].asFloat(), position[1].asFloat(), position[2].asFloat());
++	}
+ #endif // #ifndef S3D_SERVER
+ 
+ 	FixedVector velocity;

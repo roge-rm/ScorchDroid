@@ -106,6 +106,7 @@ add_library(scorched_common STATIC
     ${ANDROID_PORTING_DIR}/SoundEventQueue.cpp
     ${ANDROID_PORTING_DIR}/DeformEventQueue.cpp
     ${ANDROID_PORTING_DIR}/EffectEventQueue.cpp
+    ${ANDROID_PORTING_DIR}/TracerStore.cpp
     ${ANDROID_PORTING_DIR}/ClientSync.cpp
     ${ANDROID_PORTING_DIR}/ClientContext.cpp
     ${ANDROID_PORTING_DIR}/LandscapeTextureBuilder.cpp
