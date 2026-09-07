@@ -355,6 +355,24 @@ class MainActivity : AppCompatActivity() {
         var lastX = 0f
         var lastY = 0f
         var dragging = false
+        // Centroid of all pointers, for the two-finger pan. Tracked here
+        // rather than taken from ScaleGestureDetector.focusX/focusY because
+        // those only update while the *span* is changing - two fingers
+        // sliding together at a fixed distance is exactly a pan with no
+        // pinch, and the detector reports nothing for it.
+        var lastFocusX = 0f
+        var lastFocusY = 0f
+        var panning = false
+
+        fun focusOf(event: MotionEvent): Pair<Float, Float> {
+            var sumX = 0f
+            var sumY = 0f
+            for (i in 0 until event.pointerCount) {
+                sumX += event.getX(i)
+                sumY += event.getY(i)
+            }
+            return Pair(sumX / event.pointerCount, sumY / event.pointerCount)
+        }
 
         val scaleDetector = android.view.ScaleGestureDetector(
             this,
@@ -376,15 +394,31 @@ class MainActivity : AppCompatActivity() {
                     dragging = true
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> {
-                    // A second finger just went down - a pinch is starting,
-                    // not a drag; stop treating pointer 0's movement as one.
+                    // A second finger just went down - this is a pinch/pan,
+                    // not a one-finger orbit; stop treating pointer 0's
+                    // movement as one and start tracking the centroid.
                     dragging = false
+                    val (fx, fy) = focusOf(event)
+                    lastFocusX = fx
+                    lastFocusY = fy
+                    panning = true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (dragging && event.pointerCount == 1 && !scaleDetector.isInProgress) {
                         val dx = event.x - lastX
                         val dy = event.y - lastY
                         renderer.nativeCameraDrag(dx, dy)
+                    }
+                    if (panning && event.pointerCount >= 2) {
+                        // Pan and pinch run together rather than one winning:
+                        // they read different things from the same two
+                        // fingers (centroid movement vs. span change), so
+                        // moving and zooming at once behaves the way it does
+                        // in any map app.
+                        val (fx, fy) = focusOf(event)
+                        renderer.nativeCameraPan(fx - lastFocusX, fy - lastFocusY)
+                        lastFocusX = fx
+                        lastFocusY = fy
                     }
                     lastX = event.x
                     lastY = event.y
@@ -393,9 +427,14 @@ class MainActivity : AppCompatActivity() {
                     // One finger lifted out of a multi-touch gesture - resume
                     // dragging from whichever pointer remains, next MOVE.
                     dragging = false
+                    // Below two fingers there is no pan; re-seed the centroid
+                    // on the next POINTER_DOWN rather than letting it jump
+                    // from a two-finger centroid to a one-finger position.
+                    if (event.pointerCount - 1 < 2) panning = false
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     dragging = false
+                    panning = false
                 }
             }
             true

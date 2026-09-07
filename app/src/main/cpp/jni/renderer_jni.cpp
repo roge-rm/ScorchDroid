@@ -196,6 +196,10 @@ namespace
 	constexpr float kCameraGroundClearance = 4.0f;
 	constexpr float kMaxFollowDistance = 150.0f;
 	constexpr float kDragSensitivity = 0.006f;  // radians per pixel
+	// Vertical field of view. Shared by the projection matrix, the
+	// particle world-size-to-pixels conversion and the pan scale, all of
+	// which are wrong in different ways if they disagree.
+	constexpr float kFovYRadians = 1.0472f;  // 60 degrees
 
 	GLuint compileShader(GLenum type, const char *src)
 	{
@@ -1405,7 +1409,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 	float aspect = (float) surfaceWidth / (float) surfaceHeight;
 	float farPlane = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
-	Mat4 proj = Mat4::perspective(1.0472f /* 60 deg */, aspect, 1.0f, farPlane);
+	Mat4 proj = Mat4::perspective(kFovYRadians, aspect, 1.0f, farPlane);
 	Mat4 view = Mat4::lookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
 	Mat4 mvp = Mat4::multiply(proj, view);
 
@@ -1584,7 +1588,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	drawPoints(mvp, explosionPositions, 20.0f, 1.0f, 0.5f, 0.0f);
 
 	// Effects last, so they blend additively over the finished scene.
-	drawEffects(mvp, eyeX, eyeY, eyeZ, 1.0472f /* must match the projection's fov */);
+	drawEffects(mvp, eyeX, eyeY, eyeZ, kFovYRadians);
 }
 
 // M6: battlefield touch now drives the orbit camera (see the file-level
@@ -1595,6 +1599,48 @@ Java_com_rm_scorchdroid_GameRenderer_nativeCameraDrag(JNIEnv *, jobject, jfloat 
 	std::lock_guard<std::mutex> lock(g_cameraMutex);
 	g_camera.yaw += dx * kDragSensitivity;
 	g_camera.pitch = std::min(std::max(g_camera.pitch - dy * kDragSensitivity, kMinPitch), kMaxPitch);
+}
+
+// M6: two-finger drag slides the free-fly camera's look-at point across the
+// ground. Without this "free-fly" was really "orbit the map centre" - the
+// target was set once from the map size and never moved, so you could
+// circle the middle of the map and zoom, but never go and look somewhere
+// else. Follow mode ignores this deliberately: it retargets to the tank
+// every frame, so any pan would be overwritten on the very next one.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeCameraPan(JNIEnv *, jobject, jfloat dx, jfloat dy) {
+	std::lock_guard<std::mutex> lock(g_cameraMutex);
+	if (g_camera.followMode) return;
+
+	// Screen-relative, not world-relative: dragging right has to move the
+	// view right whichever way the camera is currently facing, so the drag
+	// is rotated into the camera's own yaw. Screen-up maps to *away* from
+	// the camera along the ground, hence the second axis being the forward
+	// one rather than a second right vector.
+	const float sinYaw = sinf(g_camera.yaw), cosYaw = cosf(g_camera.yaw);
+	const float rightX = cosYaw,  rightZ = -sinYaw;
+	const float fwdX   = -sinYaw, fwdZ   = -cosYaw;
+
+	// Move the world under the finger at 1:1 rather than at some tuned
+	// rate: the visible world height at the target's distance is
+	// 2*d*tan(fov/2), so dividing by the viewport height gives world units
+	// per pixel exactly. That makes panning feel like dragging the map
+	// itself, and stays right at any zoom or screen size, with nothing to
+	// re-tune. (Exact only for ground parallel to the view plane - the
+	// ground is pitched away, so it drifts slightly at shallow angles,
+	// which is not noticeable in practice.)
+	const float visibleHeight = 2.0f * g_camera.orbitDistance * tanf(kFovYRadians * 0.5f);
+	const float scale = visibleHeight / (float) std::max(surfaceHeight, 1);
+	g_camera.targetX -= (rightX * dx + fwdX * dy) * scale;
+	g_camera.targetZ -= (rightZ * dx + fwdZ * dy) * scale;
+
+	// Keep the target near the map. Panning off into empty space is never
+	// useful and is easy to do by accident, leaving nothing on screen and
+	// no obvious way back.
+	const float marginX = mapWidthUnits * 0.25f;
+	const float marginZ = mapHeightUnits * 0.25f;
+	g_camera.targetX = std::min(std::max(g_camera.targetX, -marginX), mapWidthUnits + marginX);
+	g_camera.targetZ = std::min(std::max(g_camera.targetZ, -marginZ), mapHeightUnits + marginZ);
 }
 
 extern "C" JNIEXPORT void JNICALL
