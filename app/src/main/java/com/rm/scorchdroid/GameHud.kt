@@ -169,6 +169,11 @@ class GameHudState {
     // split upstream makes (TankKeyboardControlUtil refuses the fire key
     // for a position-select weapon; the click handler does the work).
     var positionSelectWeapon by mutableStateOf("")
+    // Development performance readout (frame rate / draw calls / targets).
+    // Empty hides it. Deliberately plain text in the existing status
+    // column rather than an overlay of its own - it is a temporary aid
+    // while the renderer grows, and should be gated off before a release.
+    var perfLabel by mutableStateOf("")
     // M4 dialog conversion (see HudDialogs.kt) - the currently-shown modal,
     // if any. A plain mutable field like the rest of this state holder,
     // since it's written from ordinary (non-Composable) Kotlin in
@@ -214,6 +219,7 @@ fun GameHud(
             if (state.positionSelectWeapon.isNotEmpty()) {
                 HudText("Tap the ground to use ${state.positionSelectWeapon}")
             }
+            if (state.perfLabel.isNotEmpty()) HudText(state.perfLabel)
         }
 
         // Top-right: "session / view" controls - things about this session

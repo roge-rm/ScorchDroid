@@ -108,6 +108,20 @@ namespace
 	// mask itself is recomputed on the simulation side (see engine_jni's
 	// refreshMovementMask); this side only notices the version change and
 	// re-uploads.
+	// M6 trees. TreeModelFactory::createModel returns an *empty* Model - a
+	// bounding box and nothing else - because upstream generates tree
+	// geometry procedurally in its own client renderer (ModelRendererTree,
+	// ~880 lines of triangle fans) rather than loading a mesh. So every
+	// tree target arrived here with no vertices to draw, which is why a
+	// landscape's scenery was invisible: on one map, 1027 of 1029 targets
+	// were trees.
+	//
+	// Built once, in the same conical shape upstream draws (stacked cones
+	// for the canopy over a trunk), and drawn per instance with its own
+	// colour and scale.
+	GLuint treeVao = 0, treeVbo = 0;
+	int    treeVertexCount = 0;
+
 	GLuint shadowProgram = 0, shadowVao = 0, shadowVbo = 0;
 	GLint  shadowMvpLoc = -1, shadowStrengthLoc = -1;
 
@@ -133,6 +147,15 @@ namespace
 	// by whatever remains, so a nuke whites out the whole view briefly.
 	constexpr float kSkyFlashSeconds = 0.45f;
 	float  skyFlashRemaining = 0.0f;
+
+	// M6 perf readout. Draw calls are counted rather than estimated because
+	// the number that matters (one per landscape target) is exactly the one
+	// that is easy to be wrong about by an order of magnitude.
+	int   frameDrawCalls = 0;
+	int   lastTargetsDrawn = 0;
+	int   lastFrameDrawCalls = 0;
+	float smoothedFps = 0.0f;
+	std::mutex g_statsMutex;
 
 	unsigned int paintedMovementVersion = 0;
 	bool movementOverlayPainted = false;
@@ -878,6 +901,74 @@ namespace
 		LOGI("Ground texture built: %dx%d", ground.width, ground.height);
 	}
 
+	// One tree, standing on y = 0 and about 4 units tall, which the
+	// definition's own modelscale (1 to 3 for the shipped placements) then
+	// sizes. Position + normal per vertex, so it draws with the ordinary
+	// mesh shader.
+	void buildTreeGeometryIfNeeded()
+	{
+		if (treeVertexCount > 0) return;
+
+		std::vector<float> verts;
+		auto addTriangle = [&](float ax, float ay, float az,
+							   float bx, float by, float bz,
+							   float cx, float cy, float cz) {
+			const float ux = bx - ax, uy = by - ay, uz = bz - az;
+			const float vx = cx - ax, vy = cy - ay, vz = cz - az;
+			float nx = uy * vz - uz * vy;
+			float ny = uz * vx - ux * vz;
+			float nz = ux * vy - uy * vx;
+			const float len = sqrtf(nx * nx + ny * ny + nz * nz);
+			if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
+			const float tri[3][3] = { { ax, ay, az }, { bx, by, bz }, { cx, cy, cz } };
+			for (int i = 0; i < 3; i++) {
+				verts.push_back(tri[i][0]); verts.push_back(tri[i][1]); verts.push_back(tri[i][2]);
+				verts.push_back(nx); verts.push_back(ny); verts.push_back(nz);
+			}
+		};
+
+		const int sides = 7;  // odd, so the silhouette differs as it turns
+		// Trunk.
+		const float trunkR = 0.13f, trunkTop = 1.1f;
+		for (int i = 0; i < sides; i++) {
+			const float a0 = (float) i / sides * 6.2831853f;
+			const float a1 = (float) (i + 1) / sides * 6.2831853f;
+			const float x0 = cosf(a0) * trunkR, z0 = sinf(a0) * trunkR;
+			const float x1 = cosf(a1) * trunkR, z1 = sinf(a1) * trunkR;
+			addTriangle(x0, 0.0f, z0, x1, 0.0f, z1, x1, trunkTop, z1);
+			addTriangle(x0, 0.0f, z0, x1, trunkTop, z1, x0, trunkTop, z0);
+		}
+
+		// Canopy: three stacked cones, widest at the bottom - upstream's
+		// drawPineLevel is the same shape, an apex over a ring.
+		const float apex[3] = { 2.6f, 3.4f, 4.2f };
+		const float ring[3] = { 0.8f, 1.7f, 2.5f };
+		const float radius[3] = { 1.15f, 0.9f, 0.6f };
+		for (int level = 0; level < 3; level++) {
+			for (int i = 0; i < sides; i++) {
+				const float a0 = (float) i / sides * 6.2831853f;
+				const float a1 = (float) (i + 1) / sides * 6.2831853f;
+				addTriangle(
+					0.0f, apex[level], 0.0f,
+					cosf(a0) * radius[level], ring[level], sinf(a0) * radius[level],
+					cosf(a1) * radius[level], ring[level], sinf(a1) * radius[level]);
+			}
+		}
+
+		treeVertexCount = (int) (verts.size() / 6);
+		glGenVertexArrays(1, &treeVao);
+		glBindVertexArray(treeVao);
+		glGenBuffers(1, &treeVbo);
+		glBindBuffer(GL_ARRAY_BUFFER, treeVbo);
+		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+		glBindVertexArray(0);
+		LOGI("Tree geometry built: %d verts", treeVertexCount);
+	}
+
 	// M6 sky: the landscape's own sky colours, read once per landscape.
 	void buildSkyIfNeeded(ScorchedContext &ctx)
 	{
@@ -941,7 +1032,7 @@ namespace
 		// it must win the depth test whatever its distance.
 		glDepthMask(GL_FALSE);
 		glDisable(GL_CULL_FACE);
-		glDrawArrays(GL_TRIANGLES, 0, 6);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
 		glEnable(GL_CULL_FACE);
 		glDepthMask(GL_TRUE);
 		glBindVertexArray(0);
@@ -1495,7 +1586,7 @@ namespace
 			glBindVertexArray(particleVao);
 			glBindBuffer(GL_ARRAY_BUFFER, particleVbo);
 			glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
-			glDrawArrays(GL_POINTS, 0, (GLsizei) particles.size());
+			frameDrawCalls++; glDrawArrays(GL_POINTS, 0, (GLsizei) particles.size());
 		}
 
 		if (!beams.empty()) {
@@ -1519,7 +1610,7 @@ namespace
 			glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
 			glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
 			glLineWidth(3.0f);
-			glDrawArrays(GL_LINES, 0, (GLsizei) beams.size() * 2);
+			frameDrawCalls++; glDrawArrays(GL_LINES, 0, (GLsizei) beams.size() * 2);
 		}
 
 		glBindVertexArray(0);
@@ -1881,7 +1972,7 @@ namespace
 		if (group.vertexCount == 0) return;
 		glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
 		glBindVertexArray(group.vao);
-		glDrawArrays(GL_TRIANGLES, 0, group.vertexCount);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, group.vertexCount);
 	}
 
 	// Draws a set of real world-space positions (already x,y,z in the same
@@ -1900,7 +1991,7 @@ namespace
 		glBindVertexArray(pointVao);
 		glBindBuffer(GL_ARRAY_BUFFER, pointVbo);
 		glBufferData(GL_ARRAY_BUFFER, worldPositions.size() * sizeof(float), worldPositions.data(), GL_DYNAMIC_DRAW);
-		glDrawArrays(GL_POINTS, 0, (GLsizei) (worldPositions.size() / 3));
+		frameDrawCalls++; glDrawArrays(GL_POINTS, 0, (GLsizei) (worldPositions.size() / 3));
 	}
 
 	// Real height at an arbitrary landscape-space (x,z), nearest-sample
@@ -2047,6 +2138,14 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+	{
+		// Publish last frame's total before starting this one's count, so
+		// the HUD always shows a complete frame rather than a partial one.
+		std::lock_guard<std::mutex> lock(g_statsMutex);
+		lastFrameDrawCalls = frameDrawCalls;
+	}
+	frameDrawCalls = 0;
+
 	std::lock_guard<std::mutex> lock(g_engineMutex);
 	ScorchedContext *ctx = engineActiveContext();
 	if (!ctx) return;
@@ -2075,6 +2174,17 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		if (delta > 0.1f) delta = 0.1f;
 		if (skyFlashRemaining > 0.0f) {
 			skyFlashRemaining = std::max(0.0f, skyFlashRemaining - delta);
+		}
+
+		// Frame rate, smoothed. An instantaneous 1/delta jitters far too
+		// much to read on a phone; this settles in about a second while
+		// still reacting to a real stall.
+		if (delta > 0.0001f) {
+			const float instant = 1.0f / delta;
+			std::lock_guard<std::mutex> lock(g_statsMutex);
+			smoothedFps = (smoothedFps <= 0.0f)
+				? instant
+				: (smoothedFps * 0.9f + instant * 0.1f);
 		}
 
 		// One puff per shot per ~40ms rather than per frame, so a fast
@@ -2149,6 +2259,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float scale;
 		float brightness;
 		float shadowRadius;
+		// Trees have no mesh (see buildTreeGeometryIfNeeded); they draw the
+		// shared procedural one in these colours instead.
+		bool  isTree;
+		float treeR, treeG, treeB;
 		Model *model;
 	};
 	std::vector<TargetInstance> targetInstances;
@@ -2167,8 +2281,15 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			ScorchDroidTargets::Info info;
 			if (!ScorchDroidTargets::get(target->getPlayerId(), info)) { skipped++; continue; }
 
-			Model *model = loadModelSafely(info.model);
-			if (!model) { skipped++; continue; }
+			// ModelID packs a tree as type "Tree", meshName "<B|N>:<kind>"
+			// and skinName "S" for snow (see ModelID::initFromNode). The
+			// mesh itself is empty, so these are drawn procedurally.
+			const bool isTree = (0 == strcmp(info.model.getType(), "Tree"));
+			Model *model = nullptr;
+			if (!isTree) {
+				model = loadModelSafely(info.model);
+				if (!model) { skipped++; continue; }
+			}
 
 			FixedVector &pos = target->getLife().getTargetPosition();
 			TargetInstance inst;
@@ -2189,6 +2310,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// non-positive is treated as "no tint" here; drawing scenery
 			// black is never what the data meant.
 			inst.brightness = (info.brightness > 0.0f) ? info.brightness : 1.0f;
+			inst.isTree = isTree;
+			if (isTree) {
+				const bool burnt = (info.model.getMeshName()[0] == 'B');
+				const bool snow = (info.model.getSkinName()[0] == 'S');
+				if (burnt) {
+					inst.treeR = 0.20f; inst.treeG = 0.15f; inst.treeB = 0.11f;
+				} else if (snow) {
+					inst.treeR = 0.72f; inst.treeG = 0.78f; inst.treeB = 0.72f;
+				} else {
+					inst.treeR = 0.16f; inst.treeG = 0.34f; inst.treeB = 0.14f;
+				}
+			} else {
+				inst.treeR = inst.treeG = inst.treeB = 1.0f;
+			}
 			// Upstream sizes a target's shadow from its own bounding size
 			// (TargetRendererImplTarget::render: size.Max() + 2).
 			inst.shadowRadius =
@@ -2200,6 +2335,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// One line whenever the mix changes, which in practice is once per
 		// landscape. "skipped" means the hook never recorded a model for a
 		// live target, which would be a patch problem, not a data one.
+		lastTargetsDrawn = (int) targetInstances.size();
 		static size_t lastDrawn = (size_t) -1;
 		static int lastSkipped = -1;
 		if (targetInstances.size() != lastDrawn || skipped != lastSkipped) {
@@ -2465,7 +2601,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform1i(terrainGroundTexLoc, 0);
 	}
 	glBindVertexArray(terrainVao);
-	glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
+	frameDrawCalls++; glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
 
 	// Ground shadows, between the terrain and the water: they belong on the
 	// land, and a shadow showing through the sea would be worse than none.
@@ -2534,7 +2670,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glDepthMask(GL_FALSE);
 			glDisable(GL_CULL_FACE);
-			glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (quads.size() / 5));
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (quads.size() / 5));
 			glEnable(GL_CULL_FACE);
 			glDepthMask(GL_TRUE);
 			glDisable(GL_BLEND);
@@ -2563,7 +2699,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// culling.
 		glDisable(GL_CULL_FACE);
 		glBindVertexArray(waterVao);
-		glDrawArrays(GL_TRIANGLES, 0, 6);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
 		glDisable(GL_BLEND);
 		glEnable(GL_CULL_FACE);
 	}
@@ -2580,7 +2716,26 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// Landscape targets first: they are scenery, so they should be behind
 	// everything that matters, and drawing them before the tanks keeps the
 	// per-target colour uniform out of the tank loop's way.
+	buildTreeGeometryIfNeeded();
 	for (TargetInstance &inst : targetInstances) {
+		if (inst.isTree) {
+			if (treeVertexCount == 0) continue;
+			glUniform4f(meshColorLoc,
+						inst.treeR * inst.brightness,
+						inst.treeG * inst.brightness,
+						inst.treeB * inst.brightness, 1.0f);
+			Mat4 treeModel = Mat4::multiply(
+				Mat4::translate(inst.x, inst.y, inst.z),
+				Mat4::multiply(
+					Mat4::rotateY(inst.rotationRadians),
+					Mat4::scale(inst.scale)));
+			glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE,
+							   Mat4::multiply(mvp, treeModel).m);
+			glBindVertexArray(treeVao);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, treeVertexCount);
+			continue;
+		}
+
 		GpuModel *gpu = uploadModel(inst.model);
 		if (!gpu) continue;
 
@@ -2602,7 +2757,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// lands in the hull group.
 		drawMeshGroup(gpu->hull, meshMvpLoc, targetMvp);
 	}
-
 	std::vector<float> unmodelledMine, unmodelledOther;
 	bool haveSight = false;
 	Mat4 sightTransform = Mat4::identity();
@@ -2687,7 +2841,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		Mat4 sightMvp = Mat4::multiply(mvp, sightTransform);
 		glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, sightMvp.m);
 		glBindVertexArray(sightVao);
-		glDrawArrays(GL_TRIANGLE_STRIP, 0, sightVertexCount);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLE_STRIP, 0, sightVertexCount);
 	}
 
 	glUseProgram(pointProgram);
@@ -2815,13 +2969,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 				if (!inst.shieldRound) {
 					glBindVertexArray(cubeVao);
-					glDrawArrays(GL_TRIANGLES, 0, cubeVertexCount);
+					frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, cubeVertexCount);
 				} else if (inst.shieldHalf) {
 					glBindVertexArray(hemiVao);
-					glDrawArrays(GL_TRIANGLES, 0, hemiVertexCount);
+					frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, hemiVertexCount);
 				} else {
 					glBindVertexArray(sphereVao);
-					glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
+					frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
 				}
 			}
 
@@ -2830,10 +2984,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
 				glUniform4f(meshColorLoc, 0.85f, 0.85f, 0.9f, 0.9f);
 				glBindVertexArray(chuteVao);
-				glDrawArrays(GL_TRIANGLES, 0, chuteVertexCount);
+				frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, chuteVertexCount);
 				glUniform4f(meshColorLoc, 1.0f, 1.0f, 1.0f, 0.9f);
 				glBindVertexArray(chuteCordVao);
-				glDrawArrays(GL_LINES, 0, chuteCordVertexCount);
+				frameDrawCalls++; glDrawArrays(GL_LINES, 0, chuteCordVertexCount);
 			}
 		}
 
@@ -2857,7 +3011,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 										worldZFromEngineY(endPoints[i].y)),
 						Mat4::scale(0.5f));
 					glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
-					glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
+					frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
 				}
 			}
 
@@ -2885,7 +3039,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
 					glBufferData(GL_ARRAY_BUFFER, line.size() * sizeof(float), line.data(), GL_DYNAMIC_DRAW);
 					glLineWidth(2.0f);
-					glDrawArrays(GL_LINES, 0, (GLsizei) (line.size() / 6));
+					frameDrawCalls++; glDrawArrays(GL_LINES, 0, (GLsizei) (line.size() / 6));
 				}
 			}
 		}
@@ -2964,6 +3118,23 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 //
 // Returned in landscape coordinates because that is what every consumer
 // wants - aiming, and eventually tank movement, both talk to the engine.
+// M6 perf readout: "fps|drawCalls|targets" for the HUD. A development aid
+// rather than a player-facing feature - gate it before any release.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeGetFrameStats(JNIEnv *env, jobject) {
+	float fps;
+	int calls, targets;
+	{
+		std::lock_guard<std::mutex> lock(g_statsMutex);
+		fps = smoothedFps;
+		calls = lastFrameDrawCalls;
+		targets = lastTargetsDrawn;
+	}
+	char buffer[64];
+	snprintf(buffer, sizeof(buffer), "%.0f|%d|%d", fps, calls, targets);
+	return env->NewStringUTF(buffer);
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativePickTerrain(JNIEnv *env, jobject, jfloat screenX, jfloat screenY) {
 	PickCamera camera;
