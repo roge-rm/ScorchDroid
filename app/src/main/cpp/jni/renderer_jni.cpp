@@ -226,6 +226,8 @@ namespace
 	std::vector<Particle> particles;
 	std::vector<Beam> beams;
 	double lastFrameSeconds = 0.0;
+	// When the camera last updated, for the occlusion ease-out's timestep.
+	double lastCameraSeconds = 0.0;
 
 	// Plenty for several simultaneous blasts, and a hard stop so a napalm
 	// field can't grow the buffer without limit on a slow device.
@@ -392,6 +394,11 @@ namespace
 		// against; pinch-zoom still goes closer for anyone who wants that.
 		float followDistance = 45.0f;
 		bool followMode = false;
+		// How much of the requested distance the terrain currently allows -
+		// see the occlusion pull-in in nativeOnDrawFrame. 1.0 is "nothing in
+		// the way". Kept between frames so the camera can ease back out
+		// rather than snapping when a ridge stops blocking the view.
+		float occlusionFraction = 1.0f;
 	} g_camera;
 
 	constexpr float kMinPitch = 0.15f;
@@ -400,6 +407,19 @@ namespace
 	// How far the camera stays above the ground beneath it - comfortably
 	// more than the near plane, so nothing clips even on a steep slope.
 	constexpr float kCameraGroundClearance = 4.0f;
+	// Never pull the camera closer than this when a ridge is in the way.
+	// Below about this the tank fills the frame and the shot can't be read,
+	// which is worse than seeing part of the hillside.
+	constexpr float kMinOcclusionDistance = 14.0f;
+	// Roughly a tank's height. The camera's job is to see the tank, so the
+	// sightline is drawn to its body rather than to the ground under it.
+	constexpr float kTankSightHeight = 2.5f;
+	// How fast the camera eases back out once the view clears, as a fraction
+	// of the gap per second. Pulling in is instant (the alternative is
+	// looking through a hill), backing out is smoothed, which is the usual
+	// asymmetry for this kind of camera - a snap outward is far more
+	// noticeable than a snap inward.
+	constexpr float kOcclusionReleaseRate = 3.0f;
 	constexpr float kMaxFollowDistance = 150.0f;
 	constexpr float kDragSensitivity = 0.006f;  // radians per pixel
 	// Vertical field of view. Shared by the projection matrix, the
@@ -982,6 +1002,9 @@ namespace
 			// before this rebuild would never be painted.
 			movementOverlayPainted = false;
 			paintedMovementVersion = 0;
+			// A camera pulled in against the old landscape's terrain has no
+			// business constraining the new one's.
+			g_camera.occlusionFraction = 1.0f;
 			// Water, roof and sky are per-landscape too.
 			waterBuilt = false;
 			waterVisible = false;
@@ -3456,12 +3479,83 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		eyeZ = std::min(std::max(eyeZ, inset), mapHeightUnits - inset);
 	}
 
-	// Keep the eye above ground. Orbiting swings the camera to wherever the
-	// yaw points, which is regularly inside a hill - the near plane then
-	// slices through it and the view fills with a smear of magnified
-	// terrain, which reads as a rendering bug rather than as "you are
-	// standing in a mountain". Lifting the eye is the cheap fix and behaves
-	// sensibly: the shot stays framed, the camera just rides over the ridge.
+	// Pull the eye in until the target is actually visible. The clamps below
+	// keep the eye out of the ground *at its own position*, which is a
+	// different problem from a ridge standing between it and the tank - and
+	// that is what actually goes wrong: measured on a cavern map, the eye
+	// sat 6.4 units clear of the ground beneath it while the terrain 70% of
+	// the way along the sightline was 25 units above the line, so the view
+	// was a wall of magnified hillside with the tank somewhere behind it.
+	// Lifting the eye cannot fix that; only shortening the sightline can.
+	//
+	// This is the standard third-person camera collision: march out from the
+	// target along the ray to the desired eye, and stop at the first place
+	// the ground rises through it.
+	//
+	// Not gated on caverns - a hill between the camera and the tank is just
+	// as possible on an ordinary landscape, and this only ever engages when
+	// the view is genuinely blocked.
+	{
+		// The sightline is aimed at the tank's body, not at the ground it
+		// stands on. That matters more than it sounds: at a low pitch the
+		// ray climbs only ~13 units over ~90 of distance, so a line from
+		// ground level is within a couple of units of the ground for a long
+		// way, and testing it against the eye's ground *clearance* marked it
+		// blocked immediately and collapsed the camera onto the tank every
+		// time. The clearance keeps the eye out of the dirt; it has no
+		// business in the visibility test.
+		const float fromY = targetY + kTankSightHeight;
+		const float dx = eyeX - targetX, dy = eyeY - fromY, dz = eyeZ - targetZ;
+		const float fullDistance = sqrtf(dx * dx + dy * dy + dz * dz);
+		float allowed = 1.0f;
+		// Only when the target is something that could be seen in the first
+		// place. Free-fly aims at the middle of the map at the *mid* terrain
+		// height, which on a mountainous map is inside a hill - the first
+		// sample would then read as blocked and pin the camera at its
+		// minimum distance for the whole round. Follow mode's target is a
+		// tank sitting on the ground, so this passes.
+		const bool targetVisible = fromY > terrainHeightAt(*ctx, targetX, targetZ);
+		if (targetVisible && fullDistance > kMinOcclusionDistance) {
+			const float startT = kMinOcclusionDistance / fullDistance;
+			const int steps = 32;
+			for (int i = 0; i <= steps; i++) {
+				const float t = startT + (1.0f - startT) * ((float) i / (float) steps);
+				const float sx = targetX + dx * t;
+				const float sy = fromY + dy * t;
+				const float sz = targetZ + dz * t;
+				if (terrainHeightAt(*ctx, sx, sz) > sy) {
+					// Blocked here, so the last clear sample is as far as
+					// the camera can go.
+					allowed = std::max(startT, t - (1.0f - startT) / (float) steps);
+					break;
+				}
+			}
+		}
+
+		// Snap inward, ease outward. This cannot oscillate: `allowed` is
+		// measured along the ray to the *desired* eye position, which is
+		// recomputed from the orbit every frame and never from the pulled-in
+		// one, so there is no feedback from the result back into the test.
+		if (allowed < g_camera.occlusionFraction) {
+			g_camera.occlusionFraction = allowed;
+		} else {
+			const float dt = std::min((float) (lastFrameSeconds - lastCameraSeconds), 0.1f);
+			const float k = std::min(kOcclusionReleaseRate * std::max(dt, 0.0f), 1.0f);
+			g_camera.occlusionFraction += (allowed - g_camera.occlusionFraction) * k;
+		}
+		lastCameraSeconds = lastFrameSeconds;
+
+		eyeX = targetX + dx * g_camera.occlusionFraction;
+		eyeY = fromY + dy * g_camera.occlusionFraction;
+		eyeZ = targetZ + dz * g_camera.occlusionFraction;
+	}
+
+
+	// Keep the eye above ground. The pull-in above stops the *sightline*
+	// crossing terrain; this is the backstop for the eye's own position,
+	// which the pull-in can still leave close to a slope, and for the case
+	// where the eye is already within kMinOcclusionDistance so the pull-in
+	// declines to act at all.
 	{
 		float groundAtEye = terrainHeightAt(*ctx, eyeX, eyeZ);
 		float minEyeY = groundAtEye + kCameraGroundClearance;
