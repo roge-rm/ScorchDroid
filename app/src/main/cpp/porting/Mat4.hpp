@@ -73,6 +73,29 @@ struct Mat4 {
         return r;
     }
 
+    // Rotation of [radians] about an arbitrary unit axis (Rodrigues), for
+    // tilting a tank onto the slope it is standing on - the axis there is
+    // world-up crossed with the ground normal, which is in no plane worth
+    // naming.
+    static Mat4 rotateAxis(float ax, float ay, float az, float radians) {
+        const float len = sqrtf(ax * ax + ay * ay + az * az);
+        if (len < 1e-6f) return identity();
+        ax /= len; ay /= len; az /= len;
+
+        const float c = cosf(radians), s = sinf(radians), t = 1.0f - c;
+        Mat4 r = identity();
+        r.m[0]  = t * ax * ax + c;
+        r.m[1]  = t * ax * ay + s * az;
+        r.m[2]  = t * ax * az - s * ay;
+        r.m[4]  = t * ax * ay - s * az;
+        r.m[5]  = t * ay * ay + c;
+        r.m[6]  = t * ay * az + s * ax;
+        r.m[8]  = t * ax * az + s * ay;
+        r.m[9]  = t * ay * az - s * ax;
+        r.m[10] = t * az * az + c;
+        return r;
+    }
+
     static Mat4 perspective(float fovYRadians, float aspect, float nearZ, float farZ) {
         Mat4 r{};
         float f = 1.0f / tanf(fovYRadians / 2.0f);

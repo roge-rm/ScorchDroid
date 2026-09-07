@@ -1706,6 +1706,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// buying) gets its name but no life bar. Kept separate from
 		// `alive` because the two differ exactly during the buying phase.
 		bool visible;
+		// Rotation that stands the hull on the slope beneath it, from the
+		// landscape normal. See where it is built for why only the hull
+		// gets it.
+		Mat4 groundTilt;
 		Model *model;
 		// Name-plate data, filled here and projected to screen space once
 		// the MVP exists further down.
@@ -1740,6 +1744,40 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float z = worldZFromEngineY(engineY);
 		float groundY = heightAt(heightMap, mapW, mapH, x, engineY);
 		bool mine = (tank->getDestinationId() == myDestinationId);
+
+		// Sit the tank on the slope rather than axis-aligned on top of it.
+		// Upstream doesn't do this - TargetLife's rotation is a yaw about
+		// the world up axis and nothing else, so its tanks stay upright on
+		// any hillside - but the landscape normal it maintains for lighting
+		// is right there, and a tank bedded into the hill reads far better
+		// on a small screen than one apparently hovering at one corner.
+		//
+		// Deliberately the hull only (see the draw loop): the turret and
+		// gun carry the firing bearing and elevation, which are world-space
+		// angles that the ground has no say in. Tilting those would put the
+		// drawn barrel back out of step with where the shot actually goes,
+		// which is a bug this port has already paid for more than once.
+		Mat4 groundTilt = Mat4::identity();
+		{
+			FixedVector &normal = ctx->getLandscapeMaps().getGroundMaps().getNormal(
+				std::min(std::max((int) x, 0), mapW - 1),
+				std::min(std::max((int) engineY, 0), mapH - 1));
+			// Landscape normal (x, y, up) -> world (x, up, -y), the same
+			// mapping positions take.
+			const float nx = normal[0].asFloat();
+			const float ny = normal[2].asFloat();
+			const float nz = -normal[1].asFloat();
+			const float len = sqrtf(nx * nx + ny * ny + nz * nz);
+			if (len > 1e-5f) {
+				const float ux = nx / len, uy = ny / len, uz = nz / len;
+				// Axis = worldUp x normal, angle = the one between them.
+				const float axisX = uz, axisZ = -ux;
+				if (sqrtf(axisX * axisX + axisZ * axisZ) > 1e-5f) {
+					groundTilt = Mat4::rotateAxis(axisX, 0.0f, axisZ,
+						acosf(std::min(1.0f, std::max(-1.0f, uy))));
+				}
+			}
+		}
 
 		Model *model = nullptr;
 		TankModel *tankModel = tank->getModelContainer().getTankModel();
@@ -1815,7 +1853,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 
 		tankInstances.push_back({
-			x, groundY, z, heading, elevation, mine, alive, visible, model,
+			x, groundY, z, heading, elevation, mine, alive, visible, groundTilt, model,
 			LangStringUtil::convertFromLang(tank->getTargetName()),
 			std::min(std::max(lifeFraction, 0.0f), 1.0f),
 			std::min(std::max(shieldFraction, 0.0f), 1.0f),
@@ -1987,7 +2025,14 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		Mat4 base = Mat4::multiply(
 			Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
 			Mat4::scale(gpu->scale));
-		Mat4 hullMvp = Mat4::multiply(mvp, base);
+		// The hull, and only the hull, leans onto the ground - the turret
+		// and gun below stay in world axes so the barrel keeps agreeing
+		// with the shot (see where groundTilt is built).
+		Mat4 hullMvp = Mat4::multiply(mvp, Mat4::multiply(
+			Mat4::multiply(
+				Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
+				inst.groundTilt),
+			Mat4::scale(gpu->scale)));
 		drawMeshGroup(gpu->hull, meshMvpLoc, hullMvp);
 
 		Mat4 turret = Mat4::multiply(base, Mat4::rotateY(inst.headingRadians));

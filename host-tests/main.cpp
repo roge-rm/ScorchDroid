@@ -979,6 +979,41 @@ namespace
 		check(roundTripped == pointCount,
 			"every test point round-tripped through the screen and back");
 
+		// Mat4::rotateAxis, which stands a tank on the slope it is parked
+		// on (see groundTilt in renderer_jni.cpp). The property that
+		// matters is the only one it is used for: it must take world up
+		// onto the ground normal.
+		const float normals[][3] = {
+			{ 0.0f, 1.0f, 0.0f },
+			{ 0.3f, 0.9f, 0.0f },
+			{ -0.4f, 0.8f, 0.45f },
+			{ 0.0f, 0.7f, -0.7f },
+		};
+		int tilted = 0;
+		const int normalCount = (int) (sizeof(normals) / sizeof(normals[0]));
+		for (int i = 0; i < normalCount; i++)
+		{
+			float nx = normals[i][0], ny = normals[i][1], nz = normals[i][2];
+			const float nlen = sqrtf(nx * nx + ny * ny + nz * nz);
+			nx /= nlen; ny /= nlen; nz /= nlen;
+
+			Mat4 tilt = Mat4::identity();
+			const float axisX = nz, axisZ = -nx;
+			if (sqrtf(axisX * axisX + axisZ * axisZ) > 1e-5f)
+			{
+				tilt = Mat4::rotateAxis(axisX, 0.0f, axisZ, acosf(ny));
+			}
+
+			// Column 1 is where the model's up axis ends up.
+			const float upX = tilt.m[4], upY = tilt.m[5], upZ = tilt.m[6];
+			if (fabsf(upX - nx) < 0.001f && fabsf(upY - ny) < 0.001f &&
+				fabsf(upZ - nz) < 0.001f)
+			{
+				tilted++;
+			}
+		}
+		check(tilted == normalCount,
+			"the ground tilt takes the model's up axis onto the ground normal");
 	}
 
 	// M5: regression check for engine_jni.cpp's startLocalGame() switch
