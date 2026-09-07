@@ -483,7 +483,28 @@ Java_com_rm_scorchdroid_NativeBridge_getWeaponShop(JNIEnv *env, jobject /* this 
             std::list<Accessory *> accessories =
                     ctx->getAccessoryStore().getAllAccessories(AccessoryStore::SortName);
             for (Accessory *accessory: accessories) {
-                if (accessory->getNoBuy() || accessory->getAIOnly() || accessory->getBotOnly()) continue;
+                // Upstream's own test, rather than a hand-rolled subset of
+                // it: TanketAccessories::accessoryAllowed is what its buy
+                // dialog calls (BuyAccessoryDialog::addAccessory) and it
+                // covers several rules this list was missing - most
+                // visibly `maximumNumber == 0`, which is how the data marks
+                // an accessory a tank may never hold. That is what every
+                // $0 oddity in the shop was: BoidsLaser, Bomb At Tank,
+                // DriveOverDestroy, Fire At Tank, GroupWin and friends are
+                // internal actions fired by landscape events and collision
+                // rules, not things to buy. It also brings in the arms
+                // level (weapons unlock as the game escalates), the tank
+                // type's own disabled list, and "already hold an infinite
+                // one".
+                //
+                // ...but "not buyable" is not "not worth showing": this
+                // shop doubles as the weapon selector, and an owned
+                // infinite weapon (your starting Baby Missile) fails
+                // accessoryAllowed precisely because you cannot buy another.
+                // So anything already held stays listed.
+                const int owned = tank->getAccessories().getAccessoryCount(accessory);
+                const bool buyable = tank->getAccessories().accessoryAllowed(accessory, 0);
+                if (!buyable && owned == 0) continue;
 
                 const char *typeName = "other";
                 switch (accessory->getType()) {
@@ -498,7 +519,7 @@ Java_com_rm_scorchdroid_NativeBridge_getWeaponShop(JNIEnv *env, jobject /* this 
                 row << accessory->getAccessoryId() << '|'
                     << accessory->getName() << '|'
                     << accessory->getPrice() << '|'
-                    << tank->getAccessories().getAccessoryCount(accessory) << '|'
+                    << owned << '|'
                     << (accessory == current ? 1 : 0) << '|'
                     << typeName << '|'
                     // Which shop tab upstream files this under, which is not
