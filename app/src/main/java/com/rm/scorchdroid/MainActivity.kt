@@ -283,25 +283,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // The engine's fire angle runs counterclockwise from world +Y, while
-    // the angle slider is a clockwise-from-up dial (0=up, 90=right - see
-    // fireFromSliders). Mirroring converts between them, and is its own
-    // inverse, so the same call works in both directions.
-    private fun mirrorAngle(degrees: Float): Float = ((360f - degrees) % 360f + 360f) % 360f
-
     /**
-     * The compass dial the player sees (0 up, 90 right) converted to the
-     * engine's fire angle (counterclockwise from +Y). Every native call
-     * that takes an angle takes an *engine* angle - fireWeapon and setAim
-     * both - so going through one named function makes it obvious at each
-     * call site which convention is being handed over.
+     * The player-facing compass dial (0 up, 90 right, clockwise) converted
+     * to the angle the engine takes. They turn out to be the *same* sense,
+     * so this only normalises the range - but it stays a named function
+     * because every native call taking an angle goes through it, and the
+     * one time these two ends disagreed the shot flew where the compass
+     * said while the turret rotated the other way.
      *
-     * This exists because it went wrong: fireWeapon mirrored and setAim did
-     * not, so the shot flew where the compass said while the turret and aim
-     * sight visibly rotated the opposite way. Both are the same boundary
-     * and must speak the same convention.
+     * This used to mirror (360 - d). Reading TankLib::getVelocityVector's
+     * `-xy` inside the sin/cos says it should, and that argument is what
+     * put the mirror here in the first place - but measured on a top-down
+     * view, raising the dial with the mirror in place swung the barrel
+     * *counter*-clockwise. Whatever compensating sign lives in the model or
+     * the rotation, the composed result is what matters, and the composed
+     * result wants no mirror. Verified by watching the sight sweep through
+     * 0/90/180/270 rather than by re-deriving it.
      */
-    private fun engineAngleFromDial(dialDegrees: Float): Float = mirrorAngle(dialDegrees)
+    private fun engineAngleFromDial(dialDegrees: Float): Float =
+        ((dialDegrees % 360f) + 360f) % 360f
+
+    /** Inverse of [engineAngleFromDial]; identical, since the senses match. */
+    private fun dialAngleFromEngine(engineDegrees: Float): Float =
+        engineAngleFromDial(engineDegrees)
 
     // M6: applies "angleDegrees|elevationDegrees|powerFraction" from
     // NativeBridge.getMyAim() to the sliders. Returns whether it applied -
@@ -320,7 +324,7 @@ class MainActivity : AppCompatActivity() {
         val engineAngle = parts.getOrNull(0)?.toFloatOrNull() ?: return false
         val elevation = parts.getOrNull(1)?.toFloatOrNull() ?: return false
 
-        currentAngleDegrees = mirrorAngle(engineAngle)
+        currentAngleDegrees = dialAngleFromEngine(engineAngle)
         currentElevationDegrees = elevation.coerceIn(0f, 90f)
         currentPowerFraction = DEFAULT_POWER_FRACTION
         hudState.angleDegrees = currentAngleDegrees
@@ -468,11 +472,9 @@ class MainActivity : AppCompatActivity() {
     // The angle slider is deliberately a "clockwise from up" dial for the
     // player (0=forward/up, 90=right, 180=back, 270=left - the usual
     // clock/compass-face reading), but the engine's own fire angle rotates
-    // the other way (counterclockwise from world +Y - see the comment on
-    // handleTap() in engine_jni.cpp: vx=-sin(angle), vy=cos(angle), so
-    // increasing angle sweeps from +Y toward -X, not +X). mirrorAngle()
-    // converts the player-facing dial into the engine's convention without
-    // changing what the slider itself displays.
+    // the same way round as the engine's - see engineAngleFromDial, which
+    // is where that was pinned down by measurement rather than by reading
+    // the velocity formula.
     private fun fireFromSliders() {
         val engineAngle = engineAngleFromDial(currentAngleDegrees)
         CoroutineScope(Dispatchers.Main).launch {
