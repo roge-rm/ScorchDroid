@@ -620,6 +620,51 @@ namespace
 			check(maxC > minC, "the generated ground texture actually varies (height/slope blending ran)");
 			check(total > 0, "the generated ground texture isn't entirely black (source images loaded)");
 
+			// M6 shadows: upstream bakes the sun (and the shadows hills
+			// cast on each other) into this texture rather than shading
+			// per fragment - ImageModifier::addLightMapToBitmap, called
+			// from Landscape.cpp right after the texture is generated.
+			// Checked here because it is pure pixel work over a real
+			// landscape, and because "did the shadows actually darken
+			// anything" is invisible in a screenshot of an unfamiliar hill.
+			LandscapeTextureBuilder::Texture beforeLight = ground;
+			bool baked = LandscapeTextureBuilder::applyLightMap(
+				server->getContext(), ground);
+			check(baked, "the sun light map bakes into the ground texture");
+			if (baked)
+			{
+				int darker = 0, brighter = 0, unchanged = 0;
+				long long deltaTotal = 0;
+				for (size_t i = 0; i < ground.rgb.size(); i++)
+				{
+					const int before = beforeLight.rgb[i];
+					const int after = ground.rgb[i];
+					if (after < before) darker++;
+					else if (after > before) brighter++;
+					else unchanged++;
+					deltaTotal += (before - after);
+				}
+				// Lighting here only ever multiplies by <= 1, so nothing
+				// may come out brighter - if any does, the light map has
+				// been applied to the wrong buffer or scaled wrongly.
+				check(brighter == 0, "baking light never brightens a texel");
+				check(darker > 0, "the light map actually changes the ground");
+				// And it must not flatten the whole thing to black, which
+				// is what a broken sun direction or normal would do.
+				check(unchanged + darker == (int) ground.rgb.size(),
+					"every texel is accounted for");
+				printf("  (light map: %d texels darkened, mean drop %.1f/255)\n",
+					darker, (double) deltaTotal / (double) ground.rgb.size());
+
+				int black = 0;
+				for (size_t i = 0; i < ground.rgb.size(); i++)
+				{
+					if (ground.rgb[i] == 0) black++;
+				}
+				check(black < (int) ground.rgb.size() / 2,
+					"the landscape is not baked to mostly black");
+			}
+
 			// M6 scorch marks - the other half of terrain destruction, and
 			// the half upstream keeps in the client layer
 			// (DeformTextures::deformLandscape + ExplosionTextures::
@@ -736,6 +781,10 @@ namespace
 		// clear colour this replaces.
 		check(distinct > 0, "the gradient actually varies from horizon to zenith");
 
+		printf("  (ambience %.2f,%.2f,%.2f diffuse %.2f,%.2f,%.2f sun %.0f,%.0f,%.0f)\n",
+			sky.ambience[0], sky.ambience[1], sky.ambience[2],
+			sky.diffuse[0], sky.diffuse[1], sky.diffuse[2],
+			sky.sunPosition[0], sky.sunPosition[1], sky.sunPosition[2]);
 		printf("  (horizon %.2f,%.2f,%.2f -> zenith %.2f,%.2f,%.2f)\n",
 			sky.gradient[0][0], sky.gradient[0][1], sky.gradient[0][2],
 			sky.gradient[ScorchDroidSky::kGradientSteps - 1][0],

@@ -2,6 +2,7 @@
 
 #include <engine/ScorchedContext.hpp>
 #include <landscapemap/LandscapeMaps.hpp>
+#include <landscapemap/GroundMaps.hpp>
 #include <landscapedef/LandscapeDefinitions.hpp>
 #include <landscapedef/LandscapeTex.hpp>
 #include <image/ImageFactory.hpp>
@@ -39,6 +40,19 @@ namespace ScorchDroidSky
 		if (length > 0.0001f) {
 			for (int i = 0; i < 3; i++) sky.sunDirection[i] /= length;
 		}
+
+		for (int i = 0; i < 3; i++) {
+			sky.ambience[i] = tex->skyambience[i];
+			sky.diffuse[i] = tex->skydiffuse[i];
+		}
+
+		// Sun::setPosition verbatim, including its 900-unit radius and the
+		// offset to the middle of the map - the light map needs the point,
+		// not just the bearing.
+		GroundMaps &ground = context.getLandscapeMaps().getGroundMaps();
+		sky.sunPosition[0] = sinf(xy) * 900.0f * cosf(yz) + ground.getLandscapeWidth() / 2.0f;
+		sky.sunPosition[1] = cosf(xy) * 900.0f * cosf(yz) + ground.getLandscapeHeight() / 2.0f;
+		sky.sunPosition[2] = sinf(yz) * 900.0f;
 
 		if (tex->skycolormap.empty()) return sky;
 		Image colors = ImageFactory::loadImage(S3D::eModLocation, tex->skycolormap);

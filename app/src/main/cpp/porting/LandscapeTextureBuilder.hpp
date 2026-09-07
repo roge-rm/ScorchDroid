@@ -101,6 +101,26 @@ namespace LandscapeTextureBuilder
 	// same.
 	Texture applyMovementMask(const Texture &source,
 							  const unsigned char *mask, int maskWidth, int maskHeight);
+
+	// Bakes the sun's lighting - including terrain shadowing itself - into
+	// an already-built ground texture. A port of upstream's
+	// ImageModifier::addLightMapToBitmap, which is client-only, and which
+	// upstream calls in exactly this place (Landscape.cpp, right after the
+	// texture is generated) on any machine without hardware shadows.
+	//
+	// Per texel: the lambert term against the interpolated ground normal,
+	// then a march along the ray towards the sun looking for terrain in the
+	// way. Blocking terrain that only just clips the ray softens the shadow
+	// in proportion; anything deeper is fully dark. The result is
+	// `diffuse * light + ambience`, multiplied into the texture.
+	//
+	// Baking rather than shading per fragment is upstream's own choice and
+	// a good one here: hills shadow each other, the cost is paid once per
+	// landscape, and the phone does nothing per frame. It does mean the
+	// terrain must then be drawn *unlit* or the lighting lands twice.
+	//
+	// Returns false if there is no landscape or the texture is unusable.
+	bool applyLightMap(ScorchedContext &context, Texture &texture);
 }
 
 #endif  // __INCLUDE_LandscapeTextureBuilder_hpp_INCLUDE__

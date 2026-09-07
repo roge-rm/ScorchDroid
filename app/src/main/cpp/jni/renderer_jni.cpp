@@ -92,9 +92,12 @@ namespace
 {
 	GLuint terrainProgram = 0, pointProgram = 0;
 	GLint  terrainMvpLoc = -1, terrainMinHeightLoc = -1, terrainHeightRangeLoc = -1, terrainLightDirLoc = -1;
-	GLint  terrainGroundTexLoc = -1, terrainHasTextureLoc = -1;
+	GLint  terrainGroundTexLoc = -1, terrainHasTextureLoc = -1, terrainLightBakedLoc = -1;
 	GLuint groundTexture = 0;
 	bool   groundTextureBuilt = false;
+	// Whether the ground texture already carries the sun's lighting, in
+	// which case the terrain shader must not apply its own on top.
+	bool   groundLightBaked = false;
 	// M6 scorch marks: the CPU-side copy of the ground texture is kept, not
 	// discarded after upload, because each blast blends into the *result of*
 	// every earlier one - marks accumulate over a round the way upstream's
@@ -105,6 +108,9 @@ namespace
 	// mask itself is recomputed on the simulation side (see engine_jni's
 	// refreshMovementMask); this side only notices the version change and
 	// re-uploads.
+	GLuint shadowProgram = 0, shadowVao = 0, shadowVbo = 0;
+	GLint  shadowMvpLoc = -1, shadowStrengthLoc = -1;
+
 	// M6 sky.
 	GLuint skyProgram = 0, skyVao = 0, skyVbo = 0;
 	GLint  skyGradientLoc = -1, skySunDirLoc = -1, skySunColorLoc = -1, skyGlowLoc = -1;
@@ -114,7 +120,7 @@ namespace
 	// M6 water surface: one quad at the landscape's own water height.
 	GLuint waterProgram = 0, waterVao = 0, waterVbo = 0;
 	GLint  waterMvpLoc = -1, waterDeepLoc = -1, waterShallowLoc = -1;
-	GLint  waterAlphaLoc = -1, waterTimeLoc = -1;
+	GLint  waterAlphaLoc = -1, waterTimeLoc = -1, waterEyeLoc = -1;
 	bool   waterBuilt = false;    // one attempt per landscape, success or not
 	bool   waterVisible = false;  // this landscape actually has water
 	float  waterHeight = 0.0f;
@@ -385,17 +391,24 @@ namespace
 		uniform vec3 uLightDir;
 		uniform sampler2D uGroundTexture;
 		uniform int uHasTexture;
+		uniform int uLightBaked;
 		void main() {
-			vec3 n = normalize(vNormal);
-			float diffuse = max(dot(n, uLightDir), 0.0);
 			vec3 baseColor;
 			if (uHasTexture == 1) {
 				baseColor = texture(uGroundTexture, vTexCoord).rgb;
 			} else {
 				baseColor = mix(vec3(0.22, 0.34, 0.13), vec3(0.58, 0.52, 0.42), vHeight01);
 			}
-			vec3 lit = baseColor * (0.55 + diffuse * 0.6);
-			fragColor = vec4(lit, 1.0);
+			if (uLightBaked == 1) {
+				// The texture already carries the sun, the ambience and the
+				// shadows hills cast on each other - lighting it again here
+				// would apply the sun twice and wash the shadows out.
+				fragColor = vec4(baseColor, 1.0);
+				return;
+			}
+			vec3 n = normalize(vNormal);
+			float diffuse = max(dot(n, uLightDir), 0.0);
+			fragColor = vec4(baseColor * (0.55 + diffuse * 0.6), 1.0);
 		}
 	)";
 
@@ -448,6 +461,39 @@ namespace
 		in vec3 vColor;
 		out vec4 fragColor;
 		void main() { fragColor = vec4(vColor, 1.0); }
+	)";
+
+	// M6 object shadows. The baked light map above shadows the *terrain*
+	// against itself, but nothing anchors a tank or a tree to the ground it
+	// stands on. Upstream solves that separately too, with a soft circle
+	// painted under each target (Landscape's shadow map, fed by
+	// getShadowMap().addCircle in the tank and target renderers), so this
+	// is the same idea drawn directly: a small ground-hugging quad with a
+	// radial falloff.
+	const char *kShadowVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec2 aLocal;
+		uniform mat4 uMVP;
+		out vec2 vLocal;
+		void main() {
+			vLocal = aLocal;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+		}
+	)";
+
+	const char *kShadowFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec2 vLocal;
+		out vec4 fragColor;
+		uniform float uStrength;
+		void main() {
+			// Soft-edged rather than a hard disc: a crisp ellipse on a
+			// bumpy hillside reads as a decal, a soft one as shade.
+			float d = length(vLocal);
+			if (d > 1.0) discard;
+			float a = (1.0 - d);
+			fragColor = vec4(0.0, 0.0, 0.0, a * a * uStrength);
+		}
 	)";
 
 	// M6 sky. A full-screen pass rather than a dome: the colour only ever
@@ -529,13 +575,24 @@ namespace
 		uniform vec3 uShallowColor;
 		uniform float uAlpha;
 		uniform float uTime;
+		uniform vec2 uEye;
 		void main() {
 			// Two waves at different angles and speeds, deliberately not
 			// harmonics of each other - a single sine reads as corduroy.
 			float a = sin(vWorld.x * 0.09 + uTime * 0.7);
 			float b = sin((vWorld.x * 0.4 + vWorld.y * 0.9) * 0.05 - uTime * 0.5);
-			float crest = clamp(0.5 + 0.25 * a + 0.25 * b, 0.0, 1.0);
-			fragColor = vec4(mix(uDeepColor, uShallowColor, crest), uAlpha);
+			float crest = 0.5 + 0.25 * a + 0.25 * b;
+
+			// Flatten the waves with distance. The surface reaches the far
+			// plane, so near the horizon a whole wavelength collapses into
+			// well under a pixel and the pattern aliases into hard stripes
+			// - there is no mip chain to save it, the colour being computed
+			// rather than sampled. Fading to the mean is what a mip would
+			// have converged to anyway.
+			float d = distance(vWorld, uEye);
+			crest = mix(crest, 0.5, clamp(d / 400.0, 0.0, 1.0));
+
+			fragColor = vec4(mix(uDeepColor, uShallowColor, clamp(crest, 0.0, 1.0)), uAlpha);
 		}
 	)";
 
@@ -661,6 +718,7 @@ namespace
 			groundTextureData = LandscapeTextureBuilder::Texture();
 			terrainBuilt = false;
 			groundTextureBuilt = false;
+			groundLightBaked = false;
 			// The new landscape gets a freshly built texture, so whatever
 			// was painted over the old one is gone with it - and the
 			// version has to be forced to re-sync, or a mask published
@@ -788,6 +846,12 @@ namespace
 
 		std::string groundError;
 		groundTextureData = LandscapeTextureBuilder::build(ctx, 512, &groundError);
+		// Sun lighting and terrain self-shadowing are baked in here, before
+		// the upload, exactly where upstream does it (Landscape.cpp, right
+		// after generating the texture). The terrain is then drawn unlit -
+		// see uLightBaked in the terrain shader.
+		groundLightBaked = LandscapeTextureBuilder::applyLightMap(ctx, groundTextureData);
+        if (groundLightBaked) LOGI("Ground light map baked (sun lighting + terrain shadows)");
 		LandscapeTextureBuilder::Texture &ground = groundTextureData;
 		if (!ground.valid()) {
 			LOGE("ground texture generation failed (%s) - falling back to flat height colours", groundError.c_str());
@@ -1816,6 +1880,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainLightDirLoc = glGetUniformLocation(terrainProgram, "uLightDir");
 	terrainGroundTexLoc = glGetUniformLocation(terrainProgram, "uGroundTexture");
 	terrainHasTextureLoc = glGetUniformLocation(terrainProgram, "uHasTexture");
+	terrainLightBakedLoc = glGetUniformLocation(terrainProgram, "uLightBaked");
+
+	shadowProgram = linkProgram(kShadowVertexShader, kShadowFragmentShader);
+	shadowMvpLoc = glGetUniformLocation(shadowProgram, "uMVP");
+	shadowStrengthLoc = glGetUniformLocation(shadowProgram, "uStrength");
+	glGenVertexArrays(1, &shadowVao);
+	glGenBuffers(1, &shadowVbo);
+	glBindVertexArray(shadowVao);
+	glBindBuffer(GL_ARRAY_BUFFER, shadowVbo);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) 0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (3 * sizeof(float)));
+	glBindVertexArray(0);
 
 	skyProgram = linkProgram(kSkyVertexShader, kSkyFragmentShader);
 	skyGradientLoc = glGetUniformLocation(skyProgram, "uGradient");
@@ -1838,6 +1916,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterShallowLoc = glGetUniformLocation(waterProgram, "uShallowColor");
 	waterAlphaLoc = glGetUniformLocation(waterProgram, "uAlpha");
 	waterTimeLoc = glGetUniformLocation(waterProgram, "uTime");
+	waterEyeLoc = glGetUniformLocation(waterProgram, "uEye");
 
 	sightProgram = linkProgram(kSightVertexShader, kSightFragmentShader);
 	sightMvpLoc = glGetUniformLocation(sightProgram, "uMVP");
@@ -2022,6 +2101,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float rotationRadians;
 		float scale;
 		float brightness;
+		float shadowRadius;
 		Model *model;
 	};
 	std::vector<TargetInstance> targetInstances;
@@ -2062,6 +2142,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// non-positive is treated as "no tint" here; drawing scenery
 			// black is never what the data meant.
 			inst.brightness = (info.brightness > 0.0f) ? info.brightness : 1.0f;
+			// Upstream sizes a target's shadow from its own bounding size
+			// (TargetRendererImplTarget::render: size.Max() + 2).
+			inst.shadowRadius =
+				target->getLife().getSize().Max().asFloat() * 0.5f + 0.5f;
 			inst.model = model;
 			targetInstances.push_back(inst);
 		}
@@ -2327,6 +2411,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	glUniform1f(terrainHeightRangeLoc, terrainMaxHeight - terrainMinHeight);
 	glUniform3f(terrainLightDirLoc, 0.4f, 0.82f, 0.35f);
 	glUniform1i(terrainHasTextureLoc, groundTexture != 0 ? 1 : 0);
+	glUniform1i(terrainLightBakedLoc, groundLightBaked ? 1 : 0);
 	if (groundTexture != 0) {
 		glActiveTexture(GL_TEXTURE0);
 		glBindTexture(GL_TEXTURE_2D, groundTexture);
@@ -2334,6 +2419,56 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 	glBindVertexArray(terrainVao);
 	glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
+
+	// Ground shadows, between the terrain and the water: they belong on the
+	// land, and a shadow showing through the sea would be worse than none.
+	{
+		std::vector<float> quads;
+		auto addShadow = [&](float x, float y, float z, float radius) {
+			if (radius <= 0.0f) return;
+			// Lifted clear of the ground so it doesn't z-fight the slope it
+			// lies on. Depth is still tested, so a shadow behind a hill is
+			// correctly hidden.
+			const float h = y + 0.25f;
+			const float corners[6][2] = {
+				{ -1, -1 }, { 1, -1 }, { -1, 1 },
+				{ -1,  1 }, { 1, -1 }, {  1, 1 },
+			};
+			for (int i = 0; i < 6; i++) {
+				quads.push_back(x + corners[i][0] * radius);
+				quads.push_back(h);
+				quads.push_back(z + corners[i][1] * radius);
+				quads.push_back(corners[i][0]);
+				quads.push_back(corners[i][1]);
+			}
+		};
+
+		for (TargetInstance &inst : targetInstances) {
+			addShadow(inst.x, inst.y, inst.z, inst.shadowRadius);
+		}
+		for (TankInstance &inst : tankInstances) {
+			if (inst.alive) addShadow(inst.x, inst.y, inst.z, 1.6f);
+		}
+
+		if (!quads.empty() && shadowProgram != 0) {
+			glUseProgram(shadowProgram);
+			glUniformMatrix4fv(shadowMvpLoc, 1, GL_FALSE, mvp.m);
+			glUniform1f(shadowStrengthLoc, 0.5f);
+			glBindVertexArray(shadowVao);
+			glBindBuffer(GL_ARRAY_BUFFER, shadowVbo);
+			glBufferData(GL_ARRAY_BUFFER, quads.size() * sizeof(float),
+						 quads.data(), GL_DYNAMIC_DRAW);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDepthMask(GL_FALSE);
+			glDisable(GL_CULL_FACE);
+			glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (quads.size() / 5));
+			glEnable(GL_CULL_FACE);
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+			glBindVertexArray(0);
+		}
+	}
 
 	// Water goes on immediately after the ground and before anything that
 	// stands on it. It blends over the terrain already drawn (so a shoreline
@@ -2347,6 +2482,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform3f(waterShallowLoc, waterShallow[0], waterShallow[1], waterShallow[2]);
 		glUniform1f(waterAlphaLoc, waterAlpha);
 		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
+		glUniform2f(waterEyeLoc, eyeX, eyeZ);
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		// The surface extends far past the map on every side, so with the
