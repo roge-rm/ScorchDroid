@@ -253,6 +253,10 @@ class MainActivity : AppCompatActivity() {
             // M6: a granted move id means it is our turn to act again, so
             // whatever we committed last round has been played out. See
             // GameHudState.shotLocked - the Fire button reads this.
+            // M6 name plates - the renderer projected these on its own
+            // thread last frame; this just picks up the result.
+            hudState.tankOverlays = parseTankOverlays(gameRenderer.nativeGetTankOverlays())
+
             val moveId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
             if (moveId != 0) hudState.shotLocked = false
 

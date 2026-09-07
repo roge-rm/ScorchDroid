@@ -56,6 +56,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -89,6 +90,45 @@ import kotlinx.coroutines.delay
  */
 const val DEFAULT_POWER_FRACTION = 0.5f
 
+/**
+ * One tank's on-screen plate. Mirrors what upstream draws above each tank
+ * (TargetRendererImplTank::drawNames/drawLife): the player name in that
+ * player's colour, a health bar, and a shield bar when a shield is up.
+ */
+data class TankOverlay(
+    val screenX: Float,
+    val screenY: Float,
+    val onScreen: Boolean,
+    val alive: Boolean,
+    val mine: Boolean,
+    val life: Float,
+    val shield: Float,
+    val color: Color,
+    val name: String,
+)
+
+fun parseTankOverlays(rows: Array<String>): List<TankOverlay> = rows.mapNotNull { row ->
+    // The name is last and may itself contain the separator, so split with a
+    // limit rather than assuming it doesn't.
+    val p = row.split("|", limit = 11)
+    if (p.size != 11) return@mapNotNull null
+    TankOverlay(
+        screenX = p[0].toFloatOrNull() ?: return@mapNotNull null,
+        screenY = p[1].toFloatOrNull() ?: return@mapNotNull null,
+        onScreen = p[2] == "1",
+        alive = p[3] == "1",
+        mine = p[4] == "1",
+        life = p[5].toFloatOrNull() ?: 0f,
+        shield = p[6].toFloatOrNull() ?: 0f,
+        color = Color(
+            (p[7].toFloatOrNull() ?: 1f).coerceIn(0f, 1f),
+            (p[8].toFloatOrNull() ?: 1f).coerceIn(0f, 1f),
+            (p[9].toFloatOrNull() ?: 1f).coerceIn(0f, 1f),
+        ),
+        name = p[10],
+    )
+}
+
 class GameHudState {
     var statusText by mutableStateOf("")
     var hostingLabel by mutableStateOf("")
@@ -116,6 +156,8 @@ class GameHudState {
     // feedback - nothing flies until everyone has committed - so without
     // this the Fire button looked like it had done nothing.
     var shotLocked by mutableStateOf(false)
+    // M6: name plates, refreshed from the renderer's projection every tick.
+    var tankOverlays by mutableStateOf<List<TankOverlay>>(emptyList())
     // M6 parity: current wind (speed + direction) - it really does perturb
     // shots, and nothing showed it before. "" while there's no game yet.
     var windLabel by mutableStateOf("")
@@ -346,6 +388,10 @@ fun GameHud(
             }
         }
 
+        // Name plates and health bars, positioned from the renderer's own
+        // projection. Drawn before the dialog host so a modal covers them.
+        TankPlates(state.tankOverlays)
+
         HudDialogHost(state.dialog)
     }
 }
@@ -372,6 +418,82 @@ private fun wrapDegrees(degrees: Float): Float = ((degrees % 360f) + 360f) % 360
  * knows which axis this is - the button drives a compass, an elevation and
  * a power bar without knowing the difference.
  */
+
+/**
+ * Name plates over the battlefield - this port's answer to upstream's
+ * TargetRendererImplTank::drawNames/drawLife, which draw a name billboard
+ * and life bars in world space using its own GL font atlas.
+ *
+ * Rendered as Compose instead: there is no font renderer here and the whole
+ * UI layer is Compose by design, so the renderer hands over projected screen
+ * positions and the text is ordinary Android text - which also means it
+ * stays legible at any distance rather than shrinking into the terrain.
+ *
+ * A dead tank keeps its plate. Upstream does the same (drawParticle falls
+ * through to the arrow and names for a non-normal tank), and it is the only
+ * thing marking where a destroyed player was now that the model is hidden.
+ */
+@Composable
+private fun TankPlates(overlays: List<TankOverlay>) {
+    if (overlays.isEmpty()) return
+    val density = LocalDensity.current
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        for (overlay in overlays) {
+            if (!overlay.onScreen) continue
+            val xDp = with(density) { overlay.screenX.toDp() }
+            val yDp = with(density) { overlay.screenY.toDp() }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    // Centre the plate on the tank and sit it just above.
+                    .offset(x = xDp - 60.dp, y = yDp - 28.dp)
+                    .width(120.dp),
+            ) {
+                Text(
+                    text = overlay.name,
+                    color = if (overlay.alive) overlay.color else overlay.color.copy(alpha = 0.55f),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // Bars only while alive - a destroyed tank has no health to
+                // report, and upstream likewise draws life only for a
+                // playing tank.
+                if (overlay.alive) {
+                    Spacer(Modifier.height(2.dp))
+                    StatBar(overlay.life, Color(0xFF4CAF50))
+                    // Second bar only when a shield is actually up, matching
+                    // upstream's own "zero unless raised" behaviour.
+                    if (overlay.shield > 0f) {
+                        Spacer(Modifier.height(2.dp))
+                        StatBar(overlay.shield, Color(0xFF4FC3F7))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One thin filled bar, dark behind so it reads against any terrain. */
+@Composable
+private fun StatBar(fraction: Float, color: Color) {
+    Box(
+        modifier = Modifier
+            .width(52.dp)
+            .height(4.dp)
+            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(2.dp)),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(52.dp * fraction.coerceIn(0f, 1f))
+                .background(color, RoundedCornerShape(2.dp)),
+        )
+    }
+}
+
 @Composable
 private fun NudgeButton(label: String, onNudge: (Float) -> Unit) {
     var pressed by remember { mutableStateOf(false) }

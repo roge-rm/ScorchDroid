@@ -40,6 +40,9 @@
 #include <target/TargetLife.hpp>
 #include <tank/Tank.hpp>
 #include <tank/TankState.hpp>
+#include <target/TargetShield.hpp>
+#include <weapons/Shield.hpp>
+#include <lang/LangString.hpp>
 #include <engine/ActionController.hpp>
 #include <common/FixedVector.hpp>
 #include <EngineState.hpp>
@@ -154,6 +157,25 @@ namespace
 	// Set when a new landscape is built, cleared once the free-fly camera
 	// has been pointed at "my tank" for that round. One-shot, so it never
 	// fights the player's own panning afterwards.
+	// M6 name plates / health bars. Upstream draws these in world space with
+	// its own GL font atlas (TargetRendererImplTank::drawNames/drawLife);
+	// this port has no font renderer and its whole UI layer is Compose, so
+	// the renderer publishes projected screen positions instead and Kotlin
+	// draws the text. Guarded by its own mutex: written on the GL thread,
+	// read from the UI thread's poll.
+	struct TankOverlay {
+		float screenX = 0.0f, screenY = 0.0f;
+		bool  onScreen = false;
+		bool  alive = false;
+		bool  mine = false;
+		float life = 0.0f;    // 0..1
+		float shield = 0.0f;  // 0..1, 0 when no shield is up
+		float r = 1.0f, g = 1.0f, b = 1.0f;
+		std::string name;
+	};
+	std::mutex g_overlayMutex;
+	std::vector<TankOverlay> g_tankOverlays;
+
 	bool   recentreOnMyTank = false;
 	int    terrainDeformLogsLeft = 0;
 	int    terrainScorchLogsLeft = 0;
@@ -1352,6 +1374,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		bool mine;
 		bool alive;
 		Model *model;
+		// Name-plate data, filled here and projected to screen space once
+		// the MVP exists further down.
+		std::string name;
+		float life;
+		float shield;
+		float colorR, colorG, colorB;
 	};
 	std::vector<TankInstance> tankInstances;
 	std::vector<float> myTankPositions, enemyTankPositions;  // fallback markers
@@ -1386,7 +1414,31 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float heading = -tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
 		float elevation = tank->getShotInfo().getRotationGunYZ().asFloat() * (float) M_PI / 180.0f;
 		bool alive = (tank->getState().getState() == TankState::sNormal);
-		tankInstances.push_back({ x, groundY, z, heading, elevation, mine, alive, model });
+
+		// Name plate / health bar inputs. Life is a straight fraction of
+		// max; shield is the fraction of the raised shield's own power, or
+		// zero when none is up - matching what upstream's drawLife shows as
+		// its second bar.
+		TargetLife &life = tank->getLife();
+		float lifeFraction = (life.getMaxLife() > fixed(0))
+			? (life.getLife() / life.getMaxLife()).asFloat() : 0.0f;
+		float shieldFraction = 0.0f;
+		if (Accessory *currentShield = tank->getShield().getCurrentShield()) {
+			Shield *shieldAction = (Shield *) currentShield->getAction();
+			if (shieldAction && shieldAction->getPower() > fixed(0)) {
+				shieldFraction = (tank->getShield().getShieldPower() /
+								  shieldAction->getPower()).asFloat();
+			}
+		}
+		Vector &tankColor = tank->getColor();
+
+		tankInstances.push_back({
+			x, groundY, z, heading, elevation, mine, alive, model,
+			LangStringUtil::convertFromLang(tank->getTargetName()),
+			std::min(std::max(lifeFraction, 0.0f), 1.0f),
+			std::min(std::max(shieldFraction, 0.0f), 1.0f),
+			tankColor[0], tankColor[1], tankColor[2],
+		});
 
 		float markerY = groundY + 1.5f;
 		if (mine) {
@@ -1507,11 +1559,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			continue;
 		}
 
-		if (inst.mine) {
-			glUniform4f(meshColorLoc, 0.45f, 0.85f, 0.95f, 1.0f);  // cyan-ish - mine
-		} else {
-			glUniform4f(meshColorLoc, 0.9f, 0.45f, 0.4f, 1.0f);    // red-ish - opponents
-		}
+		// The engine's own per-tank colour, as upstream tints tanks and
+		// draws their names with. Was a hardcoded cyan/red "mine vs theirs"
+		// split, which contradicted the name plates the moment those
+		// started showing the real colour - a red "Player" label over a
+		// cyan tank. Your own tank is identifiable by the aim sight and the
+		// follow camera; it doesn't need to lie about its colour too.
+		glUniform4f(meshColorLoc, inst.colorR, inst.colorG, inst.colorB, 1.0f);
 
 		// Hull sits still; the turret swings to the firing bearing and the
 		// gun additionally lifts to the elevation, each about its own pivot
@@ -1650,11 +1704,78 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 	// Effects last, so they blend additively over the finished scene.
 	drawEffects(mvp, eyeX, eyeY, eyeZ, kFovYRadians);
+
+	// Project each tank to screen space for the Compose name plates. Done
+	// here rather than in Kotlin because this is the only place that has
+	// the finished MVP, and repeating the camera maths on the UI thread
+	// would be a second implementation to keep in step.
+	{
+		std::vector<TankOverlay> overlays;
+		overlays.reserve(tankInstances.size());
+		for (TankInstance &inst : tankInstances) {
+			// Anchor above the tank, like upstream's own name billboard
+			// (drawNames puts it at height + 8).
+			const float wx = inst.x, wy = inst.y + 4.0f, wz = inst.z;
+			const float cx = mvp.m[0] * wx + mvp.m[4] * wy + mvp.m[8]  * wz + mvp.m[12];
+			const float cy = mvp.m[1] * wx + mvp.m[5] * wy + mvp.m[9]  * wz + mvp.m[13];
+			const float cw = mvp.m[3] * wx + mvp.m[7] * wy + mvp.m[11] * wz + mvp.m[15];
+
+			TankOverlay overlay;
+			overlay.alive = inst.alive;
+			overlay.mine = inst.mine;
+			overlay.life = inst.life;
+			overlay.shield = inst.shield;
+			overlay.r = inst.colorR; overlay.g = inst.colorG; overlay.b = inst.colorB;
+			overlay.name = inst.name;
+
+			// w <= 0 is behind the eye, where the perspective divide flips
+			// the result and would place the plate on the opposite side of
+			// the screen.
+			if (cw > 0.0001f) {
+				const float ndcX = cx / cw, ndcY = cy / cw;
+				overlay.screenX = (ndcX * 0.5f + 0.5f) * (float) surfaceWidth;
+				overlay.screenY = (1.0f - (ndcY * 0.5f + 0.5f)) * (float) surfaceHeight;
+				overlay.onScreen =
+					overlay.screenX >= 0.0f && overlay.screenX <= (float) surfaceWidth &&
+					overlay.screenY >= 0.0f && overlay.screenY <= (float) surfaceHeight;
+			}
+			overlays.push_back(overlay);
+		}
+		std::lock_guard<std::mutex> lock(g_overlayMutex);
+		g_tankOverlays.swap(overlays);
+	}
 }
 
 // M6: battlefield touch now drives the orbit camera (see the file-level
 // comment above for why tap-to-fire-at-a-point doesn't carry over as-is) -
 // called from MainActivity's touch handling on the GLSurfaceView.
+// M6 name plates: the last frame's projected tank positions, one row each:
+// "screenX|screenY|onScreen|alive|mine|life|shield|r|g|b|name". Kotlin draws
+// the plates (see GameHud) - this port has no GL font renderer and its UI is
+// Compose, so text stays on that side.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeGetTankOverlays(JNIEnv *env, jobject) {
+	std::vector<TankOverlay> snapshot;
+	{
+		std::lock_guard<std::mutex> lock(g_overlayMutex);
+		snapshot = g_tankOverlays;
+	}
+
+	jclass stringClass = env->FindClass("java/lang/String");
+	jobjectArray result = env->NewObjectArray((jsize) snapshot.size(), stringClass, nullptr);
+	for (size_t i = 0; i < snapshot.size(); i++) {
+		const TankOverlay &o = snapshot[i];
+		char buffer[512];
+		snprintf(buffer, sizeof(buffer), "%.1f|%.1f|%d|%d|%d|%.3f|%.3f|%.3f|%.3f|%.3f|%s",
+				 o.screenX, o.screenY, o.onScreen ? 1 : 0, o.alive ? 1 : 0, o.mine ? 1 : 0,
+				 o.life, o.shield, o.r, o.g, o.b, o.name.c_str());
+		jstring row = env->NewStringUTF(buffer);
+		env->SetObjectArrayElement(result, (jsize) i, row);
+		env->DeleteLocalRef(row);
+	}
+	return result;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeCameraDrag(JNIEnv *, jobject, jfloat dx, jfloat dy) {
 	std::lock_guard<std::mutex> lock(g_cameraMutex);
