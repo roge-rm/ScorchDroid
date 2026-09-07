@@ -743,8 +743,9 @@ static void trackPhaseTime(ScorchedServer *server, fixed frameTime)
 // TankKeyboardControlUtil::autoAim:
 //     angle = degrees(atan2(dir.y, dir.x)) - 90
 // rather than re-derived. Angle conventions in this port have been got
-// wrong three separate ways by reasoning from first principles; copying
-// the line that demonstrably works is the cheaper correctness argument.
+// wrong several ways by reasoning from first principles; copying the line
+// upstream uses against the same unmodified engine is the cheaper
+// correctness argument.
 //
 // Returns the new angle in degrees, or -1 if there is no tank to aim.
 extern "C" JNIEXPORT jfloat JNICALL
@@ -758,21 +759,18 @@ Java_com_rm_scorchdroid_NativeBridge_aimAtPoint(JNIEnv *, jobject, jfloat landsc
     const float dirY = landscapeY - position[1].asFloat();
     if (fabsf(dirX) < 0.001f && fabsf(dirY) < 0.001f) return -1.0f;
 
-    // Upstream's autoAim is `degrees(atan2(dir.y, dir.x)) - 90`. This port
-    // needs the opposite heading, measured rather than derived: tapping a
-    // point with upstream's expression aimed the turret exactly away from
-    // it, confirmed with two taps 90 degrees apart (both opposite, so a
-    // clean 180 offset rather than a reflection about some axis).
+    // Upstream's own sign, unaltered. It is consistent with the engine by
+    // construction: TankLib::getVelocityVector fires along
+    // (-sin(xy), cos(xy)), and `degrees(atan2(dy, dx)) - 90` is exactly
+    // `degrees(atan2(-dx, dy))`, its inverse.
     //
-    // The reason is that this port's dial/engine mapping was itself settled
-    // empirically - the mirror that first-principles reasoning kept
-    // demanding turned out to be wrong on device - so the whole convention
-    // sits half a turn from upstream's while remaining self-consistent:
-    // the dial, the drawn barrel and the fired shot all agree with each
-    // other. Anything crossing in from upstream's frame has to be turned to
-    // match, and this is that turn. See the aim-direction notes in the
-    // porting plan before touching any of it.
-    float angle = (float) (atan2((double) dirY, (double) dirX) * 180.0 / M_PI) + 90.0f;
+    // This briefly carried a `+ 90` instead, because on device it aimed the
+    // turret away from the tapped point. That was not an angle-convention
+    // divergence at all: the renderer's pick ray was built from a reversed
+    // camera right/up basis, so the tap resolved to the landscape point
+    // opposite the one under the finger. Fixed at source in renderer_jni's
+    // PickCamera publish; do not re-add a turn here.
+    float angle = (float) (atan2((double) dirY, (double) dirX) * 180.0 / M_PI) - 90.0f;
     angle = fmodf(fmodf(angle, 360.0f) + 360.0f, 360.0f);
 
     tank->getShotInfo().rotateGunXY(fixed::fromFloat(angle), false);

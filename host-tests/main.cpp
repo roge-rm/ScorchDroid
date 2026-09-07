@@ -5,6 +5,7 @@
 // test-reporting features, and the suite is small enough that a framework
 // would be more machinery than the job needs.
 
+#include <Mat4.hpp>
 #include <common/Defines.hpp>
 #include <common/fixed.hpp>
 #include <server/ScorchedServer.hpp>
@@ -681,6 +682,112 @@ namespace
 		check(true, "deform ran without needing any client-only code");
 	}
 
+	// M6 tap-to-aim: the screen-pixel -> landscape-point round trip that
+	// renderer_jni.cpp's nativePickTerrain does.
+	//
+	// This is here because the pick got it wrong in a way nothing else
+	// could catch: the camera basis it rebuilt the ray from had its right
+	// and up vectors both negated relative to the view matrix the frame was
+	// actually drawn with. That is a 180 degree rotation of the screen
+	// about its centre, so every tap resolved to the landscape point
+	// opposite the one under the finger - which looked exactly like an
+	// angle-convention problem and got "fixed" for a while by adding half a
+	// turn to upstream's autoAim expression in engine_jni.cpp.
+	//
+	// The renderer now publishes the basis by reading the view matrix's own
+	// rows, so the two cannot drift apart; this pins that they agree by
+	// projecting known points forward and reconstructing their rays back.
+	// It is deliberately GL-free - only Mat4 and the same arithmetic - so
+	// it runs here rather than needing a device.
+	void testCameraPickRay()
+	{
+		printf("\n== camera pick ray (tap -> landscape point) ==\n");
+
+		const float fovY = 45.0f * 3.14159265f / 180.0f;
+		const int screenWidth = 1080, screenHeight = 2340;
+		const float aspect = (float) screenWidth / (float) screenHeight;
+		const float eye[3] = { 140.0f, 80.0f, 210.0f };
+		const float target[3] = { 128.0f, 12.0f, 128.0f };
+
+		Mat4 proj = Mat4::perspective(fovY, aspect, 1.0f, 2000.0f);
+		Mat4 view = Mat4::lookAt(eye[0], eye[1], eye[2],
+			target[0], target[1], target[2], 0.0f, 1.0f, 0.0f);
+		Mat4 mvp = Mat4::multiply(proj, view);
+
+		// The basis exactly as the renderer publishes it: rows of the view
+		// matrix (column-major, so row r of column c is m[c * 4 + r]).
+		const float right[3] = { view.m[0], view.m[4], view.m[8] };
+		const float up[3]    = { view.m[1], view.m[5], view.m[9] };
+		const float fwd[3]   = { -view.m[2], -view.m[6], -view.m[10] };
+
+		// The sign that was wrong. right must be forward x worldUp, not its
+		// negation: with the camera south-east of and above the target,
+		// that puts +x world roughly to screen right.
+		const float crossX = fwd[1] * 0.0f - fwd[2] * 1.0f;
+		const float crossZ = fwd[0] * 1.0f - fwd[1] * 0.0f;
+		const float crossLen = sqrtf(crossX * crossX + crossZ * crossZ);
+		check(crossLen > 0.0001f &&
+			  fabsf(right[0] - crossX / crossLen) < 0.001f &&
+			  fabsf(right[2] - crossZ / crossLen) < 0.001f,
+			"the published camera right vector is forward x worldUp, not its negation");
+		check(fabsf(right[0] * fwd[0] + right[1] * fwd[1] + right[2] * fwd[2]) < 0.001f,
+			"the published right vector is perpendicular to the view direction");
+		check(fabsf(up[0] * fwd[0] + up[1] * fwd[1] + up[2] * fwd[2]) < 0.001f,
+			"the published up vector is perpendicular to the view direction");
+		check(up[1] > 0.0f, "the published up vector points up, not down");
+
+		// Ground points spread around the target, including two on
+		// perpendicular axes - the pair that distinguishes a clean 180
+		// degree offset (both opposite) from a reflection (one opposite).
+		const float points[][3] = {
+			{ 128.0f, 10.0f, 128.0f },
+			{ 168.0f, 10.0f, 128.0f },
+			{ 128.0f, 10.0f, 168.0f },
+			{  88.0f, 10.0f, 128.0f },
+			{ 128.0f, 10.0f,  88.0f },
+			{ 150.0f, 25.0f, 100.0f },
+		};
+		int roundTripped = 0;
+		const int pointCount = (int) (sizeof(points) / sizeof(points[0]));
+		for (int i = 0; i < pointCount; i++)
+		{
+			const float *p = points[i];
+			const float clipX = mvp.m[0] * p[0] + mvp.m[4] * p[1] + mvp.m[8]  * p[2] + mvp.m[12];
+			const float clipY = mvp.m[1] * p[0] + mvp.m[5] * p[1] + mvp.m[9]  * p[2] + mvp.m[13];
+			const float clipW = mvp.m[3] * p[0] + mvp.m[7] * p[1] + mvp.m[11] * p[2] + mvp.m[15];
+			if (clipW <= 0.0001f) continue;  // behind the eye - not tappable
+
+			// Clip -> NDC -> the screen pixel a finger would land on, the
+			// same mapping nativeGetTankOverlays uses to place name plates.
+			const float ndcX = clipX / clipW, ndcY = clipY / clipW;
+			const float screenX = (ndcX * 0.5f + 0.5f) * (float) screenWidth;
+			const float screenY = (1.0f - (ndcY * 0.5f + 0.5f)) * (float) screenHeight;
+
+			// ...and back out again, verbatim from nativePickTerrain.
+			const float backNdcX = (screenX / (float) screenWidth) * 2.0f - 1.0f;
+			const float backNdcY = 1.0f - (screenY / (float) screenHeight) * 2.0f;
+			const float tanHalfFov = tanf(fovY * 0.5f);
+			const float sx = backNdcX * aspect * tanHalfFov;
+			const float sy = backNdcY * tanHalfFov;
+			float dx = fwd[0] + right[0] * sx + up[0] * sy;
+			float dy = fwd[1] + right[1] * sx + up[1] * sy;
+			float dz = fwd[2] + right[2] * sx + up[2] * sy;
+			const float dlen = sqrtf(dx * dx + dy * dy + dz * dz);
+			dx /= dlen; dy /= dlen; dz /= dlen;
+
+			// The ray must run from the eye through the point itself.
+			float tx = p[0] - eye[0], ty = p[1] - eye[1], tz = p[2] - eye[2];
+			const float tlen = sqrtf(tx * tx + ty * ty + tz * tz);
+			tx /= tlen; ty /= tlen; tz /= tlen;
+			const float alignment = dx * tx + dy * ty + dz * tz;
+			check(alignment > 0.9999f,
+				"a tap on a projected point picks that same point back (not the one opposite)");
+			if (alignment > 0.9999f) roundTripped++;
+		}
+		check(roundTripped == pointCount,
+			"every test point round-tripped through the screen and back");
+	}
+
 	// M5: regression check for engine_jni.cpp's startLocalGame() switch
 	// from NetLoopBack to a real NetServerTCP3 (see the porting plan's LAN
 	// hosting notes) - a real TCP accept+connect over loopback, using the
@@ -1044,6 +1151,7 @@ int main(int argc, char **argv)
 	testDefenseAccessories();
 	testNonShotMoves();
 	testTerrainDeformation();
+	testCameraPickRay();
 	testRealTcpHostAndConnect();
 	testClientJoin();
 
