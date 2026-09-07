@@ -31,6 +31,8 @@
 #include <cmath>
 
 #include <engine/ScorchedContext.hpp>
+#include <engine/Simulator.hpp>
+#include <engine/Wind.hpp>
 #include <target/TargetContainer.hpp>
 #include <landscapemap/LandscapeMaps.hpp>
 #include <landscapemap/GroundMaps.hpp>
@@ -38,6 +40,7 @@
 #include <landscapedef/LandscapeDefinitionCache.hpp>
 #include <landscapedef/LandscapeDefinition.hpp>
 #include <landscapedef/LandscapeTex.hpp>
+#include <image/ImageFactory.hpp>
 #include <target/TargetLife.hpp>
 #include <tank/Tank.hpp>
 #include <tank/TankState.hpp>
@@ -122,6 +125,12 @@ namespace
 	// Built once, in the same conical shape upstream draws (stacked cones
 	// for the canopy over a trunk), and drawn per instance with its own
 	// colour and scale.
+	GLuint cloudProgram = 0, cloudVao = 0, cloudVbo = 0, cloudTexture = 0;
+	GLint  cloudMvpLoc = -1, cloudScrollLoc = -1, cloudTexScaleLoc = -1;
+	GLint  cloudSamplerLoc = -1, cloudTintLoc = -1, cloudOpacityLoc = -1;
+	bool   cloudsBuilt = false, cloudsVisible = false;
+	float  cloudScrollX = 0.0f, cloudScrollY = 0.0f;
+
 	GLuint treeVao = 0, treeVbo = 0;
 	int    treeVertexCount = 0;
 
@@ -602,6 +611,45 @@ namespace
 		}
 	)";
 
+	// M6 clouds. Upstream hangs its cloud texture on the sky dome and
+	// scrolls it with the live wind (SkyDome::simulate). Here it is a plane
+	// high above the scene, which gives the same thing with the perspective
+	// convergence that makes height read - and, unlike the sky pass, it has
+	// to be real geometry, because a cloud layer has a position and a
+	// backdrop does not.
+	const char *kCloudVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		uniform mat4 uMVP;
+		uniform vec2 uScroll;
+		uniform float uTexScale;
+		out vec2 vUv;
+		out float vViewDepth;
+		void main() {
+			vUv = aPosition.xz * uTexScale + uScroll;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+			vViewDepth = gl_Position.w;
+		}
+	)";
+
+	const char *kCloudFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec2 vUv;
+		in float vViewDepth;
+		out vec4 fragColor;
+		uniform sampler2D uClouds;
+		uniform vec3 uTint;
+		uniform float uOpacity;
+		void main() {
+			vec4 c = texture(uClouds, vUv);
+			// Fade out with distance rather than letting the layer run to
+			// the horizon: a near-horizontal plane collapses a whole tile
+			// into a pixel out there, which aliases exactly the way the
+			// water did, and clouds meeting the ground looks wrong anyway.
+			float fade = clamp(1.0 - vViewDepth / 1200.0, 0.0, 1.0);
+			fragColor = vec4(c.rgb * uTint, c.a * uOpacity * fade * fade);
+		}
+	)";
+
 	// M6 water. Upstream's own water is a whole subsystem in the excluded
 	// client layer (Water/WaterMap/WaterWaves, a reflection cubemap, a foam
 	// pass and a wave shader), and none of it is reusable - but the
@@ -811,6 +859,8 @@ namespace
 			waterBuilt = false;
 			waterVisible = false;
 			skyBuilt = false;
+			cloudsBuilt = false;
+			cloudsVisible = false;
 			// Any pending crater belongs to the landscape being thrown
 			// away - applying it to the new one would corrupt unrelated
 			// vertices.
@@ -1018,6 +1068,108 @@ namespace
 		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
 		glBindVertexArray(0);
 		LOGI("Tree geometry built: %d verts", treeVertexCount);
+	}
+
+	// What distance fades towards. Upstream fogs to the landscape's own
+	// <fog> colour, but the shipped landscapes set a flat grey while their
+	// sky horizon is blue, which shows as a grey band above the sea. The
+	// horizon end of the sky gradient is what the distance *actually* meets,
+	// so fading to that instead makes land and sky agree - a deliberate
+	// deviation, with the definition's colour kept as the fallback for any
+	// landscape whose colour map won't load.
+	void currentFogColor(float out[3])
+	{
+		const float *source = skyDescription.valid
+			? skyDescription.gradient[0]
+			: skyDescription.fog;
+		for (int i = 0; i < 3; i++) out[i] = source[i];
+	}
+
+	// M6 clouds: the landscape's own cloud texture on a high plane.
+	void buildCloudsIfNeeded(ScorchedContext &ctx)
+	{
+		if (cloudsBuilt) return;
+		cloudsBuilt = true;
+		cloudsVisible = false;
+
+		LandscapeTex *tex = ctx.getLandscapeMaps().getDefinitions().getTex();
+		if (!tex || tex->skytexture.empty()) return;
+
+		// The mask becomes the alpha channel - that is what makes the gaps
+		// between clouds transparent rather than black.
+		Image clouds = ImageFactory::loadImage(
+			S3D::eModLocation, tex->skytexture, tex->skytexturemask, false);
+		if (!clouds.getBits() || clouds.getWidth() <= 0) return;
+
+		if (cloudTexture == 0) glGenTextures(1, &cloudTexture);
+		glBindTexture(GL_TEXTURE_2D, cloudTexture);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		const GLenum format = (clouds.getComponents() == 4) ? GL_RGBA : GL_RGB;
+		glTexImage2D(GL_TEXTURE_2D, 0, (GLint) format,
+					 clouds.getWidth(), clouds.getHeight(), 0,
+					 format, GL_UNSIGNED_BYTE, clouds.getBits());
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		// Tiled, not clamped: the plane is far wider than the texture.
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		glBindTexture(GL_TEXTURE_2D, 0);
+
+		// High enough to sit well above the tallest terrain and read as sky
+		// rather than as a ceiling, and wide enough that its edge is past
+		// the distance fade in the shader.
+		const float height = 220.0f;
+		const float reach = 1400.0f;
+		const float cx = mapWidthUnits * 0.5f, cz = mapHeightUnits * 0.5f;
+		const float quad[] = {
+			cx - reach, height, cz - reach,
+			cx - reach, height, cz + reach,
+			cx + reach, height, cz - reach,
+			cx + reach, height, cz - reach,
+			cx - reach, height, cz + reach,
+			cx + reach, height, cz + reach,
+		};
+
+		if (cloudVao == 0) glGenVertexArrays(1, &cloudVao);
+		if (cloudVbo == 0) glGenBuffers(1, &cloudVbo);
+		glBindVertexArray(cloudVao);
+		glBindBuffer(GL_ARRAY_BUFFER, cloudVbo);
+		glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
+		glBindVertexArray(0);
+
+		cloudsVisible = true;
+		LOGI("Cloud layer built from %s (%dx%d)",
+			 tex->skytexture.c_str(), clouds.getWidth(), clouds.getHeight());
+	}
+
+	// Advances the cloud scroll by the real wind, the way upstream does in
+	// SkyDome::simulate: the stronger the wind the shorter the period, and
+	// the layer runs *against* the wind's starting direction.
+	void advanceClouds(ScorchedContext &ctx, float deltaSeconds)
+	{
+		if (!cloudsVisible) return;
+
+		Wind &wind = ctx.getSimulator().getWind();
+		const float speed = wind.getWindSpeed().asFloat();
+		// Upstream's own curve, as a period in seconds per texture width.
+		const float period = ((5.0f - speed) / 5.0f) * (500.0f - 100.0f) + 100.0f;
+		if (period <= 0.0f) return;
+
+		FixedVector direction = wind.getWindStartingDirection();
+		float dx = -direction[0].asFloat();
+		float dy = -direction[1].asFloat();
+		const float len = sqrtf(dx * dx + dy * dy);
+		if (len < 0.0001f) { dx = 0.8f; dy = 0.8f; }
+		else { dx /= len; dy /= len; }
+
+		cloudScrollX += dx * deltaSeconds / period;
+		cloudScrollY += dy * deltaSeconds / period;
+		cloudScrollX = fmodf(cloudScrollX, 1.0f);
+		cloudScrollY = fmodf(cloudScrollY, 1.0f);
 	}
 
 	// M6 sky: the landscape's own sky colours, read once per landscape.
@@ -2101,6 +2253,14 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (3 * sizeof(float)));
 	glBindVertexArray(0);
 
+	cloudProgram = linkProgram(kCloudVertexShader, kCloudFragmentShader);
+	cloudMvpLoc = glGetUniformLocation(cloudProgram, "uMVP");
+	cloudScrollLoc = glGetUniformLocation(cloudProgram, "uScroll");
+	cloudTexScaleLoc = glGetUniformLocation(cloudProgram, "uTexScale");
+	cloudSamplerLoc = glGetUniformLocation(cloudProgram, "uClouds");
+	cloudTintLoc = glGetUniformLocation(cloudProgram, "uTint");
+	cloudOpacityLoc = glGetUniformLocation(cloudProgram, "uOpacity");
+
 	skyProgram = linkProgram(kSkyVertexShader, kSkyFragmentShader);
 	skyGradientLoc = glGetUniformLocation(skyProgram, "uGradient");
 	skySunDirLoc = glGetUniformLocation(skyProgram, "uSunDir");
@@ -2234,6 +2394,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// After the terrain, which is where the map size it spans comes from.
 	buildWaterIfNeeded(*ctx);
 	buildSkyIfNeeded(*ctx);
+	buildCloudsIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
 	applyScorchMarks(*ctx);
 	syncMovementOverlay();
@@ -2250,6 +2411,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		lastFrameSeconds = nowSeconds;
 		if (delta < 0.0f) delta = 0.0f;
 		if (delta > 0.1f) delta = 0.1f;
+		advanceClouds(*ctx, delta);
 		if (skyFlashRemaining > 0.0f) {
 			skyFlashRemaining = std::max(0.0f, skyFlashRemaining - delta);
 		}
@@ -2666,6 +2828,37 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			view.m[1], view.m[5], view.m[9],
 			tanf(kFovYRadians * 0.5f), aspect);
 
+	// Clouds sit between the sky and everything solid. Blended, and with
+	// no depth writes, so terrain drawn afterwards always wins - the layer
+	// is above the world but is not something you can hide behind.
+	if (cloudsVisible && cloudProgram != 0) {
+		glUseProgram(cloudProgram);
+		glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, mvp.m);
+		glUniform2f(cloudScrollLoc, cloudScrollX, cloudScrollY);
+		// One tile per 400 units - big enough that the repeat isn't the
+		// first thing the eye finds.
+		glUniform1f(cloudTexScaleLoc, 1.0f / 400.0f);
+		// Tinted by the sun so a night map's clouds aren't daylit.
+		glUniform3f(cloudTintLoc,
+					0.4f + skyDescription.sunColor[0] * 0.6f,
+					0.4f + skyDescription.sunColor[1] * 0.6f,
+					0.4f + skyDescription.sunColor[2] * 0.6f);
+		glUniform1f(cloudOpacityLoc, 0.75f);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, cloudTexture);
+		glUniform1i(cloudSamplerLoc, 0);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDepthMask(GL_FALSE);
+		glDisable(GL_CULL_FACE);
+		glBindVertexArray(cloudVao);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
+		glEnable(GL_CULL_FACE);
+		glDepthMask(GL_TRUE);
+		glDisable(GL_BLEND);
+		glBindVertexArray(0);
+	}
+
 	glUseProgram(terrainProgram);
 	glUniformMatrix4fv(terrainMvpLoc, 1, GL_FALSE, mvp.m);
 	glUniform1f(terrainMinHeightLoc, terrainMinHeight);
@@ -2673,7 +2866,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	glUniform3f(terrainLightDirLoc, 0.4f, 0.82f, 0.35f);
 	glUniform1i(terrainHasTextureLoc, groundTexture != 0 ? 1 : 0);
 	glUniform1i(terrainLightBakedLoc, groundLightBaked ? 1 : 0);
-	glUniform3f(terrainFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+	float fogColor[3];
+	currentFogColor(fogColor);
+	glUniform3f(terrainFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 	glUniform1f(terrainFogDensityLoc, skyDescription.fogDensity);
 	if (groundTexture != 0) {
 		glActiveTexture(GL_TEXTURE0);
@@ -2771,7 +2966,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform1f(waterAlphaLoc, waterAlpha);
 		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
 		glUniform2f(waterEyeLoc, eyeX, eyeZ);
-		glUniform3f(waterFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+		float waterFog[3];
+		currentFogColor(waterFog);
+		glUniform3f(waterFogColorLoc, waterFog[0], waterFog[1], waterFog[2]);
 		glUniform1f(waterFogDensityLoc, skyDescription.fogDensity);
 		glUniform2f(waterMapSizeLoc, mapWidthUnits, mapHeightUnits);
 		if (waterShoreTexture != 0) {
@@ -2800,7 +2997,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// simply invisible.
 	glUseProgram(meshProgram);
 	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
-	glUniform3f(meshFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+	glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 	glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
 
 	// Landscape targets first: they are scenery, so they should be behind
@@ -2952,7 +3149,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	std::vector<float> unmodelledShots, explosionPositions;
 	glUseProgram(meshProgram);
 	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
-	glUniform3f(meshFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+	glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 	glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
 	glUniform4f(meshColorLoc, 0.95f, 0.9f, 0.4f, 1.0f);
 	for (size_t i = 0; i < shotPositionsRaw.size(); i++) {
@@ -3046,7 +3243,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glDepthMask(GL_FALSE);
 		glUseProgram(meshProgram);
 		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
-		glUniform3f(meshFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+		glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 		glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
 
 		for (TankInstance &inst : tankInstances) {
