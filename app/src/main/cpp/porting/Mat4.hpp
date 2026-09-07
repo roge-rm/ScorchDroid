@@ -46,6 +46,14 @@ struct Mat4 {
         return r;
     }
 
+    // Non-uniform, for shapes whose extents differ per axis - a square
+    // shield's box, for instance.
+    static Mat4 scale(float x, float y, float z) {
+        Mat4 r = identity();
+        r.m[0] = x; r.m[5] = y; r.m[10] = z;
+        return r;
+    }
+
     // Gun elevation rotates about the model's X axis (upstream rotates
     // about X too - see ModelRendererTank::draw).
     static Mat4 rotateX(float radians) {
