@@ -429,9 +429,11 @@ private fun wrapDegrees(degrees: Float): Float = ((degrees % 360f) + 360f) % 360
  * positions and the text is ordinary Android text - which also means it
  * stays legible at any distance rather than shrinking into the terrain.
  *
- * A dead tank keeps its plate. Upstream does the same (drawParticle falls
- * through to the arrow and names for a non-normal tank), and it is the only
- * thing marking where a destroyed player was now that the model is hidden.
+ * A destroyed tank has no plate at all - the renderer stops publishing an
+ * overlay for it, matching upstream's getVisible() guard (see the overlay
+ * loop in renderer_jni.cpp). What arrives here with alive=false is a tank
+ * that is alive but in the buying phase: upstream draws its name and no
+ * life bar, so that is what this does.
  */
 @Composable
 private fun TankPlates(overlays: List<TankOverlay>) {
@@ -453,7 +455,10 @@ private fun TankPlates(overlays: List<TankOverlay>) {
             ) {
                 Text(
                     text = overlay.name,
-                    color = if (overlay.alive) overlay.color else overlay.color.copy(alpha = 0.55f),
+                    // Full colour either way: the only non-sNormal tank that
+                    // reaches here is one still buying, and upstream draws
+                    // its name in the player's own colour like any other.
+                    color = overlay.color,
                     style = MaterialTheme.typography.labelMedium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
