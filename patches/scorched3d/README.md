@@ -7,6 +7,24 @@ commit - never edit the submodule checkout directly; add a new numbered
 patch instead (see the porting plan for why: this keeps "upstream commit +
 these patches" as a clean, reproducible GPLv2+ corresponding-source story).
 
+Patches fall into three kinds, and it is worth knowing which you are adding:
+
+- **Portability** (0001-0005): make upstream code compile and run without
+  SDL, without a desktop toolchain, and without a desktop process lifecycle.
+- **Correctness** (0007): a real upstream bug this port is the first
+  configuration to hit.
+- **Hooks and visibility** (0006, 0008-0010): upstream guards
+  presentation-layer work behind `#ifndef S3D_SERVER`, and this port is a
+  build that *is* `S3D_SERVER` but still has a renderer and a speaker. Each
+  of these adds an `#else` branch (or widens visibility) so app-owned code
+  under `app/src/main/cpp/porting/` can react. They add no game logic.
+
+The general rule for a new hook patch: keep it to the smallest possible
+`#else` next to an existing `#ifndef S3D_SERVER` split, and put the actual
+work in a new file under `porting/` rather than in the submodule.
+
+## Portability
+
 - `0001-android-libcxx-portability-fixes.patch` - libc++ vs. legacy-GCC
   differences (`fixed.hpp`'s SDL-only `Sint64` typedef, `LangString`'s
   `basic_string<unsigned int>` needing an explicit `char_traits`
@@ -18,3 +36,64 @@ these patches" as a clean, reproducible GPLv2+ corresponding-source story).
   mostly in `app/src/main/cpp/porting/SDL_{net,thread}_compat.*` instead of
   this patch, since `NetBuffer.hpp` transitively supplies those compat
   headers to the whole module (see that patch's commit message).
+- `0004-android-engine-module.patch` - `src/common/engine`: `SDL/SDL.h`
+  swapped for the `SDL_GetTicks()` compat shim in `GameState.cpp` and
+  `Simulator.cpp`, plus a forward declaration of `SDL_Event` in
+  `Keyboard.hpp`. `Keyboard.cpp` is deliberately *not* compiled (it is a
+  live SDL_Event-polling input tracker, which needs real Android touch
+  design work rather than a portability fix - see `porting/Keyboard_stub.cpp`),
+  but engine code still references the class, so only the header needed
+  fixing.
+- `0005-android-image-module-and-m2-fixes.patch` - `src/common/image`
+  (`Image::writeToFile`'s SDL BMP writer replaced with a minimal 24bpp one
+  matching `ImageBitmapFactory`'s reader) plus, importantly,
+  `DefinesAssert.cpp`: `dialogAssert`/`dialogExit` called `exit(64)`, which
+  is fine for a desktop binary and catastrophic in an Android process - it
+  runs atexit handlers and static destructors while ART-owned threads are
+  still live, surfacing as a confusing "destroyed mutex" crash on an
+  unrelated thread. Now `abort()`, and errors go to logcat since `printf`
+  output does not. **Consequence worth remembering: upstream "load or die"
+  helpers abort rather than return null in this port.**
+
+## Correctness
+
+- `0007-android-client-tankaddsimaction-servermode-guard.patch` -
+  `TankAddSimAction::invokeAction()`'s admin-ban block calls
+  `ScorchedServer::instance()` whenever `S3D_SERVER` is defined, without the
+  `context.getServerMode()` guard the logging block directly above it has.
+  Upstream never hits this because a real client is never compiled with
+  `S3D_SERVER`; this port is the first configuration where "`S3D_SERVER` is
+  defined" and "I am the authoritative server" are different questions (see
+  `porting/ClientContext.*`). Manifested as an intermittent segfault.
+
+## Hooks and visibility
+
+- `0006-android-audio-event-hook.patch` - `SoundAction` and `Explosion` are
+  entirely client-only upstream, so nothing plays sounds in an
+  `S3D_SERVER` build. Both now also push to `porting/SoundEventQueue.*`, so
+  an Android audio layer can react. Note `Explosion` is the path that
+  actually fires on nearly every hit; `SoundAction` looks like the
+  sound-trigger class by name and almost never runs.
+- `0008-android-serverloadlevel-expose-setloaded.patch` - makes
+  `ServerLoadLevel::setLoaded` public. ScorchDroid's local human player is
+  added directly via `TankAddSimAction` rather than by a network connect, so
+  it has a non-zero destination id that no `ComsLevelLoadedMessage` will
+  ever answer for - without this it is stuck in `TankState::sLoading`
+  forever from the second round onwards. Real network destinations still go
+  through the full message round-trip and never touch this.
+- `0009-android-actioncontroller-expose-shot-positions.patch` - widens
+  `ActionController::getShotAndExplosionPositions()` to also report the
+  firing player id, the shot velocity, and the weapon's accessory id, all of
+  which were already public on the underlying objects. The renderer needs
+  them to pick the right projectile mesh (weapon model first, tank
+  `projectilemodel` as fallback - that is upstream's precedence) and to
+  orient it along its flight path.
+- `0010-android-terrain-deform-event-hook.patch` - terrain destruction is
+  simulated under `S3D_SERVER`, but the "the ground changed shape, redraw
+  it" notification (`Landscape::recalculateLandscape()` +
+  `VisibilityPatchGrid::recalculateLandscapeErrors`) is client-only, so
+  nothing tells a renderer a crater appeared. Both `deformLandscape()` and
+  `flattenArea()` now report to `porting/DeformEventQueue.*`. Two call
+  sites, not one: flattening is terrain destruction too - it is how tanks
+  bed into the ground at round start and after moving, falling or
+  teleporting.
