@@ -1,21 +1,43 @@
 package com.rm.scorchdroid
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 /**
@@ -77,6 +99,145 @@ sealed class HudDialog {
         val onConnect: (String) -> Unit,
         val onCancel: () -> Unit,
     ) : HudDialog()
+
+    /**
+     * The Shop. Its own dialog rather than a [ListChoice] because the shop
+     * is the one list long enough to get lost in: every accessory type in
+     * the mod, tens of rows, previously rendered as one flat run of
+     * identical padded strings with no indication of how much was below the
+     * fold. This splits it by type, packs the rows tighter, and shows where
+     * you are in the list.
+     */
+    class Shop(
+        money: Int,
+        entries: List<WeaponShopEntry>,
+        val onSelect: (WeaponShopEntry) -> Unit,
+        val onCancel: () -> Unit,
+    ) : HudDialog() {
+        var money by mutableIntStateOf(money)
+        var entries by mutableStateOf(entries)
+    }
+}
+
+/**
+ * Shop tabs. Two is enough: upstream has five accessory types, but four of
+ * them (parachute, shield, autodefense, battery) are all "things that keep
+ * you alive" and are already grouped that way in the Defenses panel, so
+ * splitting them further would make three of the tabs very short.
+ */
+private enum class ShopTab(val label: String) {
+    WEAPONS("Weapons"),
+    DEFENSES("Defenses");
+
+    fun matches(entry: WeaponShopEntry): Boolean =
+        if (this == WEAPONS) entry.isWeapon else !entry.isWeapon
+}
+
+@Composable
+private fun ShopContent(dialog: HudDialog.Shop) {
+    var tab by remember { mutableStateOf(ShopTab.WEAPONS) }
+    val visible = dialog.entries.filter { tab.matches(it) }
+    val listState = rememberLazyListState()
+
+    Column {
+        TabRow(selectedTabIndex = tab.ordinal) {
+            ShopTab.entries.forEach { candidate ->
+                Tab(
+                    selected = tab == candidate,
+                    onClick = { tab = candidate },
+                    text = { Text(candidate.label) },
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+
+        Box(Modifier.heightIn(max = 400.dp)) {
+            LazyColumn(state = listState, modifier = Modifier.padding(end = 10.dp)) {
+                items(visible) { entry ->
+                    ShopRow(entry) { dialog.onSelect(entry) }
+                }
+            }
+            ListScrollbar(listState, Modifier.align(Alignment.CenterEnd))
+        }
+    }
+}
+
+/**
+ * One accessory. Name on the left, price and owned count right-aligned, so
+ * the columns line up down the list instead of the eye having to find the
+ * dash in each row - which is what the old single-string rows forced.
+ */
+@Composable
+private fun ShopRow(entry: WeaponShopEntry, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = entry.name,
+            style = MaterialTheme.typography.bodyMedium,
+            // The current weapon is the one piece of state worth spotting
+            // at a glance, so it gets weight rather than a "> " prefix that
+            // also shifted every other row's text across.
+            fontWeight = if (entry.isCurrentWeapon) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            // Owned shows the count, unowned shows what it costs - the two
+            // never both matter, and showing both is what made the old rows
+            // long enough to need eliding. Unlimited is spelled out rather
+            // than run through the "x{n}" form, which read as "xunlimited".
+            text = when {
+                entry.ownedCount < 0 -> "unlimited"
+                entry.ownedCount > 0 -> "x${entry.ownedCount}"
+                else -> "$${entry.price}"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * A minimal scrollbar for a [LazyColumn]. Compose ships no scrollbar of its
+ * own, and without one a long shop list gives no clue how much is below the
+ * fold. Position and size come from the item index rather than pixel
+ * offsets, which is exact here because every row is the same height.
+ */
+@Composable
+private fun ListScrollbar(listState: LazyListState, modifier: Modifier = Modifier) {
+    val info = listState.layoutInfo
+    val total = info.totalItemsCount
+    val onScreen = info.visibleItemsInfo.size
+    if (total == 0 || onScreen == 0 || onScreen >= total) return
+
+    val thumbFraction = onScreen.toFloat() / total.toFloat()
+    val maxFirstIndex = (total - onScreen).toFloat()
+    val scrolled = if (maxFirstIndex > 0f) listState.firstVisibleItemIndex / maxFirstIndex else 0f
+
+    BoxWithConstraints(
+        modifier = modifier
+            .width(4.dp)
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(2.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+    ) {
+        val trackHeight = maxHeight
+        val thumbHeight = trackHeight * thumbFraction
+        Box(
+            Modifier
+                .offset(y = (trackHeight - thumbHeight) * scrolled.coerceIn(0f, 1f))
+                .width(4.dp)
+                .height(thumbHeight)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary),
+        )
+    }
 }
 
 @Composable
@@ -128,6 +289,14 @@ fun HudDialogHost(dialog: HudDialog) {
             },
             confirmButton = {},
             dismissButton = { TextButton(onClick = dialog.onCancel) { Text(dialog.cancelLabel) } },
+        )
+
+        is HudDialog.Shop -> AlertDialog(
+            onDismissRequest = dialog.onCancel,
+            title = { Text("Shop - \$${dialog.money}") },
+            text = { ShopContent(dialog) },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = dialog.onCancel) { Text("Close") } },
         )
 
         is HudDialog.ManualAddress -> {
