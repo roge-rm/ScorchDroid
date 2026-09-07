@@ -93,6 +93,9 @@ namespace
 	GLuint terrainProgram = 0, pointProgram = 0;
 	GLint  terrainMvpLoc = -1, terrainMinHeightLoc = -1, terrainHeightRangeLoc = -1, terrainLightDirLoc = -1;
 	GLint  terrainGroundTexLoc = -1, terrainHasTextureLoc = -1, terrainLightBakedLoc = -1;
+	GLint  terrainFogColorLoc = -1, terrainFogDensityLoc = -1;
+	GLint  meshFogColorLoc = -1, meshFogDensityLoc = -1;
+	GLint  waterFogColorLoc = -1, waterFogDensityLoc = -1;
 	GLuint groundTexture = 0;
 	bool   groundTextureBuilt = false;
 	// Whether the ground texture already carries the sun's lighting, in
@@ -142,6 +145,11 @@ namespace
 	float  waterDeep[3] = { 0.11f, 0.26f, 0.45f };
 	float  waterShallow[3] = { 0.29f, 0.56f, 0.91f };
 	float  waterAlpha = 0.8f;
+	// Shoreline foam: a baked mask of how close each cell is to the water's
+	// edge, sampled by the water shader (see buildShoreMask).
+	GLuint waterShoreTexture = 0;
+	GLint  waterShoreLoc = -1, waterMapSizeLoc = -1;
+	constexpr int kShoreMaskSize = 256;
 
 	// M6: SkyFlash. Seconds of flash left; the sky pass lifts its colour
 	// by whatever remains, so a nuke whites out the whole view briefly.
@@ -397,10 +405,12 @@ namespace
 		out vec3 vNormal;
 		out float vHeight01;
 		out vec2 vTexCoord;
+		out float vViewDepth;
 		void main() {
 			vNormal = aNormal;
 			vTexCoord = aTexCoord;
 			vHeight01 = clamp((aPosition.y - uMinHeight) / uHeightRange, 0.0, 1.0);
+			vViewDepth = gl_Position.w;
 			gl_Position = uMVP * vec4(aPosition, 1.0);
 		}
 	)";
@@ -416,8 +426,11 @@ namespace
 		in vec3 vNormal;
 		in float vHeight01;
 		in vec2 vTexCoord;
+		in float vViewDepth;
 		out vec4 fragColor;
 		uniform vec3 uLightDir;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
 		uniform sampler2D uGroundTexture;
 		uniform int uHasTexture;
 		uniform int uLightBaked;
@@ -428,16 +441,23 @@ namespace
 			} else {
 				baseColor = mix(vec3(0.22, 0.34, 0.13), vec3(0.58, 0.52, 0.42), vHeight01);
 			}
+			vec3 lit;
 			if (uLightBaked == 1) {
 				// The texture already carries the sun, the ambience and the
 				// shadows hills cast on each other - lighting it again here
 				// would apply the sun twice and wash the shadows out.
-				fragColor = vec4(baseColor, 1.0);
-				return;
+				lit = baseColor;
+			} else {
+				vec3 n = normalize(vNormal);
+				float diffuse = max(dot(n, uLightDir), 0.0);
+				lit = baseColor * (0.55 + diffuse * 0.6);
 			}
-			vec3 n = normalize(vNormal);
-			float diffuse = max(dot(n, uLightDir), 0.0);
-			fragColor = vec4(baseColor * (0.55 + diffuse * 0.6), 1.0);
+			// Upstream's exponential distance fog. gl_Position.w is the view
+			// distance for a standard projection, so no eye position needs
+			// passing in - which is what lets every shader here fog the same
+			// way with one line each.
+			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
 		}
 	)";
 
@@ -450,22 +470,29 @@ namespace
 		layout(location = 1) in vec3 aNormal;
 		uniform mat4 uMVP;
 		out vec3 vNormal;
+		out float vViewDepth;
 		void main() {
 			vNormal = aNormal;
 			gl_Position = uMVP * vec4(aPosition, 1.0);
+			vViewDepth = gl_Position.w;
 		}
 	)";
 
 	const char *kMeshFragmentShader = R"(#version 300 es
 		precision mediump float;
 		in vec3 vNormal;
+		in float vViewDepth;
 		out vec4 fragColor;
 		uniform vec3 uLightDir;
 		uniform vec4 uColor;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
 		void main() {
 			vec3 n = normalize(vNormal);
 			float diffuse = max(dot(n, uLightDir), 0.0);
-			fragColor = vec4(uColor.rgb * (0.45 + diffuse * 0.75), uColor.a);
+			vec3 lit = uColor.rgb * (0.45 + diffuse * 0.75);
+			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			fragColor = vec4(mix(uFogColor, lit, fog), uColor.a);
 		}
 	)";
 
@@ -592,21 +619,28 @@ namespace
 		layout(location = 0) in vec3 aPosition;
 		uniform mat4 uMVP;
 		out vec2 vWorld;
+		out float vViewDepth;
 		void main() {
 			vWorld = aPosition.xz;
 			gl_Position = uMVP * vec4(aPosition, 1.0);
+			vViewDepth = gl_Position.w;
 		}
 	)";
 
 	const char *kWaterFragmentShader = R"(#version 300 es
 		precision mediump float;
 		in vec2 vWorld;
+		in float vViewDepth;
 		out vec4 fragColor;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
 		uniform vec3 uDeepColor;
 		uniform vec3 uShallowColor;
 		uniform float uAlpha;
 		uniform float uTime;
 		uniform vec2 uEye;
+		uniform sampler2D uShore;
+		uniform vec2 uMapSize;
 		void main() {
 			// Two waves at different angles and speeds, deliberately not
 			// harmonics of each other - a single sine reads as corduroy.
@@ -623,7 +657,24 @@ namespace
 			float d = distance(vWorld, uEye);
 			crest = mix(crest, 0.5, clamp(d / 400.0, 0.0, 1.0));
 
-			fragColor = vec4(mix(uDeepColor, uShallowColor, clamp(crest, 0.0, 1.0)), uAlpha);
+			vec3 water = mix(uDeepColor, uShallowColor, clamp(crest, 0.0, 1.0));
+
+			// Foam along the shore. The mask is in landscape space, so v
+			// runs the other way to world Z - the same flip the ground
+			// texture takes. Off the map there is no shore, hence the
+			// explicit bounds test rather than clamping, which would smear
+			// the edge band out to the horizon.
+			vec2 land = vec2(vWorld.x, uMapSize.y - vWorld.y);
+			if (land.x >= 0.0 && land.y >= 0.0 &&
+				land.x <= uMapSize.x && land.y <= uMapSize.y) {
+				float shore = texture(uShore, land / uMapSize).r;
+				// Break the band up so it reads as surf rather than a
+				// contour line, using the same waves as the surface.
+				float surf = shore * (0.75 + 0.25 * sin(uTime * 2.0 + a * 3.0));
+				water = mix(water, vec3(1.0), clamp(surf * surf, 0.0, 1.0) * 0.85);
+			}
+			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			fragColor = vec4(mix(uFogColor, water, fog), uAlpha);
 		}
 	)";
 
@@ -1106,8 +1157,27 @@ namespace
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
 		glBindVertexArray(0);
 
+		// Shore mask for the foam. Single channel, so the row stride is the
+		// width and needs the unpack alignment relaxed for odd sizes.
+		std::vector<unsigned char> shore = LandscapeTextureBuilder::buildShoreMask(
+			ctx, waterHeight, kShoreMaskSize);
+		if (!shore.empty()) {
+			if (waterShoreTexture == 0) glGenTextures(1, &waterShoreTexture);
+			glBindTexture(GL_TEXTURE_2D, waterShoreTexture);
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, kShoreMaskSize, kShoreMaskSize, 0,
+						 GL_RED, GL_UNSIGNED_BYTE, shore.data());
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+
 		waterVisible = true;
-		LOGI("Water surface at height %.1f, alpha %.2f", waterHeight, waterAlpha);
+		LOGI("Water surface at height %.1f, alpha %.2f, shore mask %s",
+			 waterHeight, waterAlpha, shore.empty() ? "none" : "built");
 	}
 
 	// M6 terrain destruction: craters are carved into the real heightmap by
@@ -2015,6 +2085,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainGroundTexLoc = glGetUniformLocation(terrainProgram, "uGroundTexture");
 	terrainHasTextureLoc = glGetUniformLocation(terrainProgram, "uHasTexture");
 	terrainLightBakedLoc = glGetUniformLocation(terrainProgram, "uLightBaked");
+	terrainFogColorLoc = glGetUniformLocation(terrainProgram, "uFogColor");
+	terrainFogDensityLoc = glGetUniformLocation(terrainProgram, "uFogDensity");
 
 	shadowProgram = linkProgram(kShadowVertexShader, kShadowFragmentShader);
 	shadowMvpLoc = glGetUniformLocation(shadowProgram, "uMVP");
@@ -2052,6 +2124,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterAlphaLoc = glGetUniformLocation(waterProgram, "uAlpha");
 	waterTimeLoc = glGetUniformLocation(waterProgram, "uTime");
 	waterEyeLoc = glGetUniformLocation(waterProgram, "uEye");
+	waterFogColorLoc = glGetUniformLocation(waterProgram, "uFogColor");
+	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
+	waterShoreLoc = glGetUniformLocation(waterProgram, "uShore");
+	waterMapSizeLoc = glGetUniformLocation(waterProgram, "uMapSize");
 
 	sightProgram = linkProgram(kSightVertexShader, kSightFragmentShader);
 	sightMvpLoc = glGetUniformLocation(sightProgram, "uMVP");
@@ -2061,6 +2137,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	meshMvpLoc = glGetUniformLocation(meshProgram, "uMVP");
 	meshLightDirLoc = glGetUniformLocation(meshProgram, "uLightDir");
 	meshColorLoc = glGetUniformLocation(meshProgram, "uColor");
+	meshFogColorLoc = glGetUniformLocation(meshProgram, "uFogColor");
+	meshFogDensityLoc = glGetUniformLocation(meshProgram, "uFogDensity");
 
 	pointProgram = linkProgram(kPointVertexShader, kPointFragmentShader);
 	pointMvpLoc = glGetUniformLocation(pointProgram, "uMVP");
@@ -2595,6 +2673,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	glUniform3f(terrainLightDirLoc, 0.4f, 0.82f, 0.35f);
 	glUniform1i(terrainHasTextureLoc, groundTexture != 0 ? 1 : 0);
 	glUniform1i(terrainLightBakedLoc, groundLightBaked ? 1 : 0);
+	glUniform3f(terrainFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+	glUniform1f(terrainFogDensityLoc, skyDescription.fogDensity);
 	if (groundTexture != 0) {
 		glActiveTexture(GL_TEXTURE0);
 		glBindTexture(GL_TEXTURE_2D, groundTexture);
@@ -2691,6 +2771,14 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform1f(waterAlphaLoc, waterAlpha);
 		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
 		glUniform2f(waterEyeLoc, eyeX, eyeZ);
+		glUniform3f(waterFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+		glUniform1f(waterFogDensityLoc, skyDescription.fogDensity);
+		glUniform2f(waterMapSizeLoc, mapWidthUnits, mapHeightUnits);
+		if (waterShoreTexture != 0) {
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, waterShoreTexture);
+			glUniform1i(waterShoreLoc, 0);
+		}
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		// The surface extends far past the map on every side, so with the
@@ -2712,6 +2800,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// simply invisible.
 	glUseProgram(meshProgram);
 	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+	glUniform3f(meshFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+	glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
 
 	// Landscape targets first: they are scenery, so they should be behind
 	// everything that matters, and drawing them before the tanks keeps the
@@ -2862,6 +2952,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	std::vector<float> unmodelledShots, explosionPositions;
 	glUseProgram(meshProgram);
 	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+	glUniform3f(meshFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+	glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
 	glUniform4f(meshColorLoc, 0.95f, 0.9f, 0.4f, 1.0f);
 	for (size_t i = 0; i < shotPositionsRaw.size(); i++) {
 		FixedVector &p = shotPositionsRaw[i];
@@ -2954,6 +3046,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glDepthMask(GL_FALSE);
 		glUseProgram(meshProgram);
 		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+		glUniform3f(meshFogColorLoc, skyDescription.fog[0], skyDescription.fog[1], skyDescription.fog[2]);
+		glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
 
 		for (TankInstance &inst : tankInstances) {
 			if (!inst.alive) continue;

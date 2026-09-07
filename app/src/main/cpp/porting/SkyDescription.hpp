@@ -52,6 +52,9 @@ namespace ScorchDroidSky
 		// The colour upstream fogs distance towards, which is in practice
 		// the haze colour at the horizon.
 		float fog[3] = { 0.5f, 0.5f, 0.5f };
+		// <fogdensity>, upstream's exponential fog coefficient (0.001 in
+		// the shipped landscapes). Distance is in landscape units.
+		float fogDensity = 0.001f;
 
 		// <nohorizonglow> in the landscape definition. Night maps set it,
 		// and a glowing horizon under a moon looks wrong.

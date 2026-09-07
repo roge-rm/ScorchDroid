@@ -25,6 +25,7 @@ namespace ScorchDroidSky
 			sky.fog[i] = tex->fog[i];
 			sky.sunColor[i] = tex->suncolor[i];
 		}
+		sky.fogDensity = tex->fogdensity;
 
 		// Upstream's Sun::setPosition, minus the 900-unit radius and the
 		// map-centre offset - only the direction is wanted here.
