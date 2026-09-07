@@ -37,6 +37,7 @@
 #include <landscapemap/HeightMap.hpp>
 #include <landscapedef/LandscapeDefinitionCache.hpp>
 #include <landscapedef/LandscapeDefinition.hpp>
+#include <landscapedef/LandscapeTex.hpp>
 #include <target/TargetLife.hpp>
 #include <tank/Tank.hpp>
 #include <tank/TankState.hpp>
@@ -103,6 +104,17 @@ namespace
 	// mask itself is recomputed on the simulation side (see engine_jni's
 	// refreshMovementMask); this side only notices the version change and
 	// re-uploads.
+	// M6 water surface: one quad at the landscape's own water height.
+	GLuint waterProgram = 0, waterVao = 0, waterVbo = 0;
+	GLint  waterMvpLoc = -1, waterDeepLoc = -1, waterShallowLoc = -1;
+	GLint  waterAlphaLoc = -1, waterTimeLoc = -1;
+	bool   waterBuilt = false;    // one attempt per landscape, success or not
+	bool   waterVisible = false;  // this landscape actually has water
+	float  waterHeight = 0.0f;
+	float  waterDeep[3] = { 0.11f, 0.26f, 0.45f };
+	float  waterShallow[3] = { 0.29f, 0.56f, 0.91f };
+	float  waterAlpha = 0.8f;
+
 	unsigned int paintedMovementVersion = 0;
 	bool movementOverlayPainted = false;
 	GLint  pointMvpLoc = -1, pointColorLoc = -1, pointSizeLoc = -1;
@@ -431,6 +443,47 @@ namespace
 		void main() { fragColor = vec4(vColor, 1.0); }
 	)";
 
+	// M6 water. Upstream's own water is a whole subsystem in the excluded
+	// client layer (Water/WaterMap/WaterWaves, a reflection cubemap, a foam
+	// pass and a wave shader), and none of it is reusable - but the
+	// landscape definition that drives it is ordinary src/common data
+	// (LandscapeTexBorderWater: a height, five wave colours, a
+	// transparency). So the surface is ours to draw, from upstream's own
+	// numbers.
+	//
+	// Deliberately not a texture: what sells water at a glance is that it
+	// moves and that it is flat where the land is not. Two of the
+	// definition's own colours crossfaded by a pair of slow, non-commensurate
+	// sine waves gives that for a few instructions, with no image to load
+	// and nothing to keep in step with the ground texture.
+	const char *kWaterVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		uniform mat4 uMVP;
+		out vec2 vWorld;
+		void main() {
+			vWorld = aPosition.xz;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+		}
+	)";
+
+	const char *kWaterFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec2 vWorld;
+		out vec4 fragColor;
+		uniform vec3 uDeepColor;
+		uniform vec3 uShallowColor;
+		uniform float uAlpha;
+		uniform float uTime;
+		void main() {
+			// Two waves at different angles and speeds, deliberately not
+			// harmonics of each other - a single sine reads as corduroy.
+			float a = sin(vWorld.x * 0.09 + uTime * 0.7);
+			float b = sin((vWorld.x * 0.4 + vWorld.y * 0.9) * 0.05 - uTime * 0.5);
+			float crest = clamp(0.5 + 0.25 * a + 0.25 * b, 0.0, 1.0);
+			fragColor = vec4(mix(uDeepColor, uShallowColor, crest), uAlpha);
+		}
+	)";
+
 	// M6 effects: one additive, soft-edged round sprite per particle.
 	// Size and colour are per-vertex because a single explosion mixes both
 	// (a bright small core with dimmer larger debris), which a uniform
@@ -559,6 +612,9 @@ namespace
 			// before this rebuild would never be painted.
 			movementOverlayPainted = false;
 			paintedMovementVersion = 0;
+			// Water height and colours are per-landscape too.
+			waterBuilt = false;
+			waterVisible = false;
 			// Any pending crater belongs to the landscape being thrown
 			// away - applying it to the new one would corrupt unrelated
 			// vertices.
@@ -692,6 +748,73 @@ namespace
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		LOGI("Ground texture built: %dx%d", ground.width, ground.height);
+	}
+
+	// M6 water: reads the landscape's own water definition and builds the
+	// surface quad. Called each frame; does nothing after the first attempt
+	// for a given landscape (waterBuilt is cleared when one is thrown away,
+	// alongside the terrain and ground texture).
+	void buildWaterIfNeeded(ScorchedContext &ctx)
+	{
+		if (waterBuilt) return;
+		waterBuilt = true;
+		waterVisible = false;
+
+		LandscapeTex *tex = ctx.getLandscapeMaps().getDefinitions().getTex();
+		if (!tex || !tex->border) return;
+		if (tex->border->getType() != LandscapeTexType::eWater) {
+			LOGI("Landscape has no water border");
+			return;
+		}
+
+		LandscapeTexBorderWater *water = (LandscapeTexBorderWater *) tex->border;
+		waterHeight = water->height.asFloat();
+
+		// The definition gives five wave colours. The "b" pair are the lit
+		// ones (the "a" pair are black in every landscape upstream ships,
+		// being the far end of a shader gradient we aren't reproducing), so
+		// those drive the crossfade, with the deep tone darkened from the
+		// bottom colour so there is somewhere for the crests to stand out
+		// against.
+		waterShallow[0] = water->wavetopb[0];
+		waterShallow[1] = water->wavetopb[1];
+		waterShallow[2] = water->wavetopb[2];
+		for (int i = 0; i < 3; i++) waterDeep[i] = water->wavebottomb[i] * 0.55f;
+
+		// waterTransparency defaults to 1.0 and no shipped landscape sets
+		// it, so it can only make the surface *more* see-through than the
+		// value chosen here - opaque enough to read as a surface, open
+		// enough that a shoreline shows the ground shelving away under it.
+		waterAlpha = std::min(1.0f, std::max(0.0f, 0.82f * water->waterTransparency));
+
+		// The surface runs well past the landscape on every side. Upstream
+		// does the same (its water plane is far larger than the map), and
+		// it doubles as the fix for the terrain patch's visible edge at low
+		// camera angles - past the shore there is now sea rather than a
+		// cliff into nothing.
+		const float margin = std::max(mapWidthUnits, mapHeightUnits) * 2.0f;
+		const float x0 = -margin, x1 = mapWidthUnits + margin;
+		const float z0 = -margin, z1 = mapHeightUnits + margin;
+		const float quad[] = {
+			x0, waterHeight, z0,
+			x0, waterHeight, z1,
+			x1, waterHeight, z0,
+			x1, waterHeight, z0,
+			x0, waterHeight, z1,
+			x1, waterHeight, z1,
+		};
+
+		if (waterVao == 0) glGenVertexArrays(1, &waterVao);
+		if (waterVbo == 0) glGenBuffers(1, &waterVbo);
+		glBindVertexArray(waterVao);
+		glBindBuffer(GL_ARRAY_BUFFER, waterVbo);
+		glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
+		glBindVertexArray(0);
+
+		waterVisible = true;
+		LOGI("Water surface at height %.1f, alpha %.2f", waterHeight, waterAlpha);
 	}
 
 	// M6 terrain destruction: craters are carved into the real heightmap by
@@ -1566,6 +1689,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainGroundTexLoc = glGetUniformLocation(terrainProgram, "uGroundTexture");
 	terrainHasTextureLoc = glGetUniformLocation(terrainProgram, "uHasTexture");
 
+	waterProgram = linkProgram(kWaterVertexShader, kWaterFragmentShader);
+	waterMvpLoc = glGetUniformLocation(waterProgram, "uMVP");
+	waterDeepLoc = glGetUniformLocation(waterProgram, "uDeepColor");
+	waterShallowLoc = glGetUniformLocation(waterProgram, "uShallowColor");
+	waterAlphaLoc = glGetUniformLocation(waterProgram, "uAlpha");
+	waterTimeLoc = glGetUniformLocation(waterProgram, "uTime");
+
 	sightProgram = linkProgram(kSightVertexShader, kSightFragmentShader);
 	sightMvpLoc = glGetUniformLocation(sightProgram, "uMVP");
 	sightVertexCount = 0;
@@ -1658,6 +1788,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	buildTerrainIfNeeded(*ctx);
 	if (!terrainBuilt) return;
 	buildGroundTextureIfNeeded(*ctx);
+	// After the terrain, which is where the map size it spans comes from.
+	buildWaterIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
 	applyScorchMarks(*ctx);
 	syncMovementOverlay();
@@ -2052,6 +2184,31 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 	glBindVertexArray(terrainVao);
 	glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
+
+	// Water goes on immediately after the ground and before anything that
+	// stands on it. It blends over the terrain already drawn (so a shoreline
+	// shows the bottom shelving away) but still writes depth, so a tank or a
+	// tree below the waterline is properly submerged rather than floating
+	// on top of the surface.
+	if (waterVisible && waterProgram != 0) {
+		glUseProgram(waterProgram);
+		glUniformMatrix4fv(waterMvpLoc, 1, GL_FALSE, mvp.m);
+		glUniform3f(waterDeepLoc, waterDeep[0], waterDeep[1], waterDeep[2]);
+		glUniform3f(waterShallowLoc, waterShallow[0], waterShallow[1], waterShallow[2]);
+		glUniform1f(waterAlphaLoc, waterAlpha);
+		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		// The surface extends far past the map on every side, so with the
+		// camera under it the back faces are what you see - and being able
+		// to look up through it from a valley floor is worth more than the
+		// culling.
+		glDisable(GL_CULL_FACE);
+		glBindVertexArray(waterVao);
+		glDrawArrays(GL_TRIANGLES, 0, 6);
+		glDisable(GL_BLEND);
+		glEnable(GL_CULL_FACE);
+	}
 
 	glUseProgram(pointProgram);
 	glDisable(GL_CULL_FACE);  // point sprites have no winding
