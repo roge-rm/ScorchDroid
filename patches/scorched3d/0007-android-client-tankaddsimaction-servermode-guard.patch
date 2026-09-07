@@ -1,0 +1,23 @@
+diff --git a/src/common/simactions/TankAddSimAction.cpp b/src/common/simactions/TankAddSimAction.cpp
+index 6b816238..39b4b008 100644
+--- a/src/common/simactions/TankAddSimAction.cpp
++++ b/src/common/simactions/TankAddSimAction.cpp
+@@ -215,8 +215,16 @@ bool TankAddSimAction::invokeAction(ScorchedContext &context)
+ 			tank->getUniqueId(),
+ 			tank->getSUI()));
+ 	}
+-	// Check if admin muted
+-	if (ipAddress_ != 0)
++	// Check if admin muted - guarded on getServerMode() (not just ipAddress_
++	// != 0, as upstream had it) since a non-authoritative client replaying
++	// this same action (e.g. ScorchDroid's ClientContext, S3D_SERVER=1 but
++	// not a ScorchedServer - see the porting plan) would otherwise
++	// dereference ScorchedServer::instance() == nullptr here. Every other
++	// #else-branch block in this function already checks getServerMode()
++	// (see "Add to dialog" just above) - this one appears to have been a
++	// pre-existing oversight that simply never manifested upstream, since
++	// real client processes are never compiled with S3D_SERVER at all.
++	if (context.getServerMode() && ipAddress_ != 0)
+ 	{
+ 		ServerBanned::BannedType type = 
+ 			ScorchedServer::instance()->getBannedPlayers().getBanned(tank->getUniqueId(), tank->getSUI());
