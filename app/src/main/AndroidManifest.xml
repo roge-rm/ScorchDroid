@@ -2,6 +2,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- M5: LAN hosting/joining over real sockets (NetServerTCP3 - see
+         engine_jni.cpp's startLocalGame/connectToHost) needs plain INTERNET
+         even for local-network traffic; ACCESS_WIFI_STATE is for reading
+         this device's LAN IP to show/share for "connect by IP" (see
+         MainActivity.getLocalIpAddress). CHANGE_WIFI_MULTICAST_STATE backs
+         the MulticastLock LanDiscovery holds while NSD registration/
+         discovery is active - some OEM Wi-Fi stacks otherwise drop the
+         mDNS multicast traffic NSD depends on. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
