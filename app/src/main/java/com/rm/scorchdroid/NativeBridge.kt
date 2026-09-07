@@ -152,6 +152,14 @@ object NativeBridge {
      * outstanding. Zero on a live tank means the shot is locked in and the
      * round is waiting on the other players.
      */
+    /**
+     * M6 tap-to-aim (upstream's AUTO_AIM): swings "my tank"'s turret to
+     * face a landscape point - from GameRenderer.nativePickTerrain - and
+     * returns the resulting angle in degrees, or -1 if there is no tank to
+     * aim. The angle uses upstream's own autoAim arithmetic.
+     */
+    external fun aimAtPoint(landscapeX: Float, landscapeY: Float): Float
+
     external fun getMyMoveId(): Int
 
     /**

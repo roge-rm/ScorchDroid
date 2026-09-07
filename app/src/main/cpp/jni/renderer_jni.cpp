@@ -182,6 +182,22 @@ namespace
 	std::mutex g_overlayMutex;
 	std::vector<TankOverlay> g_tankOverlays;
 
+	// M6 terrain picking. Rather than invert the MVP, the camera basis is
+	// published each frame and the pick ray is rebuilt from it - the same
+	// vectors lookAt was built from, so there is no second derivation to
+	// keep in step and no matrix inversion to get subtly wrong.
+	struct PickCamera {
+		bool  valid = false;
+		float eyeX = 0, eyeY = 0, eyeZ = 0;
+		float fwdX = 0, fwdY = 0, fwdZ = 1;
+		float rightX = 1, rightY = 0, rightZ = 0;
+		float upX = 0, upY = 1, upZ = 0;
+		float tanHalfFov = 1.0f;
+		float aspect = 1.0f;
+	};
+	std::mutex g_pickMutex;
+	PickCamera g_pickCamera;
+
 	bool   recentreOnMyTank = false;
 	int    terrainDeformLogsLeft = 0;
 	int    terrainScorchLogsLeft = 0;
@@ -1735,6 +1751,34 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 
 	float aspect = (float) surfaceWidth / (float) surfaceHeight;
+	{
+		// Same basis lookAt uses below: forward towards the target, right
+		// perpendicular to it and world up, true up completing the frame.
+		float fx = targetX - eyeX, fy = targetY - eyeY, fz = targetZ - eyeZ;
+		float flen = sqrtf(fx * fx + fy * fy + fz * fz);
+		if (flen > 0.0001f) {
+			fx /= flen; fy /= flen; fz /= flen;
+			// right = forward x worldUp(0,1,0)
+			float rx = fz, ry = 0.0f, rz = -fx;
+			float rlen = sqrtf(rx * rx + rz * rz);
+			if (rlen > 0.0001f) {
+				rx /= rlen; rz /= rlen;
+				// up = right x forward
+				const float ux = ry * fz - rz * fy;
+				const float uy = rz * fx - rx * fz;
+				const float uz = rx * fy - ry * fx;
+
+				std::lock_guard<std::mutex> lock(g_pickMutex);
+				g_pickCamera.valid = true;
+				g_pickCamera.eyeX = eyeX; g_pickCamera.eyeY = eyeY; g_pickCamera.eyeZ = eyeZ;
+				g_pickCamera.fwdX = fx; g_pickCamera.fwdY = fy; g_pickCamera.fwdZ = fz;
+				g_pickCamera.rightX = rx; g_pickCamera.rightY = ry; g_pickCamera.rightZ = rz;
+				g_pickCamera.upX = ux; g_pickCamera.upY = uy; g_pickCamera.upZ = uz;
+				g_pickCamera.tanHalfFov = tanf(kFovYRadians * 0.5f);
+				g_pickCamera.aspect = aspect;
+			}
+		}
+	}
 	float farPlane = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
 	Mat4 proj = Mat4::perspective(kFovYRadians, aspect, 1.0f, farPlane);
 	Mat4 view = Mat4::lookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
@@ -2086,6 +2130,80 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 // M6: battlefield touch now drives the orbit camera (see the file-level
 // comment above for why tap-to-fire-at-a-point doesn't carry over as-is) -
 // called from MainActivity's touch handling on the GLSurfaceView.
+// M6 terrain picking: turns a screen tap into a landscape (x, y), or "" if
+// the ray misses the ground. Upstream does the same thing with
+// GroundMaps::getIntersect against a Line from the camera
+// (TankKeyboardControlUtil::autoAim); this marches the heightmap directly,
+// which needs no client camera class.
+//
+// Returned in landscape coordinates because that is what every consumer
+// wants - aiming, and eventually tank movement, both talk to the engine.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativePickTerrain(JNIEnv *env, jobject, jfloat screenX, jfloat screenY) {
+	PickCamera camera;
+	{
+		std::lock_guard<std::mutex> lock(g_pickMutex);
+		camera = g_pickCamera;
+	}
+	if (!camera.valid || surfaceWidth <= 0 || surfaceHeight <= 0) return env->NewStringUTF("");
+
+	// Screen pixel -> normalised device coords -> a ray through that pixel.
+	const float ndcX = (screenX / (float) surfaceWidth) * 2.0f - 1.0f;
+	const float ndcY = 1.0f - (screenY / (float) surfaceHeight) * 2.0f;
+	const float sx = ndcX * camera.aspect * camera.tanHalfFov;
+	const float sy = ndcY * camera.tanHalfFov;
+
+	float dx = camera.fwdX + camera.rightX * sx + camera.upX * sy;
+	float dy = camera.fwdY + camera.rightY * sx + camera.upY * sy;
+	float dz = camera.fwdZ + camera.rightZ * sx + camera.upZ * sy;
+	const float dlen = sqrtf(dx * dx + dy * dy + dz * dz);
+	if (dlen < 0.0001f) return env->NewStringUTF("");
+	dx /= dlen; dy /= dlen; dz /= dlen;
+
+	std::lock_guard<std::mutex> lock(g_engineMutex);
+	ScorchedContext *ctx = engineActiveContext();
+	if (!ctx || !terrainBuilt) return env->NewStringUTF("");
+
+	// March until the ray passes below the ground, then bisect. A fixed
+	// step is fine at this scale and avoids the cliff-skipping a coarse
+	// adaptive march can suffer; the bisect gives back the precision.
+	const float maxDistance = std::max(mapWidthUnits, mapHeightUnits) * 3.0f;
+	const float step = 0.5f;
+	float previous = 0.0f;
+	bool wasAbove = (camera.eyeY >= terrainHeightAt(*ctx, camera.eyeX, camera.eyeZ));
+
+	for (float travelled = step; travelled < maxDistance; travelled += step) {
+		const float px = camera.eyeX + dx * travelled;
+		const float py = camera.eyeY + dy * travelled;
+		const float pz = camera.eyeZ + dz * travelled;
+		const bool above = (py >= terrainHeightAt(*ctx, px, pz));
+
+		if (wasAbove && !above) {
+			// Bisect between the last two samples for a stable hit point.
+			float lo = previous, hi = travelled;
+			for (int i = 0; i < 24; i++) {
+				const float mid = (lo + hi) * 0.5f;
+				const float mx = camera.eyeX + dx * mid;
+				const float my = camera.eyeY + dy * mid;
+				const float mz = camera.eyeZ + dz * mid;
+				if (my >= terrainHeightAt(*ctx, mx, mz)) lo = mid; else hi = mid;
+			}
+			const float hitX = camera.eyeX + dx * lo;
+			const float hitZ = camera.eyeZ + dz * lo;
+			if (hitX < 0.0f || hitX > mapWidthUnits || hitZ < 0.0f || hitZ > mapHeightUnits) {
+				return env->NewStringUTF("");
+			}
+			char buffer[64];
+			// Render (x, z) is landscape (x, y).
+			snprintf(buffer, sizeof(buffer), "%.2f|%.2f", hitX, hitZ);
+			return env->NewStringUTF(buffer);
+		}
+		wasAbove = above;
+		previous = travelled;
+	}
+	return env->NewStringUTF("");
+}
+
 // M6 name plates: the last frame's projected tank positions, one row each:
 // "screenX|screenY|onScreen|alive|mine|life|shield|r|g|b|name". Kotlin draws
 // the plates (see GameHud) - this port has no GL font renderer and its UI is
