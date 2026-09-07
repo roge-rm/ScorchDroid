@@ -35,6 +35,13 @@ namespace ScorchDroidEffects
 		eShieldHit,      // flash on a shield sphere; size is the shield radius
 		eSkyFlash,       // whole-sky flash (a nuke); position is unused
 		eTeleport,       // a tank arriving or leaving; size is its radius
+		// One lingering smoke puff, upstream's Landscape::getSmoke(). Grey,
+		// slow, rising, and alpha-blended rather than additive - it is the
+		// only effect here that darkens what is behind it instead of
+		// lighting it. Raised from three places, each with its own gating
+		// and cadence that this port reproduces rather than re-invents:
+		// a gun's muzzle flash, a napalm fire, and a tank driving.
+		eSmoke,
 	};
 
 	struct EffectEvent

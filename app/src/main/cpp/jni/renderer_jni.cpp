@@ -215,6 +215,15 @@ namespace
 		float worldSize;   // radius in world units, converted to pixels at draw time
 		float age, life;   // seconds
 		float drag;        // per-second velocity retention, 1 = none
+		// The four below exist for smoke, which behaves unlike every other
+		// particle here: it rises rather than falls, spreads much further,
+		// is only partly opaque, and darkens what is behind it instead of
+		// lighting it. The defaults are the old hard-coded behaviour, so a
+		// spark or a debris fleck is unaffected.
+		float gravityScale = 1.0f;   // <0 rises
+		float growth = 0.8f;         // fraction of its own size gained over its life
+		float peakAlpha = 1.0f;      // opacity at birth
+		bool  alphaBlend = false;    // false = additive
 	};
 
 	struct Beam {
@@ -313,6 +322,14 @@ namespace
 	// buildRoofSkirt. Non-indexed, and drawn double-sided.
 	GLuint roofSkirtVao = 0, roofSkirtVbo = 0;
 	int    roofSkirtVertexCount = 0;
+
+	// The land surround: upstream's LandSurround, a flat apron of ground at
+	// height 0 filling the world beyond the map edge. Water maps hide the
+	// edge behind the sea and caverns behind the roof skirt, but a landscape
+	// with neither just stopped.
+	GLuint surroundVao = 0, surroundVbo = 0, surroundTexture = 0;
+	int    surroundVertexCount = 0;
+	bool   surroundBuilt = false, surroundVisible = false;
 
 	constexpr int kTerrainFloatsPerVertex = 8;  // pos(3) + normal(3) + uv(2)
 	std::vector<float> terrainHeights;          // kTerrainVerts1D^2, row-major by gz
@@ -1018,6 +1035,13 @@ namespace
 			roofSkirtVao = roofSkirtVbo = 0;
 			roofIndexCount = 0;
 			roofSkirtVertexCount = 0;
+			if (surroundVao) glDeleteVertexArrays(1, &surroundVao);
+			if (surroundVbo) glDeleteBuffers(1, &surroundVbo);
+			if (surroundTexture) glDeleteTextures(1, &surroundTexture);
+			surroundVao = surroundVbo = surroundTexture = 0;
+			surroundVertexCount = 0;
+			surroundBuilt = false;
+			surroundVisible = false;
 			roofBuilt = false;
 			roofVisible = false;
 			skyBuilt = false;
@@ -1503,6 +1527,128 @@ namespace
 		glEnable(GL_CULL_FACE);
 		glDepthMask(GL_TRUE);
 		glBindVertexArray(0);
+	}
+
+	// Upstream's LandSurround, which fills the world beyond the map edge with
+	// a flat apron of ground at height 0. Without it the terrain patch simply
+	// stops in mid-air: the water plane hides that on water maps and the roof
+	// skirt does on caverns, but a landscape with neither had nothing there
+	// at all, only fog.
+	//
+	// The geometry is upstream's own - sixteen points forming a ring of eight
+	// quads around the map, taken from LandSurround::generateVerts and its
+	// dataOfs table, so the apron reaches as far out as upstream's does
+	// rather than as far as looked right here.
+	void buildSurroundIfNeeded(ScorchedContext &ctx)
+	{
+		if (surroundBuilt) return;
+		surroundBuilt = true;
+		surroundVisible = false;
+
+		LandscapeTex *tex = ctx.getLandscapeMaps().getDefinitions().getTex();
+		if (!tex || !tex->texture) return;
+
+		// Upstream's own choice of image for this (Landscape::generate sets
+		// groundTexture_, which is what LandSurround samples): the first
+		// ground layer for a generated texture, or the explicit
+		// <surroundtexture> - falling back to the main image - for a
+		// file-based one.
+		std::string file;
+		if (tex->texture->getType() == LandscapeTexType::eTextureGenerate) {
+			file = ((LandscapeTexTextureGenerate *) tex->texture)->texture0;
+		} else if (tex->texture->getType() == LandscapeTexType::eTextureFile) {
+			LandscapeTexTextureFile *fileTex = (LandscapeTexTextureFile *) tex->texture;
+			file = fileTex->surroundTexture.empty() ? fileTex->texture : fileTex->surroundTexture;
+		}
+		surroundTexture = loadSkyTexture(file, "", true);
+		if (surroundTexture == 0) {
+			LOGI("Land surround: no texture (%s) - not drawn", file.empty() ? "none named" : file.c_str());
+			return;
+		}
+
+		// LandSurround::generateVerts, in landscape coordinates. The inner
+		// box is exactly the map; the outer one is upstream's 1536 + three
+		// map widths from the centre.
+		const float cx = mapWidthUnits * 0.5f, cy = mapHeightUnits * 0.5f;
+		const float o2x = mapWidthUnits * 0.5f, o2y = mapHeightUnits * 0.5f;
+		// Upstream uses getMapWidth() for *both* components here, which is a
+		// slip that only shows on a non-square map; the map's own height is
+		// used for the second one.
+		const float o3x = 1536.0f + mapWidthUnits * 3.0f;
+		const float o3y = 1536.0f + mapHeightUnits * 3.0f;
+		const float box[16][2] = {
+			{ cx - o2x, cy - o2y }, { cx - o2x, cy + o2y },
+			{ cx + o2x, cy + o2y }, { cx + o2x, cy - o2y },
+			{ cx - o3x, cy - o3y }, { cx - o3x, cy + o3y },
+			{ cx + o3x, cy + o3y }, { cx + o3x, cy - o3y },
+			{ cx - o2x, cy - o3y }, { cx - o2x, cy + o3y },
+			{ cx + o2x, cy + o3y }, { cx + o2x, cy - o3y },
+			{ cx - o3x, cy - o2y }, { cx - o3x, cy + o2y },
+			{ cx + o3x, cy + o2y }, { cx + o3x, cy - o2y },
+		};
+		const int quads[8][4] = {
+			{ 8, 11, 3, 0 }, { 1, 2, 10, 9 }, { 4, 8, 0, 12 }, { 11, 7, 15, 3 },
+			{ 3, 15, 14, 2 }, { 2, 14, 6, 10 }, { 13, 1, 9, 5 }, { 12, 0, 1, 13 },
+		};
+
+		std::vector<float> verts;
+		verts.reserve(8 * 6 * kTerrainFloatsPerVertex);
+		auto emit = [&](int index) {
+			const float lx = box[index][0], ly = box[index][1];
+			verts.push_back(lx);
+			verts.push_back(0.0f);                    // upstream's own height
+			verts.push_back(worldZFromEngineY(ly));
+			verts.push_back(0.0f); verts.push_back(1.0f); verts.push_back(0.0f);
+			// One tile per 64 units, which is what upstream's texture
+			// coordinate reduces to: (x / texWidth) * (texWidth / 16) / 4.
+			// In landscape coordinates, so it lines up with the ground
+			// texture's own orientation rather than mirroring against it.
+			verts.push_back(lx / 64.0f);
+			verts.push_back(ly / 64.0f);
+		};
+		for (int q = 0; q < 8; q++) {
+			// Two triangles per quad, each wound so its front face points up
+			// - worked out from the geometry rather than assumed, since
+			// upstream's table is ordered for GL_QUADS and the ring's four
+			// sides do not all run the same way round.
+			const int tri[2][3] = {
+				{ quads[q][0], quads[q][1], quads[q][2] },
+				{ quads[q][0], quads[q][2], quads[q][3] },
+			};
+			for (int t = 0; t < 2; t++) {
+				const float ax = box[tri[t][0]][0], az = box[tri[t][0]][1];
+				const float bx = box[tri[t][1]][0], bz = box[tri[t][1]][1];
+				const float cxx = box[tri[t][2]][0], cz = box[tri[t][2]][1];
+				// Signed area in the landscape plane. World Z is flipped
+				// against landscape y, so a positive area here is a
+				// clockwise (back-facing) triangle in world space.
+				const float area = (bx - ax) * (cz - az) - (cxx - ax) * (bz - az);
+				if (area < 0.0f) {
+					emit(tri[t][0]); emit(tri[t][1]); emit(tri[t][2]);
+				} else {
+					emit(tri[t][0]); emit(tri[t][2]); emit(tri[t][1]);
+				}
+			}
+		}
+		surroundVertexCount = (int) (verts.size() / kTerrainFloatsPerVertex);
+
+		if (surroundVao == 0) glGenVertexArrays(1, &surroundVao);
+		glBindVertexArray(surroundVao);
+		if (surroundVbo == 0) glGenBuffers(1, &surroundVbo);
+		glBindBuffer(GL_ARRAY_BUFFER, surroundVbo);
+		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		const GLsizei stride = kTerrainFloatsPerVertex * sizeof(float);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void *) (3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void *) (6 * sizeof(float)));
+		glBindVertexArray(0);
+
+		surroundVisible = true;
+		LOGI("Land surround: %d verts from %s, out to %.0fx%.0f units",
+			 surroundVertexCount, file.c_str(), o3x * 2.0f, o3y * 2.0f);
 	}
 
 	// S6, the skirt that closes the cavern off. The roof mesh covers the map
@@ -2307,6 +2453,32 @@ namespace
 				skyFlashRemaining = kSkyFlashSeconds;
 				break;
 			}
+			case ScorchDroidEffects::eSmoke: {
+				// One lingering puff, with upstream's own Smoke emitter
+				// numbers (src/client/landscape/Smoke.cpp): 2-4 seconds,
+				// grey, 0.6-0.8 opaque falling to nothing, growing from
+				// about 0.35 to about 1.35 units, and rising - its emitter
+				// gravity is +Z, unlike every other emitter in the game,
+				// which is what makes smoke drift up off a fire.
+				Particle puff = {};
+				puff.x = x; puff.y = y; puff.z = z;
+				puff.vx = randomSigned() * 0.3f;
+				puff.vy = 1.2f + randomUnit() * 0.8f;
+				puff.vz = randomSigned() * 0.3f;
+				puff.r = 0.8f; puff.g = 0.8f; puff.b = 0.8f;
+				puff.worldSize = 0.2f + randomUnit() * 0.3f;
+				puff.life = 2.0f + randomUnit() * 2.0f;
+				puff.drag = 0.6f;
+				// Rises instead of falling, and slowly - it is buoyant, not
+				// weightless, so the drag above still settles it.
+				puff.gravityScale = -0.15f;
+				// 0.35 -> 1.35 units over its life.
+				puff.growth = 2.9f;
+				puff.peakAlpha = 0.6f + randomUnit() * 0.2f;
+				puff.alphaBlend = true;
+				addParticle(puff);
+				break;
+			}
 			case ScorchDroidEffects::eTeleport: {
 				// A column of light where a tank leaves or arrives. Sent
 				// twice per teleport, once at each end.
@@ -2382,7 +2554,7 @@ namespace
 			particle.age += deltaSeconds;
 			if (particle.age >= particle.life) continue;
 
-			particle.vy -= kGravity * deltaSeconds * 0.35f;
+			particle.vy -= kGravity * deltaSeconds * 0.35f * particle.gravityScale;
 			const float retain = powf(particle.drag, deltaSeconds);
 			particle.vx *= retain; particle.vy *= retain; particle.vz *= retain;
 			particle.x += particle.vx * deltaSeconds;
@@ -2423,8 +2595,13 @@ namespace
 		glDepthMask(GL_FALSE);
 
 		if (!particles.empty()) {
-			std::vector<float> data;
-			data.reserve(particles.size() * 8);
+			// Two passes, because blend mode is per draw and not per vertex.
+			// Additive first (sparks and fireballs light what is behind
+			// them), then the alpha-blended smoke over the top, which is the
+			// order that lets smoke actually obscure a flame it drifts in
+			// front of.
+			std::vector<float> additive, blended;
+			additive.reserve(particles.size() * 8);
 			for (size_t i = 0; i < particles.size(); i++) {
 				const Particle &particle = particles[i];
 				const float remaining = 1.0f - particle.age / particle.life;
@@ -2432,26 +2609,41 @@ namespace
 				const float dx = particle.x - eyeX, dy = particle.y - eyeY, dz = particle.z - eyeZ;
 				const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
 				float pixels = worldSizeToPixels(particle.worldSize, distance, fovYRadians);
-				// Grow slightly as they age, the way a real puff spreads.
-				pixels *= 1.0f + (1.0f - remaining) * 0.8f;
+				// Grow as they age, the way a real puff spreads.
+				pixels *= 1.0f + (1.0f - remaining) * particle.growth;
 				pixels = std::min(std::max(pixels, 1.0f), 256.0f);
 
-				data.push_back(particle.x);
-				data.push_back(particle.y);
-				data.push_back(particle.z);
-				data.push_back(particle.r);
-				data.push_back(particle.g);
-				data.push_back(particle.b);
-				data.push_back(remaining * remaining);  // fade out, weighted late
-				data.push_back(pixels);
+				std::vector<float> &into = particle.alphaBlend ? blended : additive;
+				into.push_back(particle.x);
+				into.push_back(particle.y);
+				into.push_back(particle.z);
+				into.push_back(particle.r);
+				into.push_back(particle.g);
+				into.push_back(particle.b);
+				// Fade out, weighted late.
+				into.push_back(particle.peakAlpha * remaining * remaining);
+				into.push_back(pixels);
 			}
 
 			glUseProgram(particleProgram);
 			glUniformMatrix4fv(particleMvpLoc, 1, GL_FALSE, viewProjection.m);
 			glBindVertexArray(particleVao);
 			glBindBuffer(GL_ARRAY_BUFFER, particleVbo);
-			glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
-			frameDrawCalls++; glDrawArrays(GL_POINTS, 0, (GLsizei) particles.size());
+
+			if (!additive.empty()) {
+				glBufferData(GL_ARRAY_BUFFER, additive.size() * sizeof(float),
+							 additive.data(), GL_DYNAMIC_DRAW);
+				frameDrawCalls++;
+				glDrawArrays(GL_POINTS, 0, (GLsizei) (additive.size() / 8));
+			}
+			if (!blended.empty()) {
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+				glBufferData(GL_ARRAY_BUFFER, blended.size() * sizeof(float),
+							 blended.data(), GL_DYNAMIC_DRAW);
+				frameDrawCalls++;
+				glDrawArrays(GL_POINTS, 0, (GLsizei) (blended.size() / 8));
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // the beams below expect additive
+			}
 		}
 
 		if (!beams.empty()) {
@@ -3075,6 +3267,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// After the terrain too - the roof is sampled onto the same grid and
 	// reuses the world-coordinate tables the terrain build fills in.
 	buildRoofIfNeeded(*ctx);
+	// Also after the terrain, for the map size it spans.
+	buildSurroundIfNeeded(*ctx);
 	buildSkyIfNeeded(*ctx);
 	buildCloudsIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
@@ -3697,6 +3891,28 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 	glBindVertexArray(terrainVao);
 	frameDrawCalls++; glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
+
+	// The land surround, through the same program while it is still bound.
+	// Upstream lights it with the same half-lambert against the real sun it
+	// uses for the roof (LandSurround::generateList), and its own light map
+	// is never baked - it is flat ground at height 0, so there is nothing
+	// for hills to shadow.
+	if (surroundVisible) {
+		glUniform1f(terrainMinHeightLoc, 0.0f);
+		glUniform1f(terrainHeightRangeLoc, 1.0f);
+		glUniform1i(terrainHasTextureLoc, 1);
+		glUniform1i(terrainLightBakedLoc, 0);
+		glUniform1i(terrainHalfLambertLoc, 1);
+		glUniform3f(terrainLightDirLoc,
+					skyDescription.sunDirection[0],
+					skyDescription.sunDirection[2],
+					-skyDescription.sunDirection[1]);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, surroundTexture);
+		glUniform1i(terrainGroundTexLoc, 0);
+		glBindVertexArray(surroundVao);
+		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, surroundVertexCount);
+	}
 
 	// S6: the cavern roof, through the same program while it is still bound.
 	// Its light map is never baked (the ground's is generated per landscape;
