@@ -48,7 +48,7 @@ class MainActivity : AppCompatActivity() {
     private var currentAngleDegrees = 0f
 
     @Volatile
-    private var currentPowerFraction = 0.5f
+    private var currentPowerFraction = DEFAULT_POWER_FRACTION
 
     // M6 parity: upstream's UNDO_MOVE ("Revert to last angles") - the
     // angle/elevation/power of the last shot actually fired, so a player
@@ -289,18 +289,27 @@ class MainActivity : AppCompatActivity() {
     // M6: applies "angleDegrees|elevationDegrees|powerFraction" from
     // NativeBridge.getMyAim() to the sliders. Returns whether it applied -
     // false while there's no tank yet, so the caller can keep trying.
+    //
+    // Angle and elevation are taken from the tank; power is not. The engine
+    // starts every tank at full power, which is a poor opening shot and an
+    // awkward slider position to nudge down from, so the round opens at
+    // DEFAULT_POWER_FRACTION instead - and is pushed straight back to the
+    // engine, because the gun and aim sight read TanketShotInfo, not the
+    // sliders. Setting the slider alone would put the UI back to claiming a
+    // power the tank does not have, which is the exact bug that seeding was
+    // introduced to fix.
     private fun seedAimFromEngine(raw: String): Boolean {
         val parts = raw.split("|")
         val engineAngle = parts.getOrNull(0)?.toFloatOrNull() ?: return false
         val elevation = parts.getOrNull(1)?.toFloatOrNull() ?: return false
-        val power = parts.getOrNull(2)?.toFloatOrNull() ?: return false
 
         currentAngleDegrees = mirrorAngle(engineAngle)
         currentElevationDegrees = elevation.coerceIn(0f, 90f)
-        currentPowerFraction = power.coerceIn(0f, 1f)
+        currentPowerFraction = DEFAULT_POWER_FRACTION
         hudState.angleDegrees = currentAngleDegrees
         hudState.elevationDegrees = currentElevationDegrees
         hudState.powerFraction = currentPowerFraction
+        pushAimToEngine()
         return true
     }
 
@@ -521,18 +530,10 @@ class MainActivity : AppCompatActivity() {
                 parseWeaponShop(NativeBridge.getWeaponShop())
             }
 
-            val labels = weapons.map { weapon ->
-                val marker = if (weapon.isCurrentWeapon) "> " else "  "
-                val kind = if (weapon.isWeapon) "" else " [${weapon.type}]"
-                "$marker${weapon.name}$kind - \$${weapon.price} (owned ${weapon.ownedLabel})"
-            }
-
-            hudState.dialog = HudDialog.ListChoice(
-                title = "Shop - \$$money",
-                items = labels,
-                cancelLabel = "Close",
-                onSelect = { index ->
-                    val weapon = weapons[index]
+            hudState.dialog = HudDialog.Shop(
+                money = money,
+                entries = weapons,
+                onSelect = { weapon ->
                     CoroutineScope(Dispatchers.Main).launch {
                         if (weapon.isOwned) {
                             withContext(Dispatchers.Default) {
@@ -555,7 +556,20 @@ class MainActivity : AppCompatActivity() {
                             val status = withContext(Dispatchers.Default) { NativeBridge.getMyStatusLabel() }
                             if (status.startsWith("Buying")) {
                                 withContext(Dispatchers.Default) { NativeBridge.buyAccessory(weapon.accessoryId, true) }
-                                hudState.dialog = HudDialog.None
+                                // Stay open and refresh rather than close:
+                                // the buying phase is for kitting out, and
+                                // reopening the shop after every single
+                                // purchase (then finding your place in the
+                                // list again) was needless work. money and
+                                // entries are dialog state precisely so this
+                                // can update in place.
+                                val shop = hudState.dialog
+                                if (shop is HudDialog.Shop) {
+                                    shop.money = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
+                                    shop.entries = withContext(Dispatchers.Default) {
+                                        parseWeaponShop(NativeBridge.getWeaponShop())
+                                    }
+                                }
                             } else {
                                 hudState.dialog = HudDialog.Message(
                                     text = "You can only buy weapons during the buying phase (between rounds).",
@@ -906,5 +920,6 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val PREF_TUTORIAL_SEEN = "tutorial_seen"
+
     }
 }

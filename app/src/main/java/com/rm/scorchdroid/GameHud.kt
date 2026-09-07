@@ -68,6 +68,19 @@ import kotlin.math.roundToInt
  * not a @Composable function parameter - GameHud just observes whatever is
  * currently here and recomposes when it changes.
  */
+/**
+ * Firing power every round opens on, for both the slider and the tank
+ * itself (MainActivity.seedAimFromEngine pushes it to the engine). The
+ * engine's own starting value is full power, which is a poor opening shot
+ * and an awkward slider position to nudge down from; half puts the thumb
+ * mid-track with both directions equally reachable.
+ *
+ * Deliberately one constant shared by the HUD state and MainActivity: two
+ * literals that had to agree is precisely how the slider once came to
+ * claim a power the tank did not have.
+ */
+const val DEFAULT_POWER_FRACTION = 0.5f
+
 class GameHudState {
     var statusText by mutableStateOf("")
     var hostingLabel by mutableStateOf("")
@@ -80,7 +93,7 @@ class GameHudState {
     // tap gestures on the battlefield still work too, as a quick/casual
     // alternative, not replaced.
     var angleDegrees by mutableFloatStateOf(0f)
-    var powerFraction by mutableFloatStateOf(0.5f)
+    var powerFraction by mutableFloatStateOf(DEFAULT_POWER_FRACTION)
     // M6: which camera mode the battlefield touch/pinch gestures currently
     // control - see renderer_jni.cpp's OrbitCamera. The actual mode lives
     // native-side; this mirrors it so the camera button can show the
