@@ -50,6 +50,8 @@
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
 #include <landscapedef/LandscapeDefinition.hpp>
+#include <EffectEventQueue.h>
+#include <actions/ShieldHit.hpp>
 #include <landscapedef/LandscapeDefinitions.hpp>
 #include <common/OptionsGame.hpp>
 #include <ClientContext.hpp>
@@ -510,6 +512,61 @@ namespace
 		// the ground silently changes shape under a static mesh.
 		int dMinX = 0, dMinY = 0, dMaxX = 0, dMaxY = 0;
 		bool reported = ScorchDroidLandscape::takeDirtyRegion(dMinX, dMinY, dMaxX, dMaxY);
+		// M6 effects: the weapon-effect hook (patch 0011). Checked with a
+		// real ShieldHit Action rather than by poking the queue directly -
+		// the queue itself is trivial, and what can actually break is the
+		// patch: an #ifdef landing in the wrong branch, or a field read off
+		// an object that is null server-side. ShieldHit is the cheapest of
+		// the five to raise for real, since it needs only a shielded tank
+		// and no weapon-fire plumbing.
+		{
+			ScorchDroidEffects::drain();  // ignore anything the round start raised
+
+			// Raise the shield here rather than relying on a tank left
+			// shielded by an earlier test - the round state machine keeps
+			// running between tests and resets tanks, so borrowing state
+			// across them is exactly the kind of order dependence that
+			// makes a suite flaky.
+			Tank *shieldedTank = nullptr;
+			std::map<unsigned int, Tank *> &tanks = server->getTargetContainer().getTanks();
+			if (!tanks.empty()) shieldedTank = tanks.begin()->second;
+			Accessory *shieldAccessory =
+				server->getAccessoryStore().findByPrimaryAccessoryName("Shield");
+			check(shieldAccessory != nullptr, "found the \"Shield\" accessory to raise");
+			if (shieldedTank && shieldAccessory)
+			{
+				shieldedTank->getShield().setCurrentShield(shieldAccessory);
+			}
+			check(shieldedTank != nullptr && shieldedTank->getShield().getCurrentShield() != nullptr,
+				"a tank is shielded, so a shield hit has something to flash on");
+
+			if (shieldedTank)
+			{
+				FixedVector hitPos = shieldedTank->getLife().getTargetPosition();
+				ShieldHit shieldHit(shieldedTank->getPlayerId(), hitPos, fixed(true, 5000));
+				shieldHit.setScorchedContext(&server->getContext());
+				shieldHit.init();
+				bool removeAction = false;
+				shieldHit.simulate(fixed(true, 1000), removeAction);
+
+				std::vector<ScorchDroidEffects::EffectEvent> effects = ScorchDroidEffects::drain();
+				bool sawShieldHit = false;
+				for (size_t i = 0; i < effects.size(); i++)
+				{
+					if (effects[i].type != ScorchDroidEffects::eShieldHit) continue;
+					sawShieldHit = true;
+					// Position must survive the trip: a renderer drawing the
+					// flash at the origin would look like nothing happened.
+					check(fabsf(effects[i].x - hitPos[0].asFloat()) < 0.01f &&
+						  fabsf(effects[i].y - hitPos[1].asFloat()) < 0.01f,
+						"the shield-hit effect carries the real impact position");
+					check(effects[i].size > 0.0f,
+						"the shield-hit effect is sized from the shield, not left at zero");
+				}
+				check(sawShieldHit, "a real ShieldHit action raises an effect event for the renderer");
+			}
+		}
+
 		check(reported, "the deform hook reported a dirty region to the renderer");
 		if (reported)
 		{

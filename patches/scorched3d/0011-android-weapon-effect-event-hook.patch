@@ -1,0 +1,233 @@
+diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
+--- a/src/common/actions/Explosion.cpp
++++ b/src/common/actions/Explosion.cpp
+@@ -39,6 +39,9 @@
+ 	// explosion-sound trigger even though this whole path is normally
+ 	// client-only - see SoundEventQueue.h and the porting plan.
+ 	#include <SoundEventQueue.h>
++	// ... and the GLES3 renderer to the visual half, which is likewise
++	// client-only here - see EffectEventQueue.h.
++	#include <EffectEventQueue.h>
+ #endif
+ #include <landscapemap/DeformLandscape.hpp>
+ #include <landscapemap/LandscapeMaps.hpp>
+@@ -75,6 +78,27 @@
+ 
+ void Explosion::init()
+ {
++#ifdef S3D_SERVER
++	// Android build: the whole client body below draws the fireball via
++	// ParticleEmitter/ExplosionTextures. Raise one event with the size and
++	// the weapon's own <explosioncolour> instead and let the renderer own
++	// the look. getSize() is the same value the client body scales its
++	// particles by, before the WeapScale option multiplier which is a
++	// display preference this port does not expose yet.
++	{
++		FixedVector &colour = params_->getExplosionColor();
++		ScorchDroidEffects::EffectEvent effect;
++		effect.type = ScorchDroidEffects::eExplosion;
++		effect.x = position_[0].asFloat();
++		effect.y = position_[1].asFloat();
++		effect.z = position_[2].asFloat();
++		effect.size = params_->getSize().asFloat();
++		effect.r = colour[0].asFloat();
++		effect.g = colour[1].asFloat();
++		effect.b = colour[2].asFloat();
++		ScorchDroidEffects::push(effect);
++	}
++#endif
+ #ifndef S3D_SERVER  // FIXME: whole function is client-only, use higher-level conditional compile
+ 	fixed multiplier     = fixed( ( (int)context_->getOptionsGame().getWeapScale() ) - OptionsGame::ScaleMedium );
+ 	multiplier          *= fixed( true, 5000 );
+diff --git a/src/common/actions/Laser.cpp b/src/common/actions/Laser.cpp
+index 7f2d9380..125bba1e 100644
+--- a/src/common/actions/Laser.cpp
++++ b/src/common/actions/Laser.cpp
+@@ -34,6 +34,9 @@
+ #ifndef S3D_SERVER
+ 	#include <GLEXT/GLState.hpp>
+ 	#include <sprites/ExplosionTextures.hpp>
++#else
++	// Android build: see EffectEventQueue.h - Laser::draw() is client-only.
++	#include <EffectEventQueue.h>
+ #endif
+ #include <cmath>
+ #include <set>
+@@ -92,6 +95,12 @@ std::string Laser::getActionDetails()
+ 
+ void Laser::simulate(fixed frameTime, bool &remove)
+ {
++#ifdef S3D_SERVER
++	// Captured before the branch below clears it - the effect is raised
++	// after the beam walk, which is the only place drawLength_ gets its
++	// real value.
++	const bool raiseEffect = firstTime_;
++#endif
+ 	if (firstTime_)
+ 	{
+ 		firstTime_ = false;
+@@ -174,6 +183,27 @@ void Laser::simulate(fixed frameTime, bool &remove)
+ 		}
+ 	}
+ 
++#ifdef S3D_SERVER
++	// Android build: raise the beam once, after the loop above has walked
++	// it to its true stopping point (drawLength_ shortens when the beam is
++	// blocked by a shield), so the drawn beam ends where the real one did.
++	if (raiseEffect && drawLength_ > 0)
++	{
++		FixedVector end = position_ + direction_.Normalize() * drawLength_;
++		ScorchDroidEffects::EffectEvent effect;
++		effect.type = ScorchDroidEffects::eLaser;
++		effect.x = position_[0].asFloat();
++		effect.y = position_[1].asFloat();
++		effect.z = position_[2].asFloat();
++		effect.endX = end[0].asFloat();
++		effect.endY = end[1].asFloat();
++		effect.endZ = end[2].asFloat();
++		effect.size = hurtRadius_.asFloat();
++		effect.r = 1.0f; effect.g = 0.85f; effect.b = 0.85f;
++		ScorchDroidEffects::push(effect);
++	}
++#endif
++
+ 	totalTime_ += frameTime;
+ 
+ 	remove = (totalTime_ > laserTime_);
+diff --git a/src/common/actions/Lightning.cpp b/src/common/actions/Lightning.cpp
+index 508ee67d..f2830b4e 100644
+--- a/src/common/actions/Lightning.cpp
++++ b/src/common/actions/Lightning.cpp
+@@ -25,6 +25,10 @@
+ 	#include <sound/SoundUtils.hpp>
+ 	#include <GLEXT/GLCamera.hpp>
+ 	#include <sprites/ExplosionTextures.hpp>
++#else
++	// Android build: see EffectEventQueue.h - Lightning::draw() is
++	// client-only.
++	#include <EffectEventQueue.h>
+ #endif
+ #include <target/TargetContainer.hpp>
+ #include <target/TargetDamageCalc.hpp>
+@@ -122,6 +126,33 @@ void Lightning::simulate(fixed frameTime, bool &remove)
+ 	}
+ #endif // #ifndef S3D_SERVER
+ 
++#ifdef S3D_SERVER
++	// Android build: raise every arc once, on the first simulate - the
++	// segment list is built during init() and does not change afterwards,
++	// so the renderer gets the whole bolt in one go and fades it out over
++	// the same total time this action lives for.
++	if (firstTime_)
++	{
++		firstTime_ = false;
++		std::list<Segment>::iterator itor;
++		for (itor = segments_.begin(); itor != segments_.end(); ++itor)
++		{
++			Segment &segment = *itor;
++			ScorchDroidEffects::EffectEvent effect;
++			effect.type = ScorchDroidEffects::eLightning;
++			effect.x = segment.start[0].asFloat();
++			effect.y = segment.start[1].asFloat();
++			effect.z = segment.start[2].asFloat();
++			effect.endX = segment.end[0].asFloat();
++			effect.endY = segment.end[1].asFloat();
++			effect.endZ = segment.end[2].asFloat();
++			effect.size = segment.size.asFloat();
++			effect.r = 0.75f; effect.g = 0.85f; effect.b = 1.0f;
++			ScorchDroidEffects::push(effect);
++		}
++	}
++#endif
++
+ 	totalTime_ += frameTime;
+ 	remove = (totalTime_ > weapon_->getTotalTime());
+ 	Action::simulate(frameTime, remove);
+diff --git a/src/common/actions/Napalm.cpp b/src/common/actions/Napalm.cpp
+index 002724d9..7ce1e546 100644
+--- a/src/common/actions/Napalm.cpp
++++ b/src/common/actions/Napalm.cpp
+@@ -37,6 +37,10 @@
+ 	#include <landscape/DeformTextures.hpp>
+ 	#include <landscape/Smoke.hpp>
+ 	#include <client/ScorchedClient.hpp>
++#else
++	// Android build: see EffectEventQueue.h - the flame/smoke half of this
++	// action is client-only, so the renderer is fed events instead.
++	#include <EffectEventQueue.h>
+ #endif
+ #include <landscapemap/LandscapeMaps.hpp>
+ #include <landscapedef/LandscapeDefinition.hpp>
+@@ -176,6 +180,34 @@ void Napalm::simulate( fixed frameTime, bool& remove )
+ 	}
+ #endif  // #ifndef S3D_SERVER
+ 
++#ifdef S3D_SERVER
++	// Android build: mirrors the client block above - pick one burning
++	// point per draw tick and raise a flame there, rather than one per
++	// point per frame, which would be hundreds of events a second for a
++	// large fire. counter_ is the same rate limiter the client uses.
++	if (!napalmPoints_.empty() && !params_->getNoSmoke() && counter_.nextDraw(frameTime.asFloat()))
++	{
++		NapalmEntry *entry = nullptr;
++		int count = rand() % napalmPoints_.size();
++		std::list<NapalmEntry *>::iterator itor;
++		for (itor = napalmPoints_.begin(); itor != napalmPoints_.end(); itor++, count--)
++		{
++			entry = *itor;
++			if (count <= 0) break;
++		}
++		if (entry != nullptr)
++		{
++			ScorchDroidEffects::EffectEvent effect;
++			effect.type = ScorchDroidEffects::eNapalm;
++			effect.x = float(entry->posX);
++			effect.y = float(entry->posY);
++			effect.z = getHeight(entry->posX, entry->posY).asFloat();
++			effect.size = 1.5f;
++			effect.r = 1.0f; effect.g = 0.55f; effect.b = 0.1f;
++			ScorchDroidEffects::push(effect);
++		}
++	}
++#endif
+ 
+ 	// Add napalm for the period of the time interval
+ 	// once the time interval has expired then start taking it away
+diff --git a/src/common/actions/ShieldHit.cpp b/src/common/actions/ShieldHit.cpp
+index 9c26f0a8..34bc51d9 100644
+--- a/src/common/actions/ShieldHit.cpp
++++ b/src/common/actions/ShieldHit.cpp
+@@ -30,6 +30,10 @@
+ #ifndef S3D_SERVER
+ 	#include <sound/SoundUtils.hpp>
+ 	#include <GLEXT/GLLenseFlare.hpp>
++#else
++	// Android build: see EffectEventQueue.h - the shield flash is drawn by
++	// TargetRenderer::shieldHit(), which is client-only.
++	#include <EffectEventQueue.h>
+ #endif
+ 
+ ShieldHit::ShieldHit(unsigned int playerId, FixedVector &position, fixed hitPercentage) :
+@@ -81,6 +85,22 @@ void ShieldHit::simulate(fixed frameTime, bool &remove)
+ 				}
+ #endif // #ifndef S3D_SERVER
+ 
++#ifdef S3D_SERVER
++				{
++					// Size the flash to the shield itself, so a big shield
++					// flashes big - the client equivalent draws on the
++					// shield's own geometry and gets this for free.
++					ScorchDroidEffects::EffectEvent effect;
++					effect.type = ScorchDroidEffects::eShieldHit;
++					effect.x = position_[0].asFloat();
++					effect.y = position_[1].asFloat();
++					effect.z = position_[2].asFloat();
++					effect.size = shield->getBoundingSize().asFloat();
++					effect.r = 0.5f; effect.g = 0.8f; effect.b = 1.0f;
++					ScorchDroidEffects::push(effect);
++				}
++#endif
++
+ 				target->getShield().setShieldPower(
+ 					target->getShield().getShieldPower() - shield->getHitRemovePower() * hitPercentage_
+ 				);
