@@ -353,15 +353,22 @@ bool ClientContext::processMessage(NetMessage &message, const char *messageType,
 
 	if (0 == strcmp(messageType, ComsNetStatMessage::ComsNetStatMessageType.getName().c_str()))
 	{
-		// Periodic, one-way ping/step-size info the host sends every couple
-		// of seconds once joined (see ServerSimulator.cpp) - the real
-		// ClientSimulator stores these for its own network-quality display,
-		// which ScorchDroid doesn't have yet, so just consuming the message
-		// (registering *a* handler at all, so ComsMessageHandler::
-		// processMessage() doesn't error out - found the hard way testing a
-		// real two-emulator join) is enough for now.
+		// Periodic ping/step-size info the host sends every couple of
+		// seconds once this destination is loaded (see
+		// ServerSimulator::processMessage, which only sends it in response
+		// to the ComsSimulateResultMessage we return below - so this stops
+		// arriving if we ever stop answering).
+		//
+		// The round-trip time is not just a display statistic: it is how
+		// syncToServerTime() estimates how stale a just-arrived message
+		// already is. Registering *a* handler at all also matters
+		// independently - ComsMessageHandler::processMessage() errors out
+		// and drops the connection on an unhandled type, found the hard way
+		// testing a real two-emulator join.
 		ComsNetStatMessage netStatMessage;
-		netStatMessage.readMessage(reader);
+		if (!netStatMessage.readMessage(reader)) return false;
+		clientSync_->setNetStat(
+			netStatMessage.getRoundTripTime(), netStatMessage.getSendStepSize());
 		return true;
 	}
 
@@ -373,11 +380,19 @@ bool ClientContext::processMessage(NetMessage &message, const char *messageType,
 		if (!simulateMessage.readMessage(reader)) return false;
 		clientSync_->addComsSimulateMessage(simulateMessage);
 
-		// Send back a ping response, same as the real ClientSimulator -
-		// harmless to skip functionally, but keeps this host-indistinguishable
-		// from a real client for any ping-based server logic.
+		// Send back a ping response, same as the real ClientSimulator. This
+		// is what makes the host measure our round-trip time and send back
+		// the ComsNetStatMessage handled above, so it is load-bearing for
+		// the clock correction below, not just politeness.
 		ComsSimulateResultMessage resultMessage(simulateMessage.getServerTime());
 		sendToServer(resultMessage);
+
+		// Live message, so correct our clock towards the host's. Deliberately
+		// not done for the buffered messages replayed during level load
+		// (see the ComsLoadLevelMessage handler above) - those carry old
+		// timestamps and would drag the clock backwards; upstream skips them
+		// for the same reason via its loadingLevel_ flag.
+		clientSync_->syncToServerTime(simulateMessage.getActualTime());
 		return true;
 	}
 
