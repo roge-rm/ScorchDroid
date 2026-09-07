@@ -46,6 +46,7 @@
 #include <Mat4.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
+#include <EffectEventQueue.h>
 // M6: real .ase tank/projectile models. The whole 3dsparse parser plus
 // ModelStore are in src/common, so the actual model data is reusable -
 // only the rendering of it is ours to write.
@@ -91,6 +92,39 @@ namespace
 	GLint  meshMvpLoc = -1, meshLightDirLoc = -1, meshColorLoc = -1;
 	GLuint sightProgram = 0, sightVao = 0, sightVbo = 0;
 	GLint  sightMvpLoc = -1;
+
+	GLuint particleProgram = 0, particleVao = 0, particleVbo = 0;
+	GLint  particleMvpLoc = -1;
+	GLuint beamVao = 0, beamVbo = 0;
+
+	// M6 effects: live particles and beams spawned from the engine's own
+	// weapon-effect events (see EffectEventQueue.h). Everything here is
+	// presentation only - the simulation already happened, this just shows
+	// it - so these are plain CPU-side lists rebuilt into a vertex buffer
+	// each frame rather than anything the engine can see.
+	struct Particle {
+		float x, y, z;     // render space (y up)
+		float vx, vy, vz;
+		float r, g, b;
+		float worldSize;   // radius in world units, converted to pixels at draw time
+		float age, life;   // seconds
+		float drag;        // per-second velocity retention, 1 = none
+	};
+
+	struct Beam {
+		float x1, y1, z1, x2, y2, z2;  // render space
+		float r, g, b;
+		float age, life;
+	};
+
+	std::vector<Particle> particles;
+	std::vector<Beam> beams;
+	double lastFrameSeconds = 0.0;
+
+	// Plenty for several simultaneous blasts, and a hard stop so a napalm
+	// field can't grow the buffer without limit on a slow device.
+	const size_t kMaxParticles = 4000;
+	const size_t kMaxBeams = 512;
 	int    sightVertexCount = 0;
 
 	GLuint terrainVao = 0, terrainVbo = 0, terrainIbo = 0;
@@ -119,6 +153,7 @@ namespace
 	int    terrainSrcWidth = 0, terrainSrcHeight = 0;
 	int    terrainDeformLogsLeft = 0;
 	int    terrainScorchLogsLeft = 0;
+	int    effectLogsLeft = 0;
 
 	int    surfaceWidth = 1, surfaceHeight = 1;
 
@@ -295,6 +330,38 @@ namespace
 		void main() { fragColor = vec4(vColor, 1.0); }
 	)";
 
+	// M6 effects: one additive, soft-edged round sprite per particle.
+	// Size and colour are per-vertex because a single explosion mixes both
+	// (a bright small core with dimmer larger debris), which a uniform
+	// could not express without a draw call each.
+	const char *kParticleVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec4 aColor;
+		layout(location = 2) in float aSize;
+		uniform mat4 uMVP;
+		out vec4 vColor;
+		void main() {
+			vColor = aColor;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+			gl_PointSize = aSize;
+		}
+	)";
+
+	const char *kParticleFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec4 vColor;
+		out vec4 fragColor;
+		void main() {
+			// Round the square point sprite off and fade towards its edge,
+			// so particles read as soft puffs rather than tiles.
+			vec2 offset = gl_PointCoord - vec2(0.5);
+			float r = length(offset) * 2.0;
+			if (r > 1.0) discard;
+			float falloff = 1.0 - r * r;
+			fragColor = vec4(vColor.rgb, vColor.a * falloff);
+		}
+	)";
+
 	const char *kPointVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
 		uniform mat4 uMVP;
@@ -469,6 +536,7 @@ namespace
 		builtDefinitionNumber = defnNumber;
 		terrainDeformLogsLeft = 5;
 		terrainScorchLogsLeft = 5;
+		effectLogsLeft = 8;
 		LOGI("Terrain mesh built: %dx%d source -> %dx%d grid, height range [%.1f, %.1f]",
 			 w, h, verts1D, verts1D, terrainMinHeight, terrainMaxHeight);
 	}
@@ -574,6 +642,252 @@ namespace
 			LOGI("Terrain deformed: map [%d,%d]-[%d,%d] -> grid [%d,%d]-[%d,%d], %d verts",
 				 minX, minY, maxX, maxY, gx0, gz0, gx1, gz1, rowVerts * (gz1 - gz0 + 1));
 		}
+	}
+
+	// M6 effects. The engine raises one event per explosion / napalm flame /
+	// laser / lightning arc / shield impact (see EffectEventQueue.h, fed by
+	// patch 0011); this turns each into particles or beams. Upstream's own
+	// versions are ParticleEmitter bursts, textured quads and gluQuadrics in
+	// the excluded client layer, so the look here is a reinterpretation
+	// rather than a port - but the *timing, position, size and colour* are
+	// the engine's own, so it fires when and where upstream fires.
+	//
+	// Note the coordinate swizzle: events arrive in engine space
+	// (x, y, height) and the renderer works in a y-up world, so height
+	// becomes y and engine y becomes z.
+	float randomUnit()
+	{
+		return (float) rand() / (float) RAND_MAX;
+	}
+
+	float randomSigned()
+	{
+		return randomUnit() * 2.0f - 1.0f;
+	}
+
+	void addParticle(const Particle &particle)
+	{
+		if (particles.size() >= kMaxParticles) return;
+		particles.push_back(particle);
+	}
+
+	void spawnEffects()
+	{
+		std::vector<ScorchDroidEffects::EffectEvent> events = ScorchDroidEffects::drain();
+		if (!events.empty() && effectLogsLeft > 0) {
+			effectLogsLeft--;
+			LOGI("Effects: %zu event(s), first type=%d at (%.1f, %.1f, %.1f) size %.1f",
+				 events.size(), (int) events[0].type,
+				 events[0].x, events[0].y, events[0].z, events[0].size);
+		}
+		for (size_t i = 0; i < events.size(); i++) {
+			const ScorchDroidEffects::EffectEvent &event = events[i];
+			const float x = event.x, y = event.z, z = event.y;  // engine -> render
+			const float endX = event.endX, endY = event.endZ, endZ = event.endY;
+
+			switch (event.type) {
+			case ScorchDroidEffects::eExplosion: {
+				// A bright core plus an outward burst. Count scales with the
+				// blast so a small weapon doesn't look like a big one.
+				const float size = std::max(event.size, 0.5f);
+				Particle core = {};
+				core.x = x; core.y = y; core.z = z;
+				core.r = 1.0f; core.g = 0.95f; core.b = 0.8f;
+				core.worldSize = size * 1.6f;
+				core.life = 0.45f;
+				core.drag = 1.0f;
+				addParticle(core);
+
+				const int count = std::min(12 + (int) (size * 5.0f), 90);
+				for (int p = 0; p < count; p++) {
+					// Normalising a cube sample would clump towards the
+					// corners; rejecting long ones keeps the burst round.
+					float dx = randomSigned(), dy = randomSigned(), dz = randomSigned();
+					float len = sqrtf(dx * dx + dy * dy + dz * dz);
+					if (len < 0.001f || len > 1.0f) { p--; continue; }
+					dx /= len; dy /= len; dz /= len;
+
+					float speed = size * (0.8f + randomUnit() * 1.4f);
+					Particle particle = {};
+					particle.x = x; particle.y = y; particle.z = z;
+					particle.vx = dx * speed;
+					particle.vy = dy * speed * 0.8f + size * 0.4f;  // biased upward
+					particle.vz = dz * speed;
+					// Fade from the weapon's own colour towards smoke.
+					float heat = randomUnit();
+					particle.r = event.r * (0.6f + heat * 0.4f);
+					particle.g = event.g * (0.4f + heat * 0.6f);
+					particle.b = event.b * (0.3f + heat * 0.5f);
+					particle.worldSize = size * (0.35f + randomUnit() * 0.5f);
+					particle.life = 0.5f + randomUnit() * 0.7f;
+					particle.drag = 0.25f;
+					addParticle(particle);
+				}
+				break;
+			}
+			case ScorchDroidEffects::eNapalm: {
+				Particle flame = {};
+				flame.x = x + randomSigned() * 0.5f;
+				flame.y = y + 0.3f;
+				flame.z = z + randomSigned() * 0.5f;
+				flame.vy = 1.5f + randomUnit();
+				flame.r = event.r; flame.g = event.g; flame.b = event.b;
+				flame.worldSize = event.size * (0.7f + randomUnit() * 0.6f);
+				flame.life = 0.9f + randomUnit() * 0.6f;
+				flame.drag = 0.6f;
+				addParticle(flame);
+				break;
+			}
+			case ScorchDroidEffects::eShieldHit: {
+				// A ring of sparks on the shield surface, facing outward.
+				const float radius = std::max(event.size, 1.0f);
+				for (int p = 0; p < 18; p++) {
+					float dx = randomSigned(), dy = randomSigned(), dz = randomSigned();
+					float len = sqrtf(dx * dx + dy * dy + dz * dz);
+					if (len < 0.001f) { p--; continue; }
+					dx /= len; dy /= len; dz /= len;
+
+					Particle spark = {};
+					spark.x = x + dx * radius * 0.6f;
+					spark.y = y + dy * radius * 0.6f;
+					spark.z = z + dz * radius * 0.6f;
+					spark.vx = dx * radius; spark.vy = dy * radius; spark.vz = dz * radius;
+					spark.r = event.r; spark.g = event.g; spark.b = event.b;
+					spark.worldSize = radius * 0.3f;
+					spark.life = 0.35f + randomUnit() * 0.2f;
+					spark.drag = 0.1f;
+					addParticle(spark);
+				}
+				break;
+			}
+			case ScorchDroidEffects::eLaser:
+			case ScorchDroidEffects::eLightning: {
+				if (beams.size() >= kMaxBeams) break;
+				Beam beam = {};
+				beam.x1 = x; beam.y1 = y; beam.z1 = z;
+				beam.x2 = endX; beam.y2 = endY; beam.z2 = endZ;
+				beam.r = event.r; beam.g = event.g; beam.b = event.b;
+				// Upstream's laser lives for its weapon's totalTime and its
+				// lightning for the bolt's; neither is carried on the event,
+				// so both use a short constant - long enough to read, short
+				// enough not to linger over the next shot.
+				beam.life = (event.type == ScorchDroidEffects::eLaser) ? 0.5f : 0.6f;
+				beams.push_back(beam);
+				break;
+			}
+			}
+		}
+	}
+
+	void updateEffects(float deltaSeconds)
+	{
+		const float kGravity = 9.0f;  // not the sim's gravity: this is smoke, not ballistics
+
+		size_t live = 0;
+		for (size_t i = 0; i < particles.size(); i++) {
+			Particle &particle = particles[i];
+			particle.age += deltaSeconds;
+			if (particle.age >= particle.life) continue;
+
+			particle.vy -= kGravity * deltaSeconds * 0.35f;
+			const float retain = powf(particle.drag, deltaSeconds);
+			particle.vx *= retain; particle.vy *= retain; particle.vz *= retain;
+			particle.x += particle.vx * deltaSeconds;
+			particle.y += particle.vy * deltaSeconds;
+			particle.z += particle.vz * deltaSeconds;
+
+			particles[live++] = particle;
+		}
+		particles.resize(live);
+
+		live = 0;
+		for (size_t i = 0; i < beams.size(); i++) {
+			beams[i].age += deltaSeconds;
+			if (beams[i].age >= beams[i].life) continue;
+			beams[live++] = beams[i];
+		}
+		beams.resize(live);
+	}
+
+	// Particles are drawn as point sprites, so their size has to be given in
+	// pixels - this is the standard perspective conversion, using the same
+	// vertical field of view the projection matrix was built with.
+	float worldSizeToPixels(float worldSize, float distance, float fovYRadians)
+	{
+		if (distance < 0.01f) distance = 0.01f;
+		const float halfScreen = (float) surfaceHeight * 0.5f;
+		return worldSize * halfScreen / (distance * tanf(fovYRadians * 0.5f));
+	}
+
+	void drawEffects(const Mat4 &viewProjection, float eyeX, float eyeY, float eyeZ, float fovYRadians)
+	{
+		if (particles.empty() && beams.empty()) return;
+
+		// Additive, depth-tested but not depth-writing: effects light up
+		// whatever is behind them and never occlude each other.
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+		glDepthMask(GL_FALSE);
+
+		if (!particles.empty()) {
+			std::vector<float> data;
+			data.reserve(particles.size() * 8);
+			for (size_t i = 0; i < particles.size(); i++) {
+				const Particle &particle = particles[i];
+				const float remaining = 1.0f - particle.age / particle.life;
+
+				const float dx = particle.x - eyeX, dy = particle.y - eyeY, dz = particle.z - eyeZ;
+				const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+				float pixels = worldSizeToPixels(particle.worldSize, distance, fovYRadians);
+				// Grow slightly as they age, the way a real puff spreads.
+				pixels *= 1.0f + (1.0f - remaining) * 0.8f;
+				pixels = std::min(std::max(pixels, 1.0f), 256.0f);
+
+				data.push_back(particle.x);
+				data.push_back(particle.y);
+				data.push_back(particle.z);
+				data.push_back(particle.r);
+				data.push_back(particle.g);
+				data.push_back(particle.b);
+				data.push_back(remaining * remaining);  // fade out, weighted late
+				data.push_back(pixels);
+			}
+
+			glUseProgram(particleProgram);
+			glUniformMatrix4fv(particleMvpLoc, 1, GL_FALSE, viewProjection.m);
+			glBindVertexArray(particleVao);
+			glBindBuffer(GL_ARRAY_BUFFER, particleVbo);
+			glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
+			glDrawArrays(GL_POINTS, 0, (GLsizei) particles.size());
+		}
+
+		if (!beams.empty()) {
+			std::vector<float> data;
+			data.reserve(beams.size() * 12);
+			for (size_t i = 0; i < beams.size(); i++) {
+				const Beam &beam = beams[i];
+				// The beam shader carries no alpha, so fade by dimming the
+				// colour - which is the same thing under additive blending.
+				const float fade = 1.0f - beam.age / beam.life;
+				const float r = beam.r * fade, g = beam.g * fade, b = beam.b * fade;
+				data.push_back(beam.x1); data.push_back(beam.y1); data.push_back(beam.z1);
+				data.push_back(r); data.push_back(g); data.push_back(b);
+				data.push_back(beam.x2); data.push_back(beam.y2); data.push_back(beam.z2);
+				data.push_back(r); data.push_back(g); data.push_back(b);
+			}
+
+			glUseProgram(sightProgram);
+			glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, viewProjection.m);
+			glBindVertexArray(beamVao);
+			glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
+			glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
+			glLineWidth(3.0f);
+			glDrawArrays(GL_LINES, 0, (GLsizei) beams.size() * 2);
+		}
+
+		glBindVertexArray(0);
+		glDepthMask(GL_TRUE);
+		glDisable(GL_BLEND);
 	}
 
 	// Ground height at an arbitrary world (x, z), clamped to the map -
@@ -915,6 +1229,37 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	pointColorLoc = glGetUniformLocation(pointProgram, "uColor");
 	pointSizeLoc = glGetUniformLocation(pointProgram, "uPointSize");
 
+	// M6 effects. Both buffers are refilled every frame from the live
+	// particle/beam lists, hence GL_DYNAMIC_DRAW and no initial allocation.
+	particleProgram = linkProgram(kParticleVertexShader, kParticleFragmentShader);
+	particleMvpLoc = glGetUniformLocation(particleProgram, "uMVP");
+	glGenVertexArrays(1, &particleVao);
+	glBindVertexArray(particleVao);
+	glGenBuffers(1, &particleVbo);
+	glBindBuffer(GL_ARRAY_BUFFER, particleVbo);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) 0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (3 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (7 * sizeof(float)));
+
+	// Beams reuse the sight program (position + rgb), so the layout must
+	// match what that shader declares.
+	glGenVertexArrays(1, &beamVao);
+	glBindVertexArray(beamVao);
+	glGenBuffers(1, &beamVbo);
+	glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+	glBindVertexArray(0);
+
+	particles.clear();
+	beams.clear();
+	lastFrameSeconds = 0.0;
+
 	terrainBuilt = false;
 	groundTextureBuilt = false;
 	g_modelCache.clear();
@@ -952,6 +1297,23 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	buildGroundTextureIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
 	applyScorchMarks(*ctx);
+
+	// M6 effects. Real elapsed time rather than a fixed step, so particles
+	// age correctly whatever the frame rate; clamped so that a stall (a
+	// landscape rebuild, the app resuming) doesn't teleport every live
+	// particle to the end of its life in one frame.
+	{
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		double nowSeconds = (double) now.tv_sec + (double) now.tv_nsec / 1e9;
+		float delta = (lastFrameSeconds > 0.0) ? (float) (nowSeconds - lastFrameSeconds) : 0.0f;
+		lastFrameSeconds = nowSeconds;
+		if (delta < 0.0f) delta = 0.0f;
+		if (delta > 0.1f) delta = 0.1f;
+
+		spawnEffects();
+		updateEffects(delta);
+	}
 
 	HeightMap &heightMap = ctx->getLandscapeMaps().getGroundMaps().getHeightMap();
 	int mapW = heightMap.getMapWidth();
@@ -1216,7 +1578,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 	glUseProgram(pointProgram);
 	drawPoints(mvp, unmodelledShots, 14.0f, 1.0f, 1.0f, 0.2f);
+	// The explosion marker dot is deliberately kept: it tracks the Explosion
+	// action for as long as it lives, whereas the particle burst below is
+	// raised once at detonation and then flies on its own.
 	drawPoints(mvp, explosionPositions, 20.0f, 1.0f, 0.5f, 0.0f);
+
+	// Effects last, so they blend additively over the finished scene.
+	drawEffects(mvp, eyeX, eyeY, eyeZ, 1.0472f /* must match the projection's fov */);
 }
 
 // M6: battlefield touch now drives the orbit camera (see the file-level
