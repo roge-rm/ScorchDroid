@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.ShoppingCart
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Whatshot
@@ -161,6 +162,13 @@ class GameHudState {
     // M6 parity: current wind (speed + direction) - it really does perturb
     // shots, and nothing showed it before. "" while there's no game yet.
     var windLabel by mutableStateOf("")
+    // M6 tank movement: the name of the current weapon when it is used by
+    // choosing a spot on the ground (Fuel, Rocket Fuel, Teleport) rather
+    // than by aiming, else "". While it is set, a battlefield tap picks a
+    // destination instead of aiming and the Fire button is inert - the same
+    // split upstream makes (TankKeyboardControlUtil refuses the fire key
+    // for a position-select weapon; the click handler does the work).
+    var positionSelectWeapon by mutableStateOf("")
     // M4 dialog conversion (see HudDialogs.kt) - the currently-shown modal,
     // if any. A plain mutable field like the rest of this state holder,
     // since it's written from ordinary (non-Composable) Kotlin in
@@ -200,6 +208,12 @@ fun GameHud(
             if (state.statusText.isNotEmpty()) HudText(state.statusText)
             if (state.hostingLabel.isNotEmpty()) HudText(state.hostingLabel)
             if (state.windLabel.isNotEmpty()) HudText(state.windLabel)
+            // Upstream shows "Click ground to activate {0}" as a banner the
+            // moment such a weapon is selected; this is the same prompt in
+            // the place this HUD already puts status.
+            if (state.positionSelectWeapon.isNotEmpty()) {
+                HudText("Tap the ground to use ${state.positionSelectWeapon}")
+            }
         }
 
         // Top-right: "session / view" controls - things about this session
@@ -267,6 +281,10 @@ fun GameHud(
                 // can't distinguish it with no feedback at all.
                 Button(
                     onClick = onFire,
+                    // Choosing a spot on the ground *is* the shot for these
+                    // weapons, so there is nothing for this button to do -
+                    // upstream's fire key is refused for the same reason.
+                    enabled = state.positionSelectWeapon.isEmpty(),
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     colors = if (state.shotLocked) {
                         ButtonDefaults.buttonColors(
@@ -278,12 +296,22 @@ fun GameHud(
                     },
                 ) {
                     Icon(
-                        if (state.shotLocked) Icons.Filled.HourglassTop else Icons.Filled.GpsFixed,
+                        when {
+                            state.positionSelectWeapon.isNotEmpty() -> Icons.Filled.TouchApp
+                            state.shotLocked -> Icons.Filled.HourglassTop
+                            else -> Icons.Filled.GpsFixed
+                        },
                         contentDescription = null,
                         modifier = Modifier.size(18.dp),
                     )
                     Spacer(Modifier.width(6.dp))
-                    Text(if (state.shotLocked) "LOCKED" else "FIRE")
+                    Text(
+                        when {
+                            state.positionSelectWeapon.isNotEmpty() -> "TAP MAP"
+                            state.shotLocked -> "LOCKED"
+                            else -> "FIRE"
+                        },
+                    )
                 }
                 if (state.buyingPhase) {
                     Spacer(Modifier.width(8.dp))

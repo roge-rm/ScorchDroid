@@ -81,6 +81,26 @@ namespace LandscapeTextureBuilder
 	Rect applyScorch(ScorchedContext &context, Texture &texture,
 					 int centreX, int centreY, float radius,
 					 const std::string &textureName);
+
+	// Where a tank with a position-selecting weapon (Fuel, Rocket Fuel,
+	// Teleport) is allowed to go, drawn over the ground the way upstream's
+	// MovementMap::movementTexture does it: reachable ground at full
+	// brightness, everything else at quarter brightness, and a red line
+	// along the boundary between them.
+	//
+	// [mask] is one byte per landscape square, row-major by landscape y,
+	// non-zero where the tank can move to - see MovementStore.h for who
+	// fills it in. Returns a tinted copy rather than modifying [source],
+	// because the untinted texture has to survive to be put back when the
+	// weapon is switched away, and it keeps accumulating scorch marks in
+	// the meantime.
+	//
+	// Upstream compares each texel against its right and lower neighbour to
+	// find the boundary, which is what gives the outline its one-texel
+	// width regardless of how coarse the landscape grid is; this does the
+	// same.
+	Texture applyMovementMask(const Texture &source,
+							  const unsigned char *mask, int maskWidth, int maskHeight);
 }
 
 #endif  // __INCLUDE_LandscapeTextureBuilder_hpp_INCLUDE__

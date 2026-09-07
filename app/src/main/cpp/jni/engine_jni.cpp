@@ -36,6 +36,14 @@ std::mutex g_engineMutex;
 #include <SoundEventQueue.h>
 #include <target/TargetLife.hpp>
 #include <landscapemap/LandscapeMaps.hpp>
+// M6 tank movement: upstream fires a WeaponMoveTank as an ordinary shot
+// with a selected landscape position, and MovementMap decides what is
+// reachable - see firePositionSelect()/refreshMovementMask() below.
+#include <landscapemap/MovementMap.hpp>
+#include <weapons/WeaponMoveTank.hpp>
+#include <weapons/AccessoryStore.hpp>
+#include <target/TargetState.hpp>
+#include <MovementStore.h>
 #include <landscapemap/GroundMaps.hpp>
 #include <landscapemap/HeightMap.hpp>
 #include <simactions/TankAddSimAction.hpp>
@@ -61,6 +69,7 @@ std::mutex g_engineMutex;
 #include <common/OptionsScorched.hpp>
 #include <ClientContext.hpp>
 #include <EngineState.hpp>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -491,7 +500,16 @@ Java_com_rm_scorchdroid_NativeBridge_getWeaponShop(JNIEnv *env, jobject /* this 
                     << accessory->getPrice() << '|'
                     << tank->getAccessories().getAccessoryCount(accessory) << '|'
                     << (accessory == current ? 1 : 0) << '|'
-                    << typeName;
+                    << typeName << '|'
+                    // Which shop tab upstream files this under, which is not
+                    // always what its type implies: Fuel and Rocket Fuel are
+                    // weapons by type but carry <tabgroup>defense</tabgroup>
+                    // in accessories.xml, because you buy them alongside
+                    // shields and parachutes rather than alongside missiles.
+                    // Accessory::parseXML defaults the field from the type
+                    // when the data doesn't say, so reading it is always at
+                    // least as good as inferring it.
+                    << accessory->getTabGroupName();
                 rows.push_back(row.str());
             }
         }
@@ -777,6 +795,269 @@ Java_com_rm_scorchdroid_NativeBridge_aimAtPoint(JNIEnv *, jobject, jfloat landsc
     return angle;
 }
 
+// M6 tank movement (and every other "click the ground to use it" weapon).
+//
+// Upstream has no separate move action: moving is firing a WeaponMoveTank
+// accessory - Fuel, Rocket Fuel - as an ordinary eShot whose selected
+// landscape position is the destination (see TankAICurrentMove::
+// makeMoveShot for the bot doing exactly this, and WeaponSelectPosition::
+// fireWeapon, which swaps the shot's start position for the selected one
+// before handing off to the aimed weapon). The server-side action,
+// TanketMovement, then re-runs MovementMap itself and walks the tank there
+// a square at a time, spending one fuel per square.
+//
+// So the whole feature is a property of the *current weapon*, exactly as
+// upstream models it: an accessory whose getPositionSelect() is not
+// ePositionSelectNone turns the battlefield tap from "aim" into "choose a
+// destination", and the normal fire button stops working while it is
+// selected (TankKeyboardControlUtil::keyboardCheck refuses the fire key for
+// the same reason). Nothing here is movement-specific - Teleport works
+// through the same path, which is why this is named for position select
+// rather than for movement.
+
+// The current weapon if it needs a landscape position, else nullptr.
+static Accessory *currentPositionSelectWeapon(Tank *tank) {
+    if (!tank) return nullptr;
+    Accessory *weapon = tank->getAccessories().getWeapons().getCurrent();
+    if (!weapon) return nullptr;
+    if (weapon->getPositionSelect() == Accessory::ePositionSelectNone) return nullptr;
+    return weapon;
+}
+
+// How far the tank may travel with [weapon] selected. Fuel spends one unit
+// per square and is capped by the weapon's own maximum range (upstream's
+// MovementMap::getFuel); the limit variants carry a fixed distance instead.
+static fixed positionSelectRange(ScorchedContext &ctx, Tank *tank, Accessory *weapon) {
+    switch (weapon->getPositionSelect()) {
+        case Accessory::ePositionSelectFuel: {
+            WeaponMoveTank *moveWeapon = (WeaponMoveTank *)
+                ctx.getAccessoryStore().findAccessoryPartByAccessoryId(
+                    weapon->getAccessoryId(), "WeaponMoveTank");
+            if (!moveWeapon) return fixed(0);
+            MovementMap map(tank, ctx);
+            return map.getFuel(moveWeapon);
+        }
+        case Accessory::ePositionSelectFuelLimit:
+        case Accessory::ePositionSelectLimit:
+            return fixed(weapon->getPositionSelectLimit());
+        default:
+            return fixed(0);
+    }
+}
+
+// Can this tank actually use [weapon] on that square? Upstream asks exactly
+// this before firing (TargetCamera::landIntersect): a flood fill limited by
+// the fuel for the two fuel types, a plain distance for the limit type.
+static bool positionSelectAllowed(ScorchedContext &ctx, Tank *tank, Accessory *weapon,
+                                  int posX, int posY) {
+    GroundMaps &ground = ctx.getLandscapeMaps().getGroundMaps();
+    const int arenaX = ground.getArenaX(), arenaY = ground.getArenaY();
+    const int arenaW = ground.getArenaWidth(), arenaH = ground.getArenaHeight();
+    if (posX <= arenaX || posX >= arenaX + arenaW ||
+        posY <= arenaY || posY >= arenaY + arenaH) {
+        return false;
+    }
+
+    const Accessory::PositionSelectType type = weapon->getPositionSelect();
+    if (type == Accessory::ePositionSelectLimit) {
+        FixedVector target(fixed(posX), fixed(posY), fixed(0));
+        return (tank->getLife().getTargetPosition() - target).Magnitude() <=
+               fixed(weapon->getPositionSelectLimit());
+    }
+    if (type == Accessory::ePositionSelectGeneric) return true;
+
+    fixed range = positionSelectRange(ctx, tank, weapon);
+    MovementMap map(tank, ctx);
+    FixedVector target(fixed(posX), fixed(posY), fixed(0));
+    map.calculatePosition(target, range);
+    MovementMap::MovementMapEntry &entry = map.getEntry(posX, posY);
+
+    // The distance test is ours, and it matters. Upstream checks the type
+    // alone, but calculatePosition's fuel limit gates *expansion*, not
+    // insertion: squares past the range still get marked eMovement on the
+    // way through the queue, so the type by itself is not a range check.
+    // On a touch screen that shows up immediately - an oblique camera turns
+    // a tap near the top of the screen into a point most of a map away, and
+    // it was accepted. Checking the path distance as well makes what a tap
+    // accepts agree with the area painted on the ground, which is the only
+    // thing the player can see.
+    return entry.type == MovementMap::eMovement && entry.dist <= range;
+}
+
+// Keeps ScorchDroidMovement's published mask in step with the current
+// weapon, for the renderer to paint over the ground. Called every tick from
+// tickEngine() with the engine lock already held.
+//
+// Upstream does this once, in TankWeaponSwitcher::switchWeapon - but that
+// whole function is inside `#ifndef S3D_SERVER`, so in this build it is an
+// empty stub, and hooking it would mean a submodule patch for something the
+// simulation side can work out for itself. Recomputing on a change of
+// weapon, tank position or fuel count covers every case that hook would
+// have, and a few it wouldn't (buying more fuel mid-phase widens the area
+// immediately).
+static void refreshMovementMask(ScorchedContext &ctx, Tank *tank) {
+    static unsigned int lastWeaponId = 0;
+    static unsigned int lastLandscape = 0xffffffffu;
+    static int lastTankX = -1, lastTankY = -1;
+    static int lastCount = -2;
+
+    Accessory *weapon = currentPositionSelectWeapon(tank);
+    if (!weapon || !tank->getAlive()) {
+        ScorchDroidMovement::clear();
+        lastWeaponId = 0;
+        return;
+    }
+
+    // Never while the tank is actually being walked somewhere: its position
+    // changes every tick, so this would re-run the flood fill every frame
+    // of the move, and the answer is about to be stale anyway.
+    if (tank->getTargetState().getMoving()) return;
+
+    FixedVector &pos = tank->getLife().getTargetPosition();
+    const int tankX = pos[0].asInt(), tankY = pos[1].asInt();
+    const int count = tank->getAccessories().getAccessoryCount(weapon);
+    const unsigned int landscape =
+        ctx.getLandscapeMaps().getDefinitions().getDefinition().getDefinitionNumber();
+    if (weapon->getAccessoryId() == lastWeaponId && landscape == lastLandscape &&
+        tankX == lastTankX && tankY == lastTankY && count == lastCount) {
+        return;
+    }
+    lastWeaponId = weapon->getAccessoryId();
+    lastLandscape = landscape;
+    lastTankX = tankX; lastTankY = tankY; lastCount = count;
+
+    GroundMaps &ground = ctx.getLandscapeMaps().getGroundMaps();
+    const int width = ground.getLandscapeWidth();
+    const int height = ground.getLandscapeHeight();
+    if (width <= 0 || height <= 0) return;
+
+    std::vector<unsigned char> reachable((size_t) width * height, 0);
+    // Not const: fixed::asFloat() isn't a const member.
+    fixed range = positionSelectRange(ctx, tank, weapon);
+
+    if (weapon->getPositionSelect() == Accessory::ePositionSelectLimit) {
+        // A plain radius, which is what upstream's MovementMap::limitTexture
+        // draws for this type - no pathfinding, so terrain doesn't matter.
+        const float limit = range.asFloat();
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                const float dx = (float) x - (float) tankX;
+                const float dy = (float) y - (float) tankY;
+                if (dx * dx + dy * dy <= limit * limit) {
+                    reachable[(size_t) y * width + x] = 1;
+                }
+            }
+        }
+    } else {
+        MovementMap map(tank, ctx);
+        map.calculateAllPositions(range);
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                if (map.getEntry(x, y).type == MovementMap::eMovement) {
+                    reachable[(size_t) y * width + x] = 1;
+                }
+            }
+        }
+    }
+
+    int reachCount = 0, minX = width, minY = height, maxX = -1, maxY = -1;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (!reachable[(size_t) y * width + x]) continue;
+            reachCount++;
+            minX = std::min(minX, x); maxX = std::max(maxX, x);
+            minY = std::min(minY, y); maxY = std::max(maxY, y);
+        }
+    }
+    LOGI("Movement mask: weapon=%s range=%.0f tank=(%d,%d) reachable=%d box=[%d,%d]-[%d,%d]",
+         weapon->getName(), range.asFloat(), tankX, tankY, reachCount, minX, minY, maxX, maxY);
+    ScorchDroidMovement::publish(width, height, std::move(reachable));
+}
+
+// M6: the current weapon's position-select mode, for the HUD, as
+// "type|weaponName|range" - or "" when the current weapon is an ordinary
+// one and the battlefield tap should keep aiming. [type] is upstream's own
+// name for it (fuel / fuellimit / limit / generic).
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getPositionSelect(JNIEnv *env, jobject /* this */) {
+    std::string result;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        Tank *tank = findMyTank();
+        Accessory *weapon = currentPositionSelectWeapon(tank);
+        if (ctx && tank && weapon) {
+            const char *typeName = "generic";
+            switch (weapon->getPositionSelect()) {
+                case Accessory::ePositionSelectFuel:      typeName = "fuel"; break;
+                case Accessory::ePositionSelectFuelLimit: typeName = "fuellimit"; break;
+                case Accessory::ePositionSelectLimit:     typeName = "limit"; break;
+                default: break;
+            }
+            std::ostringstream out;
+            out << typeName << '|' << weapon->getName() << '|'
+                << positionSelectRange(*ctx, tank, weapon).asFloat();
+            result = out.str();
+        }
+    }
+    return env->NewStringUTF(result.c_str());
+}
+
+// M6: uses the current position-select weapon on a landscape point - moving
+// the tank there, for the fuel weapons. Returns false if the point is out
+// of reach, which is what upstream's click handler does too (it simply
+// returns and nothing happens); the HUD says so rather than leaving the tap
+// looking ignored.
+//
+// The message is the same eShot every other weapon sends, carrying the
+// selected position - see the block comment above. Aim and power go along
+// unchanged because the engine records them for everyone else's benefit.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_firePositionSelect(JNIEnv *env, jobject /* this */,
+                                                        jfloat landscapeX, jfloat landscapeY) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    ScorchedContext *ctx = activeContext();
+    Tank *tank = findMyTank();
+    if (!ctx || !tank || !tank->getAlive()) return JNI_FALSE;
+
+    Accessory *weapon = currentPositionSelectWeapon(tank);
+    if (!weapon) return JNI_FALSE;
+
+    const int posX = (int) landscapeX, posY = (int) landscapeY;
+    if (!positionSelectAllowed(*ctx, tank, weapon, posX, posY)) {
+        FixedVector &at = tank->getLife().getTargetPosition();
+        LOGI("firePositionSelect: (%d,%d) out of reach for %s from (%.0f,%.0f)",
+             posX, posY, weapon->getName(), at[0].asFloat(), at[1].asFloat());
+        return JNI_FALSE;
+    }
+
+    tank->getShotInfo().setSelectPosition(posX, posY);
+
+    ComsPlayedMoveMessage message((unsigned int) tank->getPlayerId(),
+                                  tank->getShotInfo().getMoveId(),
+                                  ComsPlayedMoveMessage::eShot);
+    message.setShot(
+        weapon->getAccessoryId(),
+        tank->getShotInfo().getRotationGunXY(),
+        tank->getShotInfo().getRotationGunYZ(),
+        tank->getShotInfo().getPower(),
+        posX, posY
+    );
+
+    bool ok;
+    if (g_mode == EngineMode::kHost) {
+        ScorchedServer::instance()->getServerState().moveFinished(message);
+        ok = true;
+    } else {
+        ok = g_clientContext->sendGameMessage(message);
+    }
+    FixedVector &from = tank->getLife().getTargetPosition();
+    LOGI("firePositionSelect: player=%u weapon=%s from=(%.0f,%.0f) to=(%d,%d) ok=%d",
+         tank->getPlayerId(), weapon->getName(),
+         from[0].asFloat(), from[1].asFloat(), posX, posY, ok);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
 // M6 HUD: the move id the server has currently granted "my tank", or 0 if
 // none is outstanding. ServerTurns::playMove sets it when a tanket is given
 // a move and playMoveFinished clears it once that move is submitted, so a
@@ -839,6 +1120,7 @@ Java_com_rm_scorchdroid_NativeBridge_tickEngine(JNIEnv *env, jobject /* this */)
     if (g_mode == EngineMode::kClient) {
         Logger::instance()->processLogEntries();
         if (g_clientContext) g_clientContext->tick();
+        if (ScorchedContext *ctx = activeContext()) refreshMovementMask(*ctx, findMyTank());
         return;
     }
 
@@ -915,6 +1197,10 @@ Java_com_rm_scorchdroid_NativeBridge_tickEngine(JNIEnv *env, jobject /* this */)
     server->getServerFileServer().simulate();
     server->getServerChannelManager().simulate(timeDifference);
     server->getTimedMessage().simulate();
+
+    // Where "my tank" may move to, for the renderer to paint over the
+    // ground - cheap unless the answer actually changed.
+    refreshMovementMask(server->getContext(), findMyTank());
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

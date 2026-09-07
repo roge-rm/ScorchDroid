@@ -48,6 +48,8 @@
 #include <landscapemap/GroundMaps.hpp>
 #include <landscapemap/HeightMap.hpp>
 #include <landscapemap/DeformLandscape.hpp>
+#include <landscapemap/MovementMap.hpp>
+#include <weapons/WeaponMoveTank.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
 #include <landscapedef/LandscapeDefinition.hpp>
@@ -682,6 +684,196 @@ namespace
 		check(true, "deform ran without needing any client-only code");
 	}
 
+	// M6 tank movement. Upstream has no "move" action: moving is firing a
+	// WeaponMoveTank accessory (Fuel, Rocket Fuel) as an ordinary eShot
+	// whose selected landscape position is the destination, with
+	// MovementMap deciding what is reachable. This checks that reading of
+	// the mechanism against the real engine, because it is the part
+	// engine_jni.cpp's firePositionSelect() is built on and the part that
+	// would silently change under a submodule bump - the JNI wrapper itself
+	// can't run here, but everything it relies on can.
+	void testTankMovement()
+	{
+		printf("\ntank movement (Fuel as a position-select weapon):\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+		ScorchedContext &context = server->getContext();
+
+		Tank *tank = nullptr;
+		std::map<unsigned int, Tank *> &tanks = server->getTargetContainer().getTanks();
+		for (auto &entry : tanks)
+		{
+			if (entry.second->getDestinationId() == 1) { tank = entry.second; break; }
+		}
+		check(tank != nullptr, "human tank from the earlier test is still present");
+		if (!tank) return;
+
+		Accessory *fuel = context.getAccessoryStore().findByPrimaryAccessoryName("Fuel");
+		check(fuel != nullptr, "the \"Fuel\" accessory exists in the real data");
+		if (!fuel) return;
+
+		// The property the whole feature hangs off: this is what makes the
+		// battlefield tap choose a destination instead of aiming.
+		check(fuel->getPositionSelect() == Accessory::ePositionSelectFuel,
+			"Fuel is a position-select (fuel) accessory, not an aimed weapon");
+		WeaponMoveTank *moveWeapon = (WeaponMoveTank *)
+			context.getAccessoryStore().findAccessoryPartByAccessoryId(
+				fuel->getAccessoryId(), "WeaponMoveTank");
+		check(moveWeapon != nullptr, "Fuel's action is a WeaponMoveTank");
+		if (!moveWeapon) return;
+
+		// Put the tank somewhere it could actually drive from. The tanks in
+		// this suite were added directly rather than placed by a round, so
+		// they sit at (0,0) - and upstream refuses to move within 5 units of
+		// the arena edge (MovementMap::addPoint), which would make every
+		// square below unreachable for a reason that has nothing to do with
+		// what is being tested.
+		GroundMaps &ground = context.getLandscapeMaps().getGroundMaps();
+		const int midX = ground.getLandscapeWidth() / 2;
+		const int midY = ground.getLandscapeHeight() / 2;
+		FixedVector placed(fixed(midX), fixed(midY),
+			ground.getHeight(midX, midY));
+		tank->getLife().setTargetPosition(placed);
+
+		// Fuel is spent one unit per square, so the range is however many
+		// units are held, capped by the weapon's own maximum (getFuel).
+		tank->getAccessories().add(fuel, 20, false);
+		check(tank->getAccessories().getAccessoryCount(fuel) >= 20,
+			"the tank now holds fuel to move with");
+
+		MovementMap withFuel(tank, context);
+		fixed range = withFuel.getFuel(moveWeapon);
+		check(range > fixed(0), "MovementMap reports a non-zero range from the fuel held");
+		check(range <= moveWeapon->getMaximumRange(),
+			"the range is capped by the weapon's own maximum, not just the count");
+
+		withFuel.calculateAllPositions(range);
+		FixedVector &start = tank->getLife().getTargetPosition();
+		const int startX = start[0].asInt(), startY = start[1].asInt();
+
+		check(withFuel.getEntry(startX, startY).type == MovementMap::eMovement,
+			"the square the tank is standing on is reachable");
+
+		// Somewhere far beyond any fuel: the flood fill must not reach it,
+		// or "out of range" would never trigger and the overlay would be
+		// meaningless.
+		const int farX = std::min(startX + 200, ground.getLandscapeWidth() - 1);
+		const int farY = std::min(startY + 200, ground.getLandscapeHeight() - 1);
+		check(withFuel.getEntry(farX, farY).type != MovementMap::eMovement,
+			"a square 200 units away is out of range");
+
+		// The targeted search, which is what a tap actually goes through
+		// (upstream's TargetCamera::landIntersect uses calculatePosition,
+		// not the flood fill). Its fuel limit gates *expansion* but not
+		// insertion, so squares beyond the range can still be marked
+		// eMovement - the type alone is not a range check, and the distance
+		// has to be tested too or a far tap is accepted.
+		MovementMap targeted(tank, context);
+		FixedVector farPoint(fixed(farX), fixed(farY), fixed(0));
+		targeted.calculatePosition(farPoint, range);
+		MovementMap::MovementMapEntry &farEntry = targeted.getEntry(farX, farY);
+		check(!(farEntry.type == MovementMap::eMovement && farEntry.dist <= range),
+			"a far square is rejected once the path distance is checked too");
+
+		// A neighbouring square should be reachable unless the tank is
+		// walled in - scan the ring around it so a cliff on one side
+		// doesn't make this flaky.
+		bool neighbourReachable = false;
+		int destX = startX, destY = startY;
+		for (int dy = -3; dy <= 3 && !neighbourReachable; dy++)
+		{
+			for (int dx = -3; dx <= 3 && !neighbourReachable; dx++)
+			{
+				if (dx == 0 && dy == 0) continue;
+				if (withFuel.getEntry(startX + dx, startY + dy).type == MovementMap::eMovement)
+				{
+					neighbourReachable = true;
+					destX = startX + dx;
+					destY = startY + dy;
+				}
+			}
+		}
+		check(neighbourReachable, "at least one nearby square is reachable");
+		if (!neighbourReachable) return;
+
+		// With no fuel at all the same square must become unreachable -
+		// this is what stops a tank moving for free.
+		tank->getAccessories().rm(fuel, tank->getAccessories().getAccessoryCount(fuel));
+		MovementMap noFuel(tank, context);
+		check(noFuel.getFuel(moveWeapon) == fixed(0), "no fuel means no range");
+		noFuel.calculateAllPositions(noFuel.getFuel(moveWeapon));
+		check(noFuel.getEntry(destX, destY).type != MovementMap::eMovement,
+			"with no fuel held, a neighbouring square is no longer reachable");
+
+		// And the move message itself is an ordinary shot carrying the
+		// destination - the shape engine_jni.cpp sends.
+		tank->getAccessories().add(fuel, 20, false);
+		tank->getAccessories().getWeapons().setWeapon(fuel);
+		check(tank->getAccessories().getWeapons().getCurrent() == fuel,
+			"Fuel can be made the current weapon, like any other");
+
+		tank->getShotInfo().setSelectPosition(destX, destY);
+		ComsPlayedMoveMessage move(tank->getPlayerId(),
+			tank->getShotInfo().getMoveId(), ComsPlayedMoveMessage::eShot);
+		move.setShot(fuel->getAccessoryId(),
+			tank->getShotInfo().getRotationGunXY(),
+			tank->getShotInfo().getRotationGunYZ(),
+			tank->getShotInfo().getPower(),
+			destX, destY);
+		check(move.getType() == ComsPlayedMoveMessage::eShot,
+			"a move is submitted as an eShot, not a move type of its own");
+		check(move.getSelectPositionX() == destX && move.getSelectPositionY() == destY,
+			"the move message carries the chosen destination");
+		check(move.getWeaponId() == fuel->getAccessoryId(),
+			"the move message carries the fuel accessory as its weapon");
+
+		// The overlay the renderer paints from that mask, checked here
+		// because it is pure pixel work: upstream's movementTexture leaves
+		// reachable ground alone, quarters everything else, and draws a red
+		// line along the boundary between them.
+		LandscapeTextureBuilder::Texture plain;
+		plain.width = plain.height = 64;
+		plain.rgb.assign(64 * 64 * 3, 200);
+
+		// A 20x20 reachable block in the middle of a 64x64 landscape.
+		std::vector<unsigned char> mask(64 * 64, 0);
+		for (int y = 22; y < 42; y++)
+			for (int x = 22; x < 42; x++)
+				mask[y * 64 + x] = 1;
+
+		LandscapeTextureBuilder::Texture tinted =
+			LandscapeTextureBuilder::applyMovementMask(plain, mask.data(), 64, 64);
+		check(tinted.valid(), "the movement overlay produces a texture");
+		if (tinted.valid())
+		{
+			auto pixel = [&](int x, int y) -> const unsigned char * {
+				return &tinted.rgb[(size_t(y) * tinted.width + x) * 3];
+			};
+
+			const unsigned char *inside = pixel(32, 32);
+			check(inside[0] == 200 && inside[1] == 200 && inside[2] == 200,
+				"ground the tank can reach keeps its full brightness");
+
+			const unsigned char *outside = pixel(2, 2);
+			check(outside[0] == 50 && outside[1] == 50 && outside[2] == 50,
+				"ground it cannot reach is quartered");
+
+			// The boundary is where a texel differs from its right or lower
+			// neighbour, so the last reachable column is the red one.
+			bool sawRed = false;
+			for (int y = 22; y < 42 && !sawRed; y++)
+			{
+				const unsigned char *edge = pixel(41, y);
+				if (edge[0] == 255 && edge[1] == 0 && edge[2] == 0) sawRed = true;
+			}
+			check(sawRed, "the edge of the reachable area is drawn in red");
+
+			// And the tinted copy must not have touched the source, which
+			// has to survive to be put back when the weapon changes.
+			check(plain.rgb[0] == 200, "the untinted ground texture is left alone");
+		}
+	}
+
 	// M6 tap-to-aim: the screen-pixel -> landscape-point round trip that
 	// renderer_jni.cpp's nativePickTerrain does.
 	//
@@ -786,6 +978,7 @@ namespace
 		}
 		check(roundTripped == pointCount,
 			"every test point round-tripped through the screen and back");
+
 	}
 
 	// M5: regression check for engine_jni.cpp's startLocalGame() switch
@@ -1152,6 +1345,7 @@ int main(int argc, char **argv)
 	testNonShotMoves();
 	testTerrainDeformation();
 	testCameraPickRay();
+	testTankMovement();
 	testRealTcpHostAndConnect();
 	testClientJoin();
 

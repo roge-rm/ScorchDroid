@@ -52,6 +52,7 @@
 #include <EngineState.hpp>
 #include <Mat4.hpp>
 #include <LandscapeTextureBuilder.hpp>
+#include <MovementStore.h>
 #include <DeformEventQueue.h>
 #include <EffectEventQueue.h>
 #include <TracerStore.h>
@@ -96,6 +97,13 @@ namespace
 	// every earlier one - marks accumulate over a round the way upstream's
 	// do. Re-reading it back off the GPU each time would be far worse.
 	LandscapeTextureBuilder::Texture groundTextureData;
+	// M6 tank movement: the version of ScorchDroidMovement's mask currently
+	// painted over the ground, and whether anything is painted at all. The
+	// mask itself is recomputed on the simulation side (see engine_jni's
+	// refreshMovementMask); this side only notices the version change and
+	// re-uploads.
+	unsigned int paintedMovementVersion = 0;
+	bool movementOverlayPainted = false;
 	GLint  pointMvpLoc = -1, pointColorLoc = -1, pointSizeLoc = -1;
 	GLuint meshProgram = 0;
 	GLint  meshMvpLoc = -1, meshLightDirLoc = -1, meshColorLoc = -1;
@@ -544,6 +552,12 @@ namespace
 			groundTextureData = LandscapeTextureBuilder::Texture();
 			terrainBuilt = false;
 			groundTextureBuilt = false;
+			// The new landscape gets a freshly built texture, so whatever
+			// was painted over the old one is gone with it - and the
+			// version has to be forced to re-sync, or a mask published
+			// before this rebuild would never be painted.
+			movementOverlayPainted = false;
+			paintedMovementVersion = 0;
 			// Any pending crater belongs to the landscape being thrown
 			// away - applying it to the new one would corrupt unrelated
 			// vertices.
@@ -1170,6 +1184,53 @@ namespace
 		return heightMap.getHeight(sx, sy).asFloat();
 	}
 
+	// Replaces the whole ground texture on the GPU from a CPU-side image.
+	// 512*3 bytes per row is 4-byte aligned, so this needs no unpack-
+	// alignment fiddling of its own (unlike the scorch patches below).
+	void uploadGroundTexture(const LandscapeTextureBuilder::Texture &texture)
+	{
+		if (groundTexture == 0 || !texture.valid()) return;
+		glBindTexture(GL_TEXTURE_2D, groundTexture);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, texture.width, texture.height,
+						GL_RGB, GL_UNSIGNED_BYTE, texture.rgb.data());
+		glGenerateMipmap(GL_TEXTURE_2D);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
+	// M6 tank movement: paints where the tank may move onto the ground, the
+	// way upstream does when a position-selecting weapon becomes current
+	// (TankWeaponSwitcher::switchWeapon -> MovementMap::movementTexture).
+	//
+	// The tint is never written into groundTextureData: that copy has to
+	// survive to be put back when the weapon is switched away, and it keeps
+	// collecting scorch marks underneath in the meantime - exactly what
+	// upstream's restoreLandscapeTexture() relies on too.
+	void syncMovementOverlay()
+	{
+		if (!groundTextureBuilt || groundTexture == 0 || !groundTextureData.valid()) return;
+
+		const unsigned int version = ScorchDroidMovement::version();
+		if (version == paintedMovementVersion) return;
+		paintedMovementVersion = version;
+
+		int width = 0, height = 0;
+		std::vector<unsigned char> mask;
+		if (!ScorchDroidMovement::get(width, height, mask)) {
+			if (movementOverlayPainted) {
+				uploadGroundTexture(groundTextureData);
+				movementOverlayPainted = false;
+			}
+			return;
+		}
+
+		LandscapeTextureBuilder::Texture tinted =
+			LandscapeTextureBuilder::applyMovementMask(
+				groundTextureData, mask.data(), width, height);
+		if (!tinted.valid()) return;
+		uploadGroundTexture(tinted);
+		movementOverlayPainted = true;
+	}
+
 	// M6 scorch marks: the burnt patch a blast leaves on the ground.
 	// Upstream paints these straight into the landscape texture
 	// (DeformTextures::deformLandscape, client-only), and so do we - into
@@ -1226,6 +1287,12 @@ namespace
 		if (painted > 0) glGenerateMipmap(GL_TEXTURE_2D);
 		glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
 		glBindTexture(GL_TEXTURE_2D, 0);
+
+		// Those patches came from the untinted copy, so with the movement
+		// overlay up they punch un-darkened holes in it. Rare (it needs a
+		// blast while a move is being chosen) and cheap to put right: ask
+		// for a full repaint on the next frame.
+		if (painted > 0 && movementOverlayPainted) paintedMovementVersion--;
 
 		if (painted > 0 && terrainScorchLogsLeft > 0) {
 			terrainScorchLogsLeft--;
@@ -1587,6 +1654,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	buildGroundTextureIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
 	applyScorchMarks(*ctx);
+	syncMovementOverlay();
 
 	// M6 effects. Real elapsed time rather than a fixed step, so particles
 	// age correctly whatever the frame rate; clamped so that a stall (a

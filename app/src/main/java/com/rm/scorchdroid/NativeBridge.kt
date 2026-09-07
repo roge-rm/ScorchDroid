@@ -173,17 +173,37 @@ object NativeBridge {
     /**
      * M6: "my tank"'s current aim as
      * "angleDegrees|elevationDegrees|powerFraction", or "" if there's no
-     * tank yet. The angle needs no conversion for the player-facing dial -
-     * the two share a sense, established by measurement rather than by
-     * reading the velocity formula (see MainActivity.engineAngleFromDial).
+     * tank yet. The angle is the engine's counter-clockwise bearing; the
+     * player-facing compass dial is its mirror (see
+     * MainActivity.dialAngleFromEngine).
      */
     external fun getMyAim(): String
 
     /**
+     * M6 tank movement: the current weapon's position-select mode as
+     * "type|weaponName|range", or "" when an ordinary weapon is selected.
+     *
+     * Non-empty means the weapon is used by choosing a spot on the ground
+     * rather than by aiming and firing - upstream's Fuel and Rocket Fuel
+     * (which move the tank) and Teleport work this way. [type] is
+     * upstream's own name: fuel, fuellimit, limit or generic.
+     */
+    external fun getPositionSelect(): String
+
+    /**
+     * M6 tank movement: uses the current position-select weapon on a
+     * landscape point - from GameRenderer.nativePickTerrain. Returns false
+     * if that point is out of reach, so the HUD can say so instead of
+     * leaving the tap looking ignored.
+     */
+    external fun firePositionSelect(landscapeX: Float, landscapeY: Float): Boolean
+
+    /**
      * M6: applies the aiming sliders to "my tank"'s real turret state, so
      * the rendered gun and the aim sight follow the player's aim instead of
-     * only moving when a shot is fired. [angleDegrees] is the player-facing
-     * clockwise-from-up dial (mirrored engine-side); [power] is 0..1.
+     * only moving when a shot is fired. [angleDegrees] is the engine's own
+     * bearing, not the player dial - convert with
+     * MainActivity.engineAngleFromDial first; [power] is 0..1.
      */
     external fun setAim(angleDegrees: Float, elevationDegrees: Float, power: Float): Boolean
 }
@@ -243,6 +263,13 @@ data class WeaponShopEntry(
     val ownedCount: Int,
     val isCurrentWeapon: Boolean,
     val type: String,
+    /**
+     * Upstream's own shop tab for this accessory (`<tabgroup>`): "weapon"
+     * or "defense". Not always what [type] implies - Fuel and Rocket Fuel
+     * are weapons that upstream files under defense, since they are bought
+     * alongside shields rather than alongside missiles.
+     */
+    val tabGroup: String,
 ) {
     val isOwned: Boolean get() = ownedCount != 0
     val ownedLabel: String get() = if (ownedCount < 0) "unlimited" else ownedCount.toString()
@@ -265,7 +292,7 @@ data class WeaponShopEntry(
 
 fun parseWeaponShop(rows: Array<String>): List<WeaponShopEntry> = rows.mapNotNull { row ->
     val parts = row.split("|")
-    if (parts.size != 6) return@mapNotNull null
+    if (parts.size != 7) return@mapNotNull null
     WeaponShopEntry(
         accessoryId = parts[0].toIntOrNull() ?: return@mapNotNull null,
         name = parts[1],
@@ -273,5 +300,6 @@ fun parseWeaponShop(rows: Array<String>): List<WeaponShopEntry> = rows.mapNotNul
         ownedCount = parts[3].toIntOrNull() ?: return@mapNotNull null,
         isCurrentWeapon = parts[4] == "1",
         type = parts[5],
+        tabGroup = parts[6],
     )
 }

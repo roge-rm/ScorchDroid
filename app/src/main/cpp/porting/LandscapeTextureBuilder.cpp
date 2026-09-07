@@ -313,4 +313,47 @@ Rect applyScorch(ScorchedContext &context, Texture &texture,
 	return touched;
 }
 
+Texture applyMovementMask(
+	const Texture &source, const unsigned char *mask, int maskWidth, int maskHeight)
+{
+	Texture result;
+	if (!source.valid() || !mask || maskWidth <= 0 || maskHeight <= 0) return result;
+
+	result.width = source.width;
+	result.height = source.height;
+	result.rgb = source.rgb;
+
+	// Landscape square under a texel. The texture covers the whole
+	// landscape once (see build()), so this is a straight scale.
+	auto sampleMask = [&](int px, int py) -> bool {
+		int mx = px * maskWidth / source.width;
+		int my = py * maskHeight / source.height;
+		mx = std::min(std::max(mx, 0), maskWidth - 1);
+		my = std::min(std::max(my, 0), maskHeight - 1);
+		return mask[(size_t) my * maskWidth + mx] != 0;
+	};
+
+	for (int y = 0; y < result.height; y++) {
+		const int y1 = std::min(y + 1, result.height - 1);
+		for (int x = 0; x < result.width; x++) {
+			const int x1 = std::min(x + 1, result.width - 1);
+
+			const bool here = sampleMask(x, y);
+			const bool right = sampleMask(x1, y);
+			const bool below = sampleMask(x, y1);
+
+			unsigned char *dest = &result.rgb[((size_t) y * result.width + x) * 3];
+			if (here != right || here != below) {
+				// The edge of where you can get to - upstream draws it in
+				// flat red, which reads against every ground texture the
+				// game ships.
+				dest[0] = 255; dest[1] = 0; dest[2] = 0;
+			} else if (!here) {
+				dest[0] /= 4; dest[1] /= 4; dest[2] /= 4;
+			}
+		}
+	}
+	return result;
+}
+
 }  // namespace LandscapeTextureBuilder
