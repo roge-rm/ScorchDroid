@@ -71,4 +71,19 @@
     <name>MoneyStarting</name>
     <value>100000</value>
   </option>
+
+  <!-- Also testing-only, same block, same removal. Upstream's default is 2:
+       "the first round players are allowed to buy on", so round one has no
+       buying phase at all and you fight with the default loadout. That is
+       real upstream behaviour, not a bug - but it means a fresh game can
+       never reach the shop, which makes testing anything bought tedious.
+
+       Worth revisiting on its own merits before release: a first round with
+       no shop reads as broken on a phone, where there is no manual telling
+       you otherwise. Changing it is a balance decision though, not a port
+       fix, so it stays inside the temporary block for now. -->
+  <option>
+    <name>MoneyBuyOnRound</name>
+    <value>1</value>
+  </option>
 </options>
