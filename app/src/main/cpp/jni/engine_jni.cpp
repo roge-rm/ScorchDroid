@@ -735,6 +735,50 @@ static void trackPhaseTime(ScorchedServer *server, fixed frameTime)
     }
 }
 
+// M6 tap-to-aim (upstream's AUTO_AIM, "Aim at point"). Given a landscape
+// point - from the renderer's terrain pick - swing "my tank"'s turret to
+// face it and report the resulting angle so the HUD dial can follow.
+//
+// The angle is upstream's own arithmetic, lifted verbatim from
+// TankKeyboardControlUtil::autoAim:
+//     angle = degrees(atan2(dir.y, dir.x)) - 90
+// rather than re-derived. Angle conventions in this port have been got
+// wrong three separate ways by reasoning from first principles; copying
+// the line that demonstrably works is the cheaper correctness argument.
+//
+// Returns the new angle in degrees, or -1 if there is no tank to aim.
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_rm_scorchdroid_NativeBridge_aimAtPoint(JNIEnv *, jobject, jfloat landscapeX, jfloat landscapeY) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    Tank *tank = findMyTank();
+    if (!tank || !tank->getAlive()) return -1.0f;
+
+    FixedVector &position = tank->getLife().getTargetPosition();
+    const float dirX = landscapeX - position[0].asFloat();
+    const float dirY = landscapeY - position[1].asFloat();
+    if (fabsf(dirX) < 0.001f && fabsf(dirY) < 0.001f) return -1.0f;
+
+    // Upstream's autoAim is `degrees(atan2(dir.y, dir.x)) - 90`. This port
+    // needs the opposite heading, measured rather than derived: tapping a
+    // point with upstream's expression aimed the turret exactly away from
+    // it, confirmed with two taps 90 degrees apart (both opposite, so a
+    // clean 180 offset rather than a reflection about some axis).
+    //
+    // The reason is that this port's dial/engine mapping was itself settled
+    // empirically - the mirror that first-principles reasoning kept
+    // demanding turned out to be wrong on device - so the whole convention
+    // sits half a turn from upstream's while remaining self-consistent:
+    // the dial, the drawn barrel and the fired shot all agree with each
+    // other. Anything crossing in from upstream's frame has to be turned to
+    // match, and this is that turn. See the aim-direction notes in the
+    // porting plan before touching any of it.
+    float angle = (float) (atan2((double) dirY, (double) dirX) * 180.0 / M_PI) + 90.0f;
+    angle = fmodf(fmodf(angle, 360.0f) + 360.0f, 360.0f);
+
+    tank->getShotInfo().rotateGunXY(fixed::fromFloat(angle), false);
+    return angle;
+}
+
 // M6 HUD: the move id the server has currently granted "my tank", or 0 if
 // none is outstanding. ServerTurns::playMove sets it when a tanket is given
 // a move and playMoveFinished clears it once that move is submitted, so a

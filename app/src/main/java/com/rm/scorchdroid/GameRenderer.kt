@@ -30,6 +30,13 @@ class GameRenderer : GLSurfaceView.Renderer {
      */
     external fun nativeGetTankOverlays(): Array<String>
 
+    /**
+     * M6: turns a screen tap into a landscape "x|y", or "" if the ray
+     * misses the ground. Rebuilds the pick ray from the camera basis the
+     * renderer published last frame rather than inverting the MVP.
+     */
+    external fun nativePickTerrain(screenX: Float, screenY: Float): String
+
     external fun nativeCameraDrag(dx: Float, dy: Float)
     external fun nativeCameraZoom(scaleFactor: Float)
 

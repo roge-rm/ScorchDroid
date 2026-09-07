@@ -383,6 +383,12 @@ class MainActivity : AppCompatActivity() {
     // one-finger drag on whichever pointer stayed down.
     @SuppressLint("ClickableViewAccessibility")
     private fun setUpCameraControls(surface: GLSurfaceView, renderer: GameRenderer) {
+        // Anything under this much movement is a tap, not a drag. Taken from
+        // the platform's own scaled touch slop so it matches every other
+        // Android app on this screen density rather than a guessed pixel
+        // count.
+        val tapSlopPx = android.view.ViewConfiguration.get(this).scaledTouchSlop.toFloat()
+
         var lastX = 0f
         var lastY = 0f
         var dragging = false
@@ -394,6 +400,14 @@ class MainActivity : AppCompatActivity() {
         var lastFocusX = 0f
         var lastFocusY = 0f
         var panning = false
+        // Where and when the gesture started, so a release can be told
+        // apart from the end of a drag. A tap aims (upstream's AUTO_AIM);
+        // a drag orbits. Without the movement test every orbit would also
+        // fling the turret somewhere on release.
+        var downX = 0f
+        var downY = 0f
+        var downTime = 0L
+        var multiTouched = false
 
         fun focusOf(event: MotionEvent): Pair<Float, Float> {
             var sumX = 0f
@@ -423,8 +437,14 @@ class MainActivity : AppCompatActivity() {
                     lastX = event.x
                     lastY = event.y
                     dragging = true
+                    downX = event.x
+                    downY = event.y
+                    downTime = event.eventTime
+                    multiTouched = false
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> {
+                    // A second finger rules the gesture out as a tap.
+                    multiTouched = true
                     // A second finger just went down - this is a pinch/pan,
                     // not a one-finger orbit; stop treating pointer 0's
                     // movement as one and start tracking the centroid.
@@ -463,7 +483,18 @@ class MainActivity : AppCompatActivity() {
                     // from a two-finger centroid to a one-finger position.
                     if (event.pointerCount - 1 < 2) panning = false
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                MotionEvent.ACTION_UP -> {
+                    val movedX = event.x - downX
+                    val movedY = event.y - downY
+                    val moved = kotlin.math.hypot(movedX, movedY)
+                    val heldMs = event.eventTime - downTime
+                    if (!multiTouched && moved <= tapSlopPx && heldMs <= TAP_MAX_MS) {
+                        aimAtScreenPoint(event.x, event.y)
+                    }
+                    dragging = false
+                    panning = false
+                }
+                MotionEvent.ACTION_CANCEL -> {
                     dragging = false
                     panning = false
                 }
@@ -505,6 +536,36 @@ class MainActivity : AppCompatActivity() {
                 // server grants the next move.
                 hudState.shotLocked = true
             }
+        }
+    }
+
+    // M6 tap-to-aim - upstream's AUTO_AIM ("Aim at point"), which the
+    // control-parity audit flagged as a real binding rather than a
+    // convenience. Tapping the ground casts a ray against the terrain (see
+    // GameRenderer.nativePickTerrain) and swings the turret to face the
+    // hit point, leaving elevation and power alone: it aims *at* a
+    // direction, it does not solve the shot for you.
+    //
+    // The battlefield tap was free - since the 3D camera landed, dragging
+    // orbits and a plain tap did nothing at all.
+    private fun aimAtScreenPoint(screenX: Float, screenY: Float) {
+        CoroutineScope(Dispatchers.Main).launch {
+            val hit = withContext(Dispatchers.Default) {
+                gameRenderer.nativePickTerrain(screenX, screenY)
+            }
+            val parts = hit.split("|")
+            val landscapeX = parts.getOrNull(0)?.toFloatOrNull() ?: return@launch
+            val landscapeY = parts.getOrNull(1)?.toFloatOrNull() ?: return@launch
+
+            val angle = withContext(Dispatchers.Default) {
+                NativeBridge.aimAtPoint(landscapeX, landscapeY)
+            }
+            if (angle < 0f) return@launch
+
+            // aimAtPoint has already moved the real turret; this just keeps
+            // the dial showing what the tank is actually doing.
+            currentAngleDegrees = dialAngleFromEngine(angle)
+            hudState.angleDegrees = currentAngleDegrees
         }
     }
 
@@ -926,6 +987,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private companion object {
+        // A press longer than this is a deliberate hold, not a tap - it
+        // stops a slow, still finger from firing off an aim on release.
+        const val TAP_MAX_MS = 250L
+
 
     }
 }
