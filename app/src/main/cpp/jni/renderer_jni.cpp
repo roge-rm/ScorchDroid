@@ -114,6 +114,7 @@ namespace
 	// M6 sky.
 	GLuint skyProgram = 0, skyVao = 0, skyVbo = 0;
 	GLint  skyGradientLoc = -1, skySunDirLoc = -1, skySunColorLoc = -1, skyGlowLoc = -1;
+	GLint  skyFlashLoc = -1;
 	bool   skyBuilt = false;
 	ScorchDroidSky::Description skyDescription;
 
@@ -127,6 +128,11 @@ namespace
 	float  waterDeep[3] = { 0.11f, 0.26f, 0.45f };
 	float  waterShallow[3] = { 0.29f, 0.56f, 0.91f };
 	float  waterAlpha = 0.8f;
+
+	// M6: SkyFlash. Seconds of flash left; the sky pass lifts its colour
+	// by whatever remains, so a nuke whites out the whole view briefly.
+	constexpr float kSkyFlashSeconds = 0.45f;
+	float  skyFlashRemaining = 0.0f;
 
 	unsigned int paintedMovementVersion = 0;
 	bool movementOverlayPainted = false;
@@ -522,6 +528,7 @@ namespace
 		uniform vec3 uSunDir;
 		uniform vec3 uSunColor;
 		uniform float uHorizonGlow;
+		uniform float uFlash;
 		void main() {
 			vec3 d = normalize(vRay);
 
@@ -540,7 +547,8 @@ namespace
 			sky += uSunColor * pow(toSun, 256.0) * 2.0;
 			sky += uSunColor * pow(toSun, 12.0) * 0.35 * uHorizonGlow;
 
-			fragColor = vec4(sky, 1.0);
+			// SkyFlash: lift the whole sky towards white.
+			fragColor = vec4(mix(sky, vec3(1.0), uFlash), 1.0);
 		}
 	)";
 
@@ -923,6 +931,8 @@ namespace
 		glUniform3f(skySunColorLoc, skyDescription.sunColor[0],
 					skyDescription.sunColor[1], skyDescription.sunColor[2]);
 		glUniform1f(skyGlowLoc, skyDescription.horizonGlow ? 1.0f : 0.0f);
+		glUniform1f(skyFlashLoc,
+					std::min(1.0f, skyFlashRemaining / kSkyFlashSeconds));
 
 		glBindVertexArray(skyVao);
 		glBindBuffer(GL_ARRAY_BUFFER, skyVbo);
@@ -1330,6 +1340,39 @@ namespace
 				flame.life = 0.9f + randomUnit() * 0.6f;
 				flame.drag = 0.6f;
 				addParticle(flame);
+				break;
+			}
+			case ScorchDroidEffects::eSkyFlash: {
+				// Upstream flashes the whole sky white for a moment
+				// (Sky::flashSky, used by the big warheads). Nothing is
+				// added to the scene - the sky pass reads this and lifts
+				// its own colour, so the flash lights the whole view the
+				// way a nuke should rather than appearing as an object.
+				skyFlashRemaining = kSkyFlashSeconds;
+				break;
+			}
+			case ScorchDroidEffects::eTeleport: {
+				// A column of light where a tank leaves or arrives. Sent
+				// twice per teleport, once at each end.
+				const float radius = std::max(event.size, 1.0f);
+				for (int p = 0; p < 40; p++) {
+					const float angle = randomUnit() * 6.2831853f;
+					const float r = radius * (0.3f + randomUnit() * 0.7f);
+					Particle spark = {};
+					spark.x = x + cosf(angle) * r;
+					spark.y = y + randomUnit() * radius * 3.0f;
+					spark.z = z + sinf(angle) * r;
+					// Rising, which is what makes it read as a column
+					// rather than a burst.
+					spark.vx = 0.0f;
+					spark.vy = 3.0f + randomUnit() * 4.0f;
+					spark.vz = 0.0f;
+					spark.r = 0.75f; spark.g = 0.85f; spark.b = 1.0f;
+					spark.worldSize = radius * 0.35f;
+					spark.life = 0.5f + randomUnit() * 0.4f;
+					spark.drag = 0.4f;
+					addParticle(spark);
+				}
 				break;
 			}
 			case ScorchDroidEffects::eShieldHit: {
@@ -1900,6 +1943,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	skySunDirLoc = glGetUniformLocation(skyProgram, "uSunDir");
 	skySunColorLoc = glGetUniformLocation(skyProgram, "uSunColor");
 	skyGlowLoc = glGetUniformLocation(skyProgram, "uHorizonGlow");
+	skyFlashLoc = glGetUniformLocation(skyProgram, "uFlash");
 	glGenVertexArrays(1, &skyVao);
 	glGenBuffers(1, &skyVbo);
 	glBindVertexArray(skyVao);
@@ -2029,6 +2073,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		lastFrameSeconds = nowSeconds;
 		if (delta < 0.0f) delta = 0.0f;
 		if (delta > 0.1f) delta = 0.1f;
+		if (skyFlashRemaining > 0.0f) {
+			skyFlashRemaining = std::max(0.0f, skyFlashRemaining - delta);
+		}
 
 		// One puff per shot per ~40ms rather than per frame, so a fast
 		// device doesn't lay down a denser trail than a slow one.
@@ -2448,6 +2495,31 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 		for (TankInstance &inst : tankInstances) {
 			if (inst.alive) addShadow(inst.x, inst.y, inst.z, 1.6f);
+		}
+
+		// Arena boundary. Upstream marks it with a ring of sprites every 32
+		// units (LandscapePoints::generate) so you can see where the play
+		// area ends - which matters, because the landscape mesh carries on
+		// past it and a shot that crosses it is gone. The arena is usually
+		// the whole map but a landscape can set it smaller.
+		{
+			GroundMaps &ground = ctx->getLandscapeMaps().getGroundMaps();
+			const int arenaX = ground.getArenaX(), arenaY = ground.getArenaY();
+			const int arenaW = ground.getArenaWidth(), arenaH = ground.getArenaHeight();
+			const int stepX = std::max(arenaW / 32, 1);
+			const int stepY = std::max(arenaH / 32, 1);
+			auto addMarker = [&](int lx, int ly) {
+				const float gy = heightAt(heightMap, mapW, mapH, (float) lx, (float) ly);
+				addShadow((float) lx, gy, worldZFromEngineY((float) ly), 1.0f);
+			};
+			for (int i = 0; i <= 32; i++) {
+				addMarker(arenaX + i * stepX, arenaY);
+				addMarker(arenaX + i * stepX, arenaY + arenaH);
+			}
+			for (int i = 1; i < 32; i++) {
+				addMarker(arenaX, arenaY + i * stepY);
+				addMarker(arenaX + arenaW, arenaY + i * stepY);
+			}
 		}
 
 		if (!quads.empty() && shadowProgram != 0) {

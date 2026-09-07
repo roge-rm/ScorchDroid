@@ -1,0 +1,87 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: sky-flash and teleport effect hooks
+
+Two more actions whose simulation half is shared and whose drawing half
+is client-only, handled the same way as patch 0011's five effects.
+
+SkyFlash calls Sky::flashSky() - there is no Sky object here, so it
+raises an event and the port's own sky pass lifts its colour for a
+moment. Teleport builds a TeleportRenderer sprite; here it raises two
+events instead, at the tank's old position and its new one, since a
+teleport with only one end shown tells half the story.
+
+diff --git a/src/common/actions/SkyFlash.cpp b/src/common/actions/SkyFlash.cpp
+index e8293770..fb361a9a 100644
+--- a/src/common/actions/SkyFlash.cpp
++++ b/src/common/actions/SkyFlash.cpp
+@@ -23,6 +23,8 @@
+ #ifndef S3D_SERVER
+ 	#include <landscape/Landscape.hpp>
+ 	#include <sky/Sky.hpp>
++#else
++	#include <EffectEventQueue.h>
+ #endif
+ 
+ SkyFlash::SkyFlash() :
+@@ -45,6 +47,14 @@ void SkyFlash::simulate(fixed frameTime, bool &remove)
+ 	{
+ 		Landscape::instance()->getSky().flashSky();
+ 	}
++#else
++	// Android port: no Sky object to flash - the renderer brightens its own
++	// sky for a moment instead. See EffectEventQueue.h.
++	{
++		ScorchDroidEffects::EffectEvent effect;
++		effect.type = ScorchDroidEffects::eSkyFlash;
++		ScorchDroidEffects::push(effect);
++	}
+ #endif // #ifndef S3D_SERVER
+ 
+ 	remove = true;
+diff --git a/src/common/actions/Teleport.cpp b/src/common/actions/Teleport.cpp
+index d1861d92..dcaad978 100644
+--- a/src/common/actions/Teleport.cpp
++++ b/src/common/actions/Teleport.cpp
+@@ -37,6 +37,8 @@
+ #ifndef S3D_SERVER
+ 	#include <sound/SoundUtils.hpp>
+ 	#include <sprites/TeleportRenderer.hpp>
++#else
++	#include <EffectEventQueue.h>
+ #endif
+ 
+ Teleport::Teleport(FixedVector position, WeaponFireContext &weaponContext, WeaponTeleport *weapon) :
+@@ -78,6 +80,33 @@ void Teleport::init()
+ 		);
+ 		context_->getActionController().addAction(pos);
+ 	}
++#else
++	// Android port: TeleportRenderer is a client sprite that doesn't exist
++	// here. Two events - where the tank leaves from and where it arrives -
++	// since that is the whole point of the weapon and one burst would only
++	// tell half the story.
++	{
++		Tank *tank = context_->getTargetContainer().getTankById(weaponContext_.getPlayerId());
++		if (tank && tank->getState().getState() == TankState::sNormal)
++		{
++			FixedVector &from = tank->getLife().getTargetPosition();
++			ScorchDroidEffects::EffectEvent leaving;
++			leaving.type = ScorchDroidEffects::eTeleport;
++			leaving.x = from[0].asFloat();
++			leaving.y = from[1].asFloat();
++			leaving.z = from[2].asFloat();
++			leaving.size = 2.0f;
++			ScorchDroidEffects::push(leaving);
++		}
++
++		ScorchDroidEffects::EffectEvent arriving;
++		arriving.type = ScorchDroidEffects::eTeleport;
++		arriving.x = position_[0].asFloat();
++		arriving.y = position_[1].asFloat();
++		arriving.z = position_[2].asFloat();
++		arriving.size = 2.0f;
++		ScorchDroidEffects::push(arriving);
++	}
+ #endif
+ }
+ 
