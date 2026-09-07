@@ -37,8 +37,10 @@
 #include <landscapemap/LandscapeMaps.hpp>
 #include <landscapemap/GroundMaps.hpp>
 #include <landscapemap/HeightMap.hpp>
+#include <landscapemap/RoofMaps.hpp>
 #include <landscapedef/LandscapeDefinitionCache.hpp>
 #include <landscapedef/LandscapeDefinition.hpp>
+#include <landscapedef/LandscapeDefn.hpp>
 #include <landscapedef/LandscapeTex.hpp>
 #include <image/ImageFactory.hpp>
 #include <target/TargetLife.hpp>
@@ -96,7 +98,7 @@ namespace
 	GLuint terrainProgram = 0, pointProgram = 0;
 	GLint  terrainMvpLoc = -1, terrainMinHeightLoc = -1, terrainHeightRangeLoc = -1, terrainLightDirLoc = -1;
 	GLint  terrainGroundTexLoc = -1, terrainHasTextureLoc = -1, terrainLightBakedLoc = -1;
-	GLint  terrainFogColorLoc = -1, terrainFogDensityLoc = -1;
+	GLint  terrainFogColorLoc = -1, terrainFogDensityLoc = -1, terrainHalfLambertLoc = -1;
 	GLint  meshFogColorLoc = -1, meshFogDensityLoc = -1;
 	GLint  waterFogColorLoc = -1, waterFogDensityLoc = -1;
 	GLuint groundTexture = 0;
@@ -289,6 +291,27 @@ namespace
 	inline int gridXForHeightMapCol(int col, int mapW) {
 		return (mapW > 0) ? (col * kGrid / mapW) : 0;
 	}
+	// M6 S6: the cavern roof. A landscape's <roof> is either type="sky",
+	// which is LandscapeDefnTypeNone and means no roof at all (33 of the 36
+	// shipped landscapes), or type="cavern", which generates a second real
+	// heightmap hanging over the map - RoofMaps::generateRMap flips it so
+	// its heights are absolute world heights below the cavern's <height>.
+	// Only defncavern, defncavern2 and defnicebergs2 use one.
+	//
+	// It is drawn through the terrain program: same vertex layout, same
+	// fog, just the other heightmap, downward normals and reversed winding.
+	GLuint roofVao = 0, roofVbo = 0, roofIbo = 0, roofTexture = 0;
+	int    roofIndexCount = 0;
+	bool   roofBuilt = false, roofVisible = false;
+	float  roofMinHeight = 0.0f, roofMaxHeight = 1.0f;
+	// How often the roof image tiles across the map, so the skirt beyond the
+	// map edge can carry on from the same texture coordinates.
+	float  roofUScale = 1.0f, roofVScale = 1.0f;
+	// The wall that closes the cavern off beyond the map edge - see
+	// buildRoofSkirt. Non-indexed, and drawn double-sided.
+	GLuint roofSkirtVao = 0, roofSkirtVbo = 0;
+	int    roofSkirtVertexCount = 0;
+
 	constexpr int kTerrainFloatsPerVertex = 8;  // pos(3) + normal(3) + uv(2)
 	std::vector<float> terrainHeights;          // kTerrainVerts1D^2, row-major by gz
 	std::vector<float> terrainWorldX, terrainWorldZ;
@@ -434,8 +457,11 @@ namespace
 			vNormal = aNormal;
 			vTexCoord = aTexCoord;
 			vHeight01 = clamp((aPosition.y - uMinHeight) / uHeightRange, 0.0, 1.0);
-			vViewDepth = gl_Position.w;
+			// Order matters: gl_Position has to be written before its w can
+			// be read. The other way round this reads an undefined value and
+			// the terrain silently stops fogging.
 			gl_Position = uMVP * vec4(aPosition, 1.0);
+			vViewDepth = gl_Position.w;
 		}
 	)";
 
@@ -458,6 +484,12 @@ namespace
 		uniform sampler2D uGroundTexture;
 		uniform int uHasTexture;
 		uniform int uLightBaked;
+		// The cavern roof is the same mesh upside down, and every one of its
+		// normals points away from the sun - clamped lambert would give it a
+		// single flat tone and hide all its relief. Upstream shades its roof
+		// with a half-lambert instead (SkyRoof::makeNormal: `dot/2 + 0.5`,
+		// never zero), so this switches to the same curve for it.
+		uniform int uHalfLambert;
 		void main() {
 			vec3 baseColor;
 			if (uHasTexture == 1) {
@@ -473,7 +505,8 @@ namespace
 				lit = baseColor;
 			} else {
 				vec3 n = normalize(vNormal);
-				float diffuse = max(dot(n, uLightDir), 0.0);
+				float raw = dot(n, uLightDir);
+				float diffuse = (uHalfLambert == 1) ? (raw * 0.5 + 0.5) : max(raw, 0.0);
 				lit = baseColor * (0.55 + diffuse * 0.6);
 			}
 			// Upstream's exponential distance fog. gl_Position.w is the view
@@ -949,9 +982,21 @@ namespace
 			// before this rebuild would never be painted.
 			movementOverlayPainted = false;
 			paintedMovementVersion = 0;
-			// Water and sky are per-landscape too.
+			// Water, roof and sky are per-landscape too.
 			waterBuilt = false;
 			waterVisible = false;
+			if (roofVao) glDeleteVertexArrays(1, &roofVao);
+			if (roofVbo) glDeleteBuffers(1, &roofVbo);
+			if (roofIbo) glDeleteBuffers(1, &roofIbo);
+			if (roofTexture) glDeleteTextures(1, &roofTexture);
+			if (roofSkirtVao) glDeleteVertexArrays(1, &roofSkirtVao);
+			if (roofSkirtVbo) glDeleteBuffers(1, &roofSkirtVbo);
+			roofVao = roofVbo = roofIbo = roofTexture = 0;
+			roofSkirtVao = roofSkirtVbo = 0;
+			roofIndexCount = 0;
+			roofSkirtVertexCount = 0;
+			roofBuilt = false;
+			roofVisible = false;
 			skyBuilt = false;
 			cloudsBuilt = false;
 			cloudsVisible = false;
@@ -1177,7 +1222,16 @@ namespace
 	// landscape whose colour map won't load.
 	void currentFogColor(float out[3])
 	{
-		const float *source = skyDescription.valid
+		// Fog goes to whatever is actually at the far distance. Under open
+		// sky that is the horizon, so the sky gradient's bottom row wins
+		// over the landscape's own <fog> - distance then blends into the
+		// skyline instead of towards a colour that doesn't match it.
+		//
+		// A cavern has no horizon: the far distance is the cave wall, and
+		// fogging to a bright sky blue nothing can see lights the inside of
+		// the cave the colour of a sky. So a roofed landscape falls back to
+		// its <fog>, which for texcavern is upstream's own dark grey.
+		const float *source = (skyDescription.valid && !roofVisible)
 			? skyDescription.gradient[0]
 			: skyDescription.fog;
 		for (int i = 0; i < 3; i++) out[i] = source[i];
@@ -1186,11 +1240,17 @@ namespace
 	// Loads a landscape image into a GL texture, with its mask as alpha.
 	// Returns 0 if the definition names nothing or the file won't load -
 	// every caller treats that as "this landscape has no such layer".
-	GLuint loadSkyTexture(const std::string &file, const std::string &mask, bool repeat)
+	// Named for the sky because that is where it started, but nothing about
+	// it is sky-specific and the cavern roof uses it too; outW/outH are for
+	// callers that need to know how often the image tiles across the map.
+	GLuint loadSkyTexture(const std::string &file, const std::string &mask, bool repeat,
+						  int *outW = nullptr, int *outH = nullptr)
 	{
 		if (file.empty()) return 0;
 		Image image = ImageFactory::loadImage(S3D::eModLocation, file, mask, false);
 		if (!image.getBits() || image.getWidth() <= 0) return 0;
+		if (outW) *outW = image.getWidth();
+		if (outH) *outH = image.getHeight();
 
 		GLuint texture = 0;
 		glGenTextures(1, &texture);
@@ -1420,6 +1480,320 @@ namespace
 		glEnable(GL_CULL_FACE);
 		glDepthMask(GL_TRUE);
 		glBindVertexArray(0);
+	}
+
+	// S6, the skirt that closes the cavern off. The roof mesh covers the map
+	// and no more, so without this the ceiling simply stops at the map edge
+	// and open sky shows through the gap - which reads as a bug rather than
+	// as a cave.
+	//
+	// Upstream's SkyRoof::drawSegment, followed closely: from each vertex on
+	// the map boundary it marches outward, away from the map centre, in
+	// steps of (cavern width - distance from centre) / 5, and drops the
+	// height along a quarter-cosine of the step number. It takes steps + 4
+	// of those steps, so the last three carry on past cos(90 degrees) and
+	// the wall curves down below the horizon, closing the view off. The
+	// numbers here - the 5 steps, the 1.57, the steps + 3 loop bound - are
+	// upstream's own, not tuned.
+	//
+	// Single-sided, facing inwards: the camera can get outside the wall or
+	// above the part of it that has curved below the horizon, and a
+	// two-sided skirt then fills the screen with a solid slab. Each
+	// triangle's winding is derived from its own geometry below rather than
+	// fixed once for the whole shell, because the four edges march outward
+	// in four different directions.
+	void buildRoofSkirt(ScorchedContext &ctx, const std::vector<float> &heights)
+	{
+		roofSkirtVertexCount = 0;
+
+		LandscapeDefn *defn = ctx.getLandscapeMaps().getDefinitions().getDefn();
+		if (!defn || !defn->roof ||
+			defn->roof->getType() != LandscapeDefnType::eRoofCavern) return;
+		LandscapeDefnRoofCavern *cavern = (LandscapeDefnRoofCavern *) defn->roof;
+		const float radius = cavern->width.asFloat();
+
+		const int verts1D = kTerrainVerts1D;
+		const float centreX = mapWidthUnits * 0.5f;
+		const float centreZ = mapHeightUnits * 0.5f;
+		const int steps = 5;
+
+		// A boundary point, as world position plus the roof height there.
+		auto edgePoint = [&](int gx, int gz, float out[3]) {
+			out[0] = terrainWorldX[gx];
+			out[1] = heights[gz * verts1D + gx];
+			out[2] = terrainWorldZ[gz];
+		};
+
+		std::vector<float> verts;
+		auto uvFor = [&](float x, float z, float &u, float &v) {
+			u = (x / mapWidthUnits) * roofUScale;
+			v = (1.0f - z / mapHeightUnits) * roofVScale;
+		};
+
+		// One outward-marching strip between two adjacent boundary points.
+		auto addSegment = [&](float a[3], float b[3]) {
+			const float heightA = a[1], heightB = b[1];
+
+			// Upstream's outward step: normalised away from the map centre,
+			// scaled so `steps` of them reach the cavern radius.
+			float da[3] = { a[0] - centreX, 0.0f, a[2] - centreZ };
+			float db[3] = { b[0] - centreX, 0.0f, b[2] - centreZ };
+			const float distA = sqrtf(da[0] * da[0] + da[2] * da[2]);
+			const float distB = sqrtf(db[0] * db[0] + db[2] * db[2]);
+			if (distA < 1e-4f || distB < 1e-4f) return;
+			for (int i = 0; i < 3; i++) {
+				da[i] = da[i] / distA * (radius - distA) / (float) steps;
+				db[i] = db[i] / distB * (radius - distB) / (float) steps;
+			}
+
+			float cur[3] = { a[0], a[1], a[2] };
+			float curB[3] = { b[0], b[1], b[2] };
+			// Upstream emits steps + 4 vertex pairs, so steps + 3 quads. Its
+			// height for the pair *after* step i is cos(1.57 * i / steps),
+			// which is why the first step out keeps the edge height exactly
+			// (cos 0) and the wall only starts dropping after it.
+			for (int i = 0; i < steps + 3; i++) {
+				float nextA[3] = { cur[0] + da[0], 0.0f, cur[2] + da[2] };
+				float nextB[3] = { curB[0] + db[0], 0.0f, curB[2] + db[2] };
+				const float drop = cosf(1.57f * (float) i / (float) steps);
+				nextA[1] = heightA * drop;
+				nextB[1] = heightB * drop;
+
+				// Face normal, flipped to face the inside of the cavern -
+				// the only side anyone stands on.
+				const float e1[3] = { curB[0] - cur[0], curB[1] - cur[1], curB[2] - cur[2] };
+				const float e2[3] = { nextA[0] - cur[0], nextA[1] - cur[1], nextA[2] - cur[2] };
+				float n[3] = {
+					e1[1] * e2[2] - e1[2] * e2[1],
+					e1[2] * e2[0] - e1[0] * e2[2],
+					e1[0] * e2[1] - e1[1] * e2[0],
+				};
+				const float nLen = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+				if (nLen < 1e-6f) { n[0] = 0; n[1] = -1; n[2] = 0; }
+				else { for (int k = 0; k < 3; k++) n[k] /= nLen; }
+				const float toCentre[3] = { centreX - cur[0], 0.0f, centreZ - cur[2] };
+				if (n[0] * toCentre[0] + n[2] * toCentre[2] < 0.0f) {
+					for (int k = 0; k < 3; k++) n[k] = -n[k];
+				}
+
+				// Emit each triangle wound so that its front face is the one
+				// the interior normal points along. Derived per triangle
+				// from the geometry rather than reasoned out once for the
+				// whole strip: the four edges march outward in four
+				// different directions, so a single fixed order is right
+				// for some of them and inside-out for the others.
+				const float *tris[2][3] = {
+					{ cur, curB, nextA },
+					{ nextA, curB, nextB },
+				};
+				for (int t = 0; t < 2; t++) {
+					const float *v0 = tris[t][0];
+					const float *v1 = tris[t][1];
+					const float *v2 = tris[t][2];
+					const float a1[3] = { v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] };
+					const float a2[3] = { v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2] };
+					const float face[3] = {
+						a1[1] * a2[2] - a1[2] * a2[1],
+						a1[2] * a2[0] - a1[0] * a2[2],
+						a1[0] * a2[1] - a1[1] * a2[0],
+					};
+					const bool frontFacesInward =
+						(face[0] * n[0] + face[1] * n[1] + face[2] * n[2]) > 0.0f;
+					const float *ordered[3] = {
+						v0,
+						frontFacesInward ? v1 : v2,
+						frontFacesInward ? v2 : v1,
+					};
+					for (int k = 0; k < 3; k++) {
+						float u, v;
+						uvFor(ordered[k][0], ordered[k][2], u, v);
+						verts.push_back(ordered[k][0]);
+						verts.push_back(ordered[k][1]);
+						verts.push_back(ordered[k][2]);
+						verts.push_back(n[0]); verts.push_back(n[1]); verts.push_back(n[2]);
+						verts.push_back(u); verts.push_back(v);
+					}
+				}
+
+				for (int k = 0; k < 3; k++) { cur[k] = nextA[k]; curB[k] = nextB[k]; }
+			}
+		};
+
+		// All four map edges. Each pair of adjacent boundary vertices gets a
+		// strip; the corners are covered because the two edges meeting there
+		// each start from the same vertex.
+		float a[3], b[3];
+		for (int gx = 0; gx < kGrid; gx++) {
+			edgePoint(gx, 0, a);          edgePoint(gx + 1, 0, b);          addSegment(a, b);
+			edgePoint(gx + 1, kGrid, a);  edgePoint(gx, kGrid, b);          addSegment(a, b);
+		}
+		for (int gz = 0; gz < kGrid; gz++) {
+			edgePoint(0, gz + 1, a);      edgePoint(0, gz, b);              addSegment(a, b);
+			edgePoint(kGrid, gz, a);      edgePoint(kGrid, gz + 1, b);      addSegment(a, b);
+		}
+
+		roofSkirtVertexCount = (int) (verts.size() / kTerrainFloatsPerVertex);
+		if (roofSkirtVertexCount == 0) return;
+
+		if (roofSkirtVao == 0) glGenVertexArrays(1, &roofSkirtVao);
+		glBindVertexArray(roofSkirtVao);
+		if (roofSkirtVbo == 0) glGenBuffers(1, &roofSkirtVbo);
+		glBindBuffer(GL_ARRAY_BUFFER, roofSkirtVbo);
+		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		const GLsizei stride = kTerrainFloatsPerVertex * sizeof(float);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void *) (3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void *) (6 * sizeof(float)));
+		glBindVertexArray(0);
+	}
+
+	// M6 S6: the cavern roof. Structurally this is buildTerrainIfNeeded with
+	// a different heightmap - RoofMaps::getRoofMap() is a real HeightMap at
+	// the same dimensions as the ground's (generateRMap creates it from
+	// getLandscapeWidth/Height), already flipped so its heights are absolute
+	// world heights hanging below the cavern's <height>.
+	//
+	// Upstream also extends a hemisphere skirt outwards from the map edge to
+	// the cavern's <width> (SkyRoof::drawSegment marches five steps out and
+	// curves the height down by cos). That is doing the same job the water
+	// skirt does here - hiding the edge of the world - and the arena is
+	// already surrounded by markers and, on these maps, by sea. So the roof
+	// is the roof; the skirt is left for later if the edge reads badly.
+	void buildRoofIfNeeded(ScorchedContext &ctx)
+	{
+		if (roofBuilt) return;
+		roofBuilt = true;
+		roofVisible = false;
+
+		RoofMaps &roofMaps = ctx.getLandscapeMaps().getRoofMaps();
+		if (!roofMaps.getRoofOn()) {
+			LOGI("Landscape has no roof (not a cavern)");
+			return;
+		}
+
+		HeightMap &rmap = roofMaps.getRoofMap();
+		const int w = rmap.getMapWidth();
+		const int h = rmap.getMapHeight();
+		if (w <= 0 || h <= 0) return;
+
+		// Sampled onto the same grid as the terrain, so the two meet at the
+		// map edges and the sampling helpers can be shared verbatim.
+		const int verts1D = kTerrainVerts1D;
+		std::vector<float> heights(verts1D * verts1D, 0.0f);
+		roofMinHeight = 1e9f;
+		roofMaxHeight = -1e9f;
+		for (int gz = 0; gz < verts1D; gz++) {
+			const int sy = heightMapRowForGridZ(gz, h);
+			for (int gx = 0; gx < verts1D; gx++) {
+				const int sx = heightMapColForGridX(gx, w);
+				const float height = rmap.getHeight(sx, sy).asFloat();
+				heights[gz * verts1D + gx] = height;
+				roofMinHeight = std::min(roofMinHeight, height);
+				roofMaxHeight = std::max(roofMaxHeight, height);
+			}
+		}
+		if (roofMaxHeight - roofMinHeight < 0.001f) roofMaxHeight = roofMinHeight + 1.0f;
+
+		// The roof image out of the landscape's tex definition. Tiled at the
+		// same density the ground texture builder uses for its own sources -
+		// one source texel per landscape unit - so the rock on the ceiling
+		// reads at the same scale as the rock on the ground.
+		int texW = 0, texH = 0;
+		LandscapeTex *tex = ctx.getLandscapeMaps().getDefinitions().getTex();
+		if (tex && tex->texture &&
+			tex->texture->getType() == LandscapeTexType::eTextureGenerate) {
+			LandscapeTexTextureGenerate *generate =
+				(LandscapeTexTextureGenerate *) tex->texture;
+			roofTexture = loadSkyTexture(generate->roof, "", true, &texW, &texH);
+		}
+		const float uScale = (texW > 0) ? ((float) w / (float) texW) : 1.0f;
+		const float vScale = (texH > 0) ? ((float) h / (float) texH) : 1.0f;
+		roofUScale = uScale;
+		roofVScale = vScale;
+
+		std::vector<float> vertexData(verts1D * verts1D * kTerrainFloatsPerVertex);
+		const int last = verts1D - 1;
+		for (int gz = 0; gz < verts1D; gz++) {
+			for (int gx = 0; gx < verts1D; gx++) {
+				float *out = &vertexData[(gz * verts1D + gx) * kTerrainFloatsPerVertex];
+
+				// Same central-difference normal as the terrain, negated:
+				// the face that matters is the underside.
+				const float pxL = terrainWorldX[std::max(gx - 1, 0)];
+				const float pxR = terrainWorldX[std::min(gx + 1, last)];
+				const float hL = heights[gz * verts1D + std::max(gx - 1, 0)];
+				const float hR = heights[gz * verts1D + std::min(gx + 1, last)];
+				const float pzT = terrainWorldZ[std::max(gz - 1, 0)];
+				const float pzB = terrainWorldZ[std::min(gz + 1, last)];
+				const float hT = heights[std::max(gz - 1, 0) * verts1D + gx];
+				const float hB = heights[std::min(gz + 1, last) * verts1D + gx];
+
+				const float tXx = pxR - pxL, tXy = hR - hL;
+				const float tZy = hB - hT, tZz = pzB - pzT;
+				float nx = -tZz * tXy;
+				float ny = tZz * tXx;
+				float nz = -tZy * tXx;
+				const float nLen = sqrtf(nx * nx + ny * ny + nz * nz);
+				if (nLen < 1e-6f) { nx = 0; ny = 1; nz = 0; }
+				else { nx /= nLen; ny /= nLen; nz /= nLen; }
+
+				out[0] = terrainWorldX[gx];
+				out[1] = heights[gz * verts1D + gx];
+				out[2] = terrainWorldZ[gz];
+				out[3] = -nx;
+				out[4] = -ny;
+				out[5] = -nz;
+				out[6] = (float) gx / (float) kGrid * uScale;
+				out[7] = (1.0f - (float) gz / (float) kGrid) * vScale;
+			}
+		}
+
+		// Wound the opposite way to the terrain's, so back-face culling
+		// keeps the underside - the only side anyone can see - and discards
+		// the top.
+		std::vector<unsigned int> indices;
+		indices.reserve(kGrid * kGrid * 6);
+		for (int gz = 0; gz < kGrid; gz++) {
+			for (int gx = 0; gx < kGrid; gx++) {
+				const unsigned int i00 = gz * verts1D + gx;
+				const unsigned int i10 = i00 + 1;
+				const unsigned int i01 = i00 + verts1D;
+				const unsigned int i11 = i01 + 1;
+				indices.push_back(i00); indices.push_back(i10); indices.push_back(i01);
+				indices.push_back(i10); indices.push_back(i11); indices.push_back(i01);
+			}
+		}
+		roofIndexCount = (int) indices.size();
+
+		if (roofVao == 0) glGenVertexArrays(1, &roofVao);
+		glBindVertexArray(roofVao);
+		if (roofVbo == 0) glGenBuffers(1, &roofVbo);
+		glBindBuffer(GL_ARRAY_BUFFER, roofVbo);
+		glBufferData(GL_ARRAY_BUFFER, vertexData.size() * sizeof(float),
+					 vertexData.data(), GL_STATIC_DRAW);
+		if (roofIbo == 0) glGenBuffers(1, &roofIbo);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, roofIbo);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int),
+					 indices.data(), GL_STATIC_DRAW);
+		const GLsizei stride = kTerrainFloatsPerVertex * sizeof(float);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void *) (3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void *) (6 * sizeof(float)));
+		glBindVertexArray(0);
+
+		buildRoofSkirt(ctx, heights);
+
+		roofVisible = true;
+		LOGI("Cavern roof: %d indices + %d skirt verts, heights %.1f-%.1f, "
+			 "texture %s (%dx%d, %.1fx%.1f tiles)",
+			 roofIndexCount, roofSkirtVertexCount, roofMinHeight, roofMaxHeight,
+			 roofTexture ? "loaded" : "none", texW, texH, uScale, vScale);
 	}
 
 	// M6 water: reads the landscape's own water definition and builds the
@@ -2483,6 +2857,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainGroundTexLoc = glGetUniformLocation(terrainProgram, "uGroundTexture");
 	terrainHasTextureLoc = glGetUniformLocation(terrainProgram, "uHasTexture");
 	terrainLightBakedLoc = glGetUniformLocation(terrainProgram, "uLightBaked");
+	terrainHalfLambertLoc = glGetUniformLocation(terrainProgram, "uHalfLambert");
 	terrainFogColorLoc = glGetUniformLocation(terrainProgram, "uFogColor");
 	terrainFogDensityLoc = glGetUniformLocation(terrainProgram, "uFogDensity");
 
@@ -2674,6 +3049,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	buildGroundTextureIfNeeded(*ctx);
 	// After the terrain, which is where the map size it spans comes from.
 	buildWaterIfNeeded(*ctx);
+	// After the terrain too - the roof is sampled onto the same grid and
+	// reuses the world-coordinate tables the terrain build fills in.
+	buildRoofIfNeeded(*ctx);
 	buildSkyIfNeeded(*ctx);
 	buildCloudsIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
@@ -3059,6 +3437,25 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		eyeZ = targetZ + distance * cosf(g_camera.pitch) * cosf(g_camera.yaw);
 	}
 
+	// S6: in a cavern, keep the eye inside the room. Both clamps are a
+	// no-op on the 33 landscapes with no roof - getRoofOn() is false there
+	// and nothing below runs. This has to come before the ground clearance
+	// below, because moving the eye horizontally can put it inside a hill.
+	RoofMaps &roofMaps = ctx->getLandscapeMaps().getRoofMaps();
+	const bool inCavern = roofMaps.getRoofOn();
+	if (inCavern) {
+		// Horizontally: past the map edge there is no roof mesh, only the
+		// skirt hanging down from the boundary, so an eye out there is
+		// behind the wall looking at the back of the cave. Keeping it over
+		// the map keeps it in the room. (This is not what causes the
+		// camera to end up buried in one of these maps' steep bowls - that
+		// is the orbit sitting inside a terrain *wall*, which predates the
+		// roof and which lifting the eye vertically cannot fix.)
+		const float inset = kCameraGroundClearance;
+		eyeX = std::min(std::max(eyeX, inset), mapWidthUnits - inset);
+		eyeZ = std::min(std::max(eyeZ, inset), mapHeightUnits - inset);
+	}
+
 	// Keep the eye above ground. Orbiting swings the camera to wherever the
 	// yaw points, which is regularly inside a hill - the near plane then
 	// slices through it and the view fills with a smear of magnified
@@ -3069,6 +3466,26 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float groundAtEye = terrainHeightAt(*ctx, eyeX, eyeZ);
 		float minEyeY = groundAtEye + kCameraGroundClearance;
 		if (eyeY < minEyeY) eyeY = minEyeY;
+	}
+
+	// ...and below the roof: the orbit rises as the pitch increases and
+	// would otherwise climb through the ceiling, which is back-facing from
+	// above and culled, so the view becomes "looking down into the cave
+	// through an invisible lid".
+	if (inCavern) {
+		// Cell lookup rather than the interpolated one, for the same reason
+		// terrainHeightAt uses it: a cell is a couple of world units and the
+		// camera only needs to know it is under the roof.
+		const int rx = (int) eyeX;
+		const int ry = (int) engineYFromWorldZ(eyeZ);
+		const float roofAtEye = roofMaps.getRoofHeight(rx, ry).asFloat();
+		const float maxEyeY = roofAtEye - kCameraGroundClearance;
+		// Never below the ground lift above: where the cavern pinches to
+		// less than the clearance the two clamps cross over, and preferring
+		// the ceiling there would bury the camera in the floor - much worse
+		// than clipping the ceiling.
+		const float floorEyeY = terrainHeightAt(*ctx, eyeX, eyeZ) + kCameraGroundClearance;
+		if (eyeY > maxEyeY) eyeY = std::max(maxEyeY, floorEyeY);
 	}
 
 	float aspect = (float) surfaceWidth / (float) surfaceHeight;
@@ -3174,6 +3591,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	glUniform3f(terrainLightDirLoc, 0.4f, 0.82f, 0.35f);
 	glUniform1i(terrainHasTextureLoc, groundTexture != 0 ? 1 : 0);
 	glUniform1i(terrainLightBakedLoc, groundLightBaked ? 1 : 0);
+	glUniform1i(terrainHalfLambertLoc, 0);
 	float fogColor[3];
 	currentFogColor(fogColor);
 	glUniform3f(terrainFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
@@ -3185,6 +3603,43 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 	glBindVertexArray(terrainVao);
 	frameDrawCalls++; glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
+
+	// S6: the cavern roof, through the same program while it is still bound.
+	// Its light map is never baked (the ground's is generated per landscape;
+	// there is no roof equivalent), so it takes the lit path - with the
+	// half-lambert, since every normal on a ceiling points away from the sun.
+	if (roofVisible) {
+		glUniform1f(terrainMinHeightLoc, roofMinHeight);
+		glUniform1f(terrainHeightRangeLoc, roofMaxHeight - roofMinHeight);
+		glUniform1i(terrainHasTextureLoc, roofTexture != 0 ? 1 : 0);
+		glUniform1i(terrainLightBakedLoc, 0);
+		glUniform1i(terrainHalfLambertLoc, 1);
+		// Upstream shades its roof against the real sun (SkyRoof::makeNormal
+		// takes the direction to Sun::getPosition), not the fixed light the
+		// terrain uses.
+		glUniform3f(terrainLightDirLoc,
+					skyDescription.sunDirection[0],
+					skyDescription.sunDirection[2],
+					-skyDescription.sunDirection[1]);
+		if (roofTexture != 0) {
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, roofTexture);
+			glUniform1i(terrainGroundTexLoc, 0);
+		}
+		glBindVertexArray(roofVao);
+		frameDrawCalls++; glDrawElements(GL_TRIANGLES, roofIndexCount, GL_UNSIGNED_INT, (void *) 0);
+
+		// The skirt that closes the cavern beyond the map edge. Culled, not
+		// double-sided: the camera can orbit out past the wall or above it
+		// where it has curved below the horizon, and a two-sided skirt then
+		// fills the screen with a solid grey slab. Single-sided, straying
+		// outside just makes it disappear, which degrades to the view
+		// without a skirt at all rather than to an opaque wall.
+		if (roofSkirtVertexCount > 0) {
+			glBindVertexArray(roofSkirtVao);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, roofSkirtVertexCount);
+		}
+	}
 
 	// Ground shadows, between the terrain and the water: they belong on the
 	// land, and a shadow showing through the sea would be worse than none.
