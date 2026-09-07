@@ -1,0 +1,50 @@
+<options source="ScorchDroid">
+  <!-- M5: settings for the standalone Linux "real PC dedicated server"
+       build (dedicated-server/main.cpp), used to verify Android to PC
+       cross-play against a genuine separate process/machine, not just
+       Android-to-Android. Modeled on app/src/main/assets/scorchdroid_server.xml
+       but with no local human tank of its own - this is a headless
+       dedicated server, no in-process player; real connecting clients ride
+       the actual connect/load-level handshake completely unmodified. -->
+  <!-- OptionsGame.cpp's own coded range for this field is (min 2, max 24) -
+       a value of 1 makes the options file fail to load entirely (found the
+       hard way; the resulting error message is misleadingly worded as a
+       parse failure). Paired with PlayerType2=Moron/RemoveBotsAtPlayers=2
+       below so a single real client can still play immediately (vs. one
+       bot) rather than needing a second real connection just to leave
+       ServerWaitingForPlayersState - a second real client joining
+       later naturally displaces the bot (see
+       ServerStateEnoughPlayers::removeBots()). -->
+  <option>
+    <name>NumberOfMinPlayers</name>
+    <value>2</value>
+  </option>
+  <option>
+    <name>NumberOfPlayers</name>
+    <value>8</value>
+  </option>
+  <option>
+    <name>RemoveBotsAtPlayers</name>
+    <value>2</value>
+  </option>
+  <option>
+    <name>PlayerType2</name>
+    <value>Moron</value>
+  </option>
+  <option>
+    <name>TurnType</name>
+    <value>0</value>
+  </option>
+  <option>
+    <name>ShotTime</name>
+    <value>35</value>
+  </option>
+  <option>
+    <name>BuyingTime</name>
+    <value>15</value>
+  </option>
+  <option>
+    <name>StartTime</name>
+    <value>5</value>
+  </option>
+</options>

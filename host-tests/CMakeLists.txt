@@ -104,6 +104,10 @@ add_library(scorched_common STATIC
     ${ANDROID_PORTING_DIR}/SDL_thread_compat.cpp
     ${ANDROID_PORTING_DIR}/Keyboard_stub.cpp
     ${ANDROID_PORTING_DIR}/SoundEventQueue.cpp
+    ${ANDROID_PORTING_DIR}/DeformEventQueue.cpp
+    ${ANDROID_PORTING_DIR}/ClientSync.cpp
+    ${ANDROID_PORTING_DIR}/ClientContext.cpp
+    ${ANDROID_PORTING_DIR}/LandscapeTextureBuilder.cpp
 )
 
 set_source_files_properties(
@@ -131,6 +135,9 @@ target_link_libraries(host_tests PRIVATE
     scorched_common
     -Wl,--no-whole-archive
 )
+# -rdynamic so the temporary crash-backtrace handler in main.cpp (see
+# crashBacktraceHandler) can resolve symbol names via backtrace_symbols_fd().
+target_link_options(host_tests PRIVATE -rdynamic)
 # So main.cpp can chdir() to real upstream data without any Android-style
 # asset-extraction step - this is a plain Linux process with normal
 # filesystem access to the submodule checkout.
@@ -140,3 +147,20 @@ target_compile_definitions(host_tests PRIVATE
 
 enable_testing()
 add_test(NAME host_tests COMMAND host_tests)
+
+# M5: a genuine standalone Linux dedicated server for real cross-play
+# testing (see dedicated-server/main.cpp for why this isn't upstream's own
+# src/server/scorcheds - no system SDL/expat/meson available in this
+# environment) - built from the exact same scorched_common library above,
+# no new dependencies needed.
+add_executable(dedicated_server ${REPO_ROOT}/dedicated-server/main.cpp)
+target_link_libraries(dedicated_server PRIVATE
+    -Wl,--whole-archive
+    scorched_common
+    -Wl,--no-whole-archive
+)
+target_link_options(dedicated_server PRIVATE -rdynamic)
+target_compile_definitions(dedicated_server PRIVATE
+    SCORCHED_SUBMODULE_ROOT="${THIRD_PARTY_DIR}/scorched3d"
+    DEDICATED_SERVER_XML_PATH="${REPO_ROOT}/dedicated-server/dedicated_server.xml"
+)
