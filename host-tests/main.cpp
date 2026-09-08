@@ -1979,6 +1979,97 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 	return joined ? 0 : 1;
 }
 
+// M9 gate: can the engine stop and start again inside one process?
+//
+// The main menu turns "quit to menu, start something else" into the ordinary
+// path, and today nothing supports it: startLocalGame()/startJoinGame() refuse
+// a second call (g_mode != kNone) and nothing ever puts the mode back. Before
+// building a menu around that, prove the engine underneath can actually do it.
+//
+// Encouragingly, upstream already restarts this way - startServer() opens with
+// its own stopServer() call, which is what a PC client hosting a second game
+// does. What is unproven here is this *port's* configuration: host-tests
+// already records that two contexts in one process share NetMessagePool and
+// other globals in a way upstream never exercises, so "upstream does it" is
+// not evidence for us.
+//
+// Runs last, deliberately: it destroys the server every other test shares.
+static void testServerRestart()
+{
+	printf("engine restart (M9: quit to menu, then start another game):\n");
+
+	check(ScorchedServer::serverStarted(), "a server is running before the restart");
+	ScorchedServer::stopServer();
+	check(!ScorchedServer::serverStarted(), "stopServer() clears the started flag");
+	check(ScorchedServer::instance() == nullptr,
+		"stopServer() drops the singleton - any pointer cached across a restart is dangling");
+
+	ScorchedServerSettingsOptions settings("data/server.xml", false, false);
+	bool restarted = ScorchedServer::startServer(settings, true, nullptr);
+	check(restarted, "a second startServer() in the same process succeeds");
+	if (!restarted) return;
+
+	ScorchedServer *server = ScorchedServer::instance();
+	check(server != nullptr, "the restarted server has an instance again");
+	if (!server) return;
+
+	// "Started" is a flag; these are the checks that it is genuinely alive
+	// rather than a shell that happens not to have crashed yet.
+	Accessory *babyMissile =
+		server->getAccessoryStore().findByPrimaryAccessoryName("Baby Missile");
+	check(babyMissile != nullptr, "the restarted server reparsed the accessory store");
+
+	check(server->getTargetContainer().getTanks().empty(),
+		"the restarted server starts with no tanks - no state survived the previous game");
+
+	LandscapeDefinition defn = server->getLandscapes().getRandomLandscapeDefn(
+		server->getContext().getOptionsGame(), server->getContext().getTargetContainer());
+	server->getOptionsGame().updateLevelOptions(server->getContext(), defn);
+	server->getLandscapeMaps().generateMaps(server->getContext(), defn, nullptr);
+	HeightMap &hmap = server->getLandscapeMaps().getGroundMaps().getHeightMap();
+	check(hmap.getMapWidth() > 0 && hmap.getMapHeight() > 0,
+		"the restarted server generates a landscape");
+
+	// And that the landscape is really usable, not just allocated: carve a
+	// crater and check both the heightmap and the renderer's deform hook.
+	if (hmap.getMapWidth() > 0)
+	{
+		int cx = hmap.getMapWidth() / 2, cy = hmap.getMapHeight() / 2;
+		fixed before = hmap.getHeight(cx, cy);
+		ScorchDroidLandscape::clearDirtyRegion();
+		FixedVector pos(fixed(cx), fixed(cy), before);
+		DeformLandscape::deformLandscape(server->getContext(), pos, fixed(8), true, fixed(1), nullptr);
+		check(hmap.getHeight(cx, cy) < before,
+			"terrain destruction still works after a restart");
+		int a = 0, b = 0, c = 0, d = 0;
+		check(ScorchDroidLandscape::takeDirtyRegion(a, b, c, d),
+			"the deform hook still reports to the renderer after a restart");
+	}
+
+	// The restart above ran on a NetLoopBack (local=true). What
+	// startLocalGame() actually does is local=false, which builds a real
+	// NetServerTCP3 and binds a listening socket - and a socket left bound
+	// by the previous game is the classic way a restart fails: the player
+	// quits to the menu, hosts again, and the second host silently cannot
+	// bind. So do it the way the app does, twice, on the same port.
+	{
+		const int port = 27298;  // Distinct from ScorchedPort and from testRealTcpHostAndConnect's.
+
+		ScorchedServerSettingsOptions netSettings("data/server.xml", false, false);
+		check(ScorchedServer::startServer(netSettings, false, nullptr),
+			"a real (non-loopback) server starts, as startLocalGame() does");
+		check(ScorchedServer::instance()->getContext().getNetInterface().start(port),
+			"the real server binds its listening socket");
+
+		ScorchedServer::stopServer();
+
+		check(ScorchedServer::startServer(netSettings, false, nullptr),
+			"a second real server starts after the first was stopped");
+		check(ScorchedServer::instance()->getContext().getNetInterface().start(port),
+			"the second server binds the same port again - the socket really was released");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	// Upstream's own generic main() bootstrap (common/main.hpp) does this
@@ -2027,6 +2118,7 @@ int main(int argc, char **argv)
 	testTankMovement();
 	testRealTcpHostAndConnect();
 	testClientJoin();
+	testServerRestart();
 
 	printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
 		failures, failures == 1 ? "" : "s");
