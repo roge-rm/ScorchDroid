@@ -61,6 +61,7 @@
 #include <MovementStore.h>
 #include <TargetModelStore.h>
 #include <SkyDescription.hpp>
+#include <InstanceBuffer.hpp>
 #include <DeformEventQueue.h>
 #include <EffectEventQueue.h>
 #include <TracerStore.h>
@@ -96,6 +97,23 @@ extern std::mutex g_engineMutex;
 namespace
 {
 	GLuint terrainProgram = 0, pointProgram = 0;
+	// M6 performance: instanced scenery - see InstanceBuffer.hpp.
+	GLuint instancedMeshProgram = 0;
+	GLint  instancedViewProjLoc = -1, instancedLightDirLoc = -1;
+	GLint  instancedFogColorLoc = -1, instancedFogDensityLoc = -1;
+	// One entry per distinct mesh drawn instanced, keyed by the source
+	// geometry's VBO. Its own VAO, so adding the instance attributes never
+	// disturbs the non-instanced VAO the same geometry may also be drawn
+	// through. Kept across frames: the packed bytes are compared before
+	// uploading, so a landscape whose scenery is not moving uploads nothing
+	// at all after the first frame.
+	struct InstancedDraw {
+		GLuint vao = 0;
+		GLuint instanceVbo = 0;
+		int    instanceCount = 0;
+		std::vector<float> uploaded;
+	};
+	std::map<GLuint, InstancedDraw> g_instancedDraws;
 	GLint  terrainMvpLoc = -1, terrainMinHeightLoc = -1, terrainHeightRangeLoc = -1, terrainLightDirLoc = -1;
 	GLint  terrainGroundTexLoc = -1, terrainHasTextureLoc = -1, terrainLightBakedLoc = -1;
 	GLint  terrainFogColorLoc = -1, terrainFogDensityLoc = -1, terrainHalfLambertLoc = -1;
@@ -599,6 +617,66 @@ namespace
 			vNormal = aNormal;
 			gl_Position = uMVP * vec4(aPosition, 1.0);
 			vViewDepth = gl_Position.w;
+		}
+	)";
+
+	// M6 performance: the same mesh shading, drawn once for many copies.
+	//
+	// A separate program rather than a branch in the mesh one above: that
+	// one is shared with tanks, shots, shields and parachutes and should
+	// stay simple, and an instanced draw needs different *attributes*, not
+	// just a different uniform.
+	//
+	// The transform is rebuilt here from eight floats instead of being sent
+	// as a matrix - see InstanceBuffer.hpp for why that is enough. The
+	// rotation must match Mat4::rotateY exactly or every instance turns the
+	// wrong way: that matrix is x' = cx + sz, z' = -sx + cz.
+	const char *kInstancedMeshVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec3 aNormal;
+		layout(location = 2) in vec4 aInstancePosScale;
+		layout(location = 3) in vec4 aInstanceRotColor;
+		uniform mat4 uViewProj;
+		out vec3 vNormal;
+		out vec3 vColor;
+		out float vViewDepth;
+		void main() {
+			float rot = aInstanceRotColor.x;
+			float s = sin(rot), c = cos(rot);
+
+			vec3 p = aPosition * aInstancePosScale.w;
+			vec3 rotated = vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+			vec3 world = rotated + aInstancePosScale.xyz;
+
+			// The scale is uniform, so the normal needs the rotation only -
+			// no inverse transpose.
+			vNormal = vec3(c * aNormal.x + s * aNormal.z,
+						   aNormal.y,
+						   -s * aNormal.x + c * aNormal.z);
+			vColor = aInstanceRotColor.yzw;
+
+			gl_Position = uViewProj * vec4(world, 1.0);
+			vViewDepth = gl_Position.w;
+		}
+	)";
+
+	// Identical to the mesh fragment shader except that the colour arrives
+	// per instance rather than as a uniform.
+	const char *kInstancedMeshFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec3 vNormal;
+		in vec3 vColor;
+		in float vViewDepth;
+		out vec4 fragColor;
+		uniform vec3 uLightDir;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
+		void main() {
+			vec3 n = normalize(vNormal);
+			float diffuse = max(dot(n, uLightDir), 0.0);
+			vec3 lit = vColor * (0.45 + diffuse * 0.75);
+			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
 		}
 	)";
 
@@ -3199,6 +3277,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	meshFogColorLoc = glGetUniformLocation(meshProgram, "uFogColor");
 	meshFogDensityLoc = glGetUniformLocation(meshProgram, "uFogDensity");
 
+	instancedMeshProgram = linkProgram(kInstancedMeshVertexShader, kInstancedMeshFragmentShader);
+	instancedViewProjLoc = glGetUniformLocation(instancedMeshProgram, "uViewProj");
+	instancedLightDirLoc = glGetUniformLocation(instancedMeshProgram, "uLightDir");
+	instancedFogColorLoc = glGetUniformLocation(instancedMeshProgram, "uFogColor");
+	instancedFogDensityLoc = glGetUniformLocation(instancedMeshProgram, "uFogDensity");
+
 	pointProgram = linkProgram(kPointVertexShader, kPointFragmentShader);
 	pointMvpLoc = glGetUniformLocation(pointProgram, "uMVP");
 	pointColorLoc = glGetUniformLocation(pointProgram, "uColor");
@@ -3250,6 +3334,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainBuilt = false;
 	groundTextureBuilt = false;
 	g_modelCache.clear();
+	// Same reason as the model cache above: these name GL objects belonging
+	// to the context that has just gone away.
+	g_instancedDraws.clear();
 
 	glGenVertexArrays(1, &pointVao);
 	glBindVertexArray(pointVao);
@@ -3270,6 +3357,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 		{ "sky", skyProgram },         { "water", waterProgram },
 		{ "sight", sightProgram },     { "mesh", meshProgram },
 		{ "point", pointProgram },     { "particle", particleProgram },
+		{ "instanced-mesh", instancedMeshProgram },
 	};
 	for (const auto &p : programs) {
 		if (p.program == 0) LOGE("Shader program '%s' FAILED to link - it will draw nothing", p.name);
@@ -4225,45 +4313,119 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// everything that matters, and drawing them before the tanks keeps the
 	// per-target colour uniform out of the tank loop's way.
 	buildTreeGeometryIfNeeded();
-	for (TargetInstance &inst : targetInstances) {
-		if (inst.isTree) {
-			if (treeVertexCount == 0) continue;
-			glUniform4f(meshColorLoc,
-						inst.treeR * inst.brightness,
-						inst.treeG * inst.brightness,
-						inst.treeB * inst.brightness, 1.0f);
-			Mat4 treeModel = Mat4::multiply(
-				Mat4::translate(inst.x, inst.y, inst.z),
-				Mat4::multiply(
-					Mat4::rotateY(inst.rotationRadians),
-					Mat4::scale(inst.scale)));
-			glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE,
-							   Mat4::multiply(mvp, treeModel).m);
-			glBindVertexArray(treeVao);
-			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, treeVertexCount);
-			continue;
+	{
+		// M6 performance: scenery is drawn instanced - one call per distinct
+		// mesh rather than one per target. A landscape scatters up to ~2,000
+		// of these and, measured, uses a single model between them, so this
+		// is the one pass in the renderer where instancing was worth having
+		// (see InstanceBuffer.hpp).
+		//
+		// Bucketed by the source geometry's VBO rather than by Model*,
+		// because the procedural trees have no Model at all and share this
+		// path - they are simply another bucket.
+		struct Bucket {
+			int vertexCount = 0;
+			std::vector<ScorchDroidInstances::Instance> instances;
+		};
+		std::map<GLuint, Bucket> buckets;
+
+		for (TargetInstance &inst : targetInstances) {
+			GLuint sourceVbo = 0;
+			int vertexCount = 0;
+			ScorchDroidInstances::Instance packed;
+			packed.x = inst.x;
+			packed.z = inst.z;
+			packed.scale = inst.scale;
+			packed.rotationRadians = inst.rotationRadians;
+
+			if (inst.isTree) {
+				if (treeVertexCount == 0 || treeVbo == 0) continue;
+				sourceVbo = treeVbo;
+				vertexCount = treeVertexCount;
+				packed.y = inst.y;
+				packed.r = inst.treeR * inst.brightness;
+				packed.g = inst.treeG * inst.brightness;
+				packed.b = inst.treeB * inst.brightness;
+			} else {
+				GpuModel *gpu = uploadModel(inst.model);
+				if (!gpu || gpu->hull.vertexCount == 0 || gpu->hull.vbo == 0) continue;
+				sourceVbo = gpu->hull.vbo;
+				vertexCount = gpu->hull.vertexCount;
+				// The model's base lift, scaled by the definition's own
+				// scale - folded into the instance here because the shader
+				// has no idea which model it is drawing.
+				packed.y = inst.y + gpu->baseOffset * inst.scale;
+				// Upstream's "color" for a target is a grey multiplier,
+				// randomised per target when the definition doesn't fix one,
+				// so a stand of identical objects doesn't look stamped out.
+				packed.r = packed.g = packed.b = inst.brightness;
+			}
+
+			Bucket &bucket = buckets[sourceVbo];
+			bucket.vertexCount = vertexCount;
+			bucket.instances.push_back(packed);
 		}
 
-		GpuModel *gpu = uploadModel(inst.model);
-		if (!gpu) continue;
+		if (!buckets.empty() && instancedMeshProgram != 0) {
+			glUseProgram(instancedMeshProgram);
+			glUniformMatrix4fv(instancedViewProjLoc, 1, GL_FALSE, mvp.m);
+			glUniform3f(instancedLightDirLoc, 0.4f, 0.82f, 0.35f);
+			glUniform3f(instancedFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+			glUniform1f(instancedFogDensityLoc, skyDescription.fogDensity);
 
-		// Upstream's "color" for a target is a grey multiplier, randomised
-		// per target when the definition doesn't fix one, so a stand of
-		// identical trees doesn't look stamped out.
-		glUniform4f(meshColorLoc, inst.brightness, inst.brightness, inst.brightness, 1.0f);
+			for (auto &entry : buckets) {
+				const GLuint sourceVbo = entry.first;
+				Bucket &bucket = entry.second;
 
-		// The definition's own scale, not the tank sizing rule - a building
-		// is meant to dwarf a tank - so the base lift is scaled here too.
-		Mat4 model = Mat4::multiply(
-			Mat4::translate(inst.x, inst.y + gpu->baseOffset * inst.scale, inst.z),
-			Mat4::multiply(
-				Mat4::rotateY(inst.rotationRadians),
-				Mat4::scale(inst.scale)));
-		Mat4 targetMvp = Mat4::multiply(mvp, model);
-		// A target is one undivided model: uploadModel only splits meshes
-		// named turret/gun, which nothing but a tank has, so everything
-		// lands in the hull group.
-		drawMeshGroup(gpu->hull, meshMvpLoc, targetMvp);
+				InstancedDraw &draw = g_instancedDraws[sourceVbo];
+				if (draw.vao == 0) {
+					glGenVertexArrays(1, &draw.vao);
+					glGenBuffers(1, &draw.instanceVbo);
+					glBindVertexArray(draw.vao);
+					// The mesh's own vertices, same layout uploadMeshGroup
+					// wrote them in.
+					glBindBuffer(GL_ARRAY_BUFFER, sourceVbo);
+					glEnableVertexAttribArray(0);
+					glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+					glEnableVertexAttribArray(1);
+					glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+					// ...then the per-instance attributes, advancing once
+					// per instance rather than once per vertex.
+					const GLsizei stride = ScorchDroidInstances::kFloatsPerInstance * sizeof(float);
+					glBindBuffer(GL_ARRAY_BUFFER, draw.instanceVbo);
+					glEnableVertexAttribArray(2);
+					glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, (void *) 0);
+					glVertexAttribDivisor(2, 1);
+					glEnableVertexAttribArray(3);
+					glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void *) (4 * sizeof(float)));
+					glVertexAttribDivisor(3, 1);
+					glBindVertexArray(0);
+				}
+
+				std::vector<float> packed;
+				ScorchDroidInstances::pack(bucket.instances, packed);
+
+				// Upload only when something actually changed. Scenery is
+				// static until a target is destroyed or the ground under it
+				// gives way and it falls, so in the steady state this
+				// uploads nothing - and comparing 30KB is far cheaper than
+				// re-sending it every frame.
+				if (packed != draw.uploaded) {
+					glBindBuffer(GL_ARRAY_BUFFER, draw.instanceVbo);
+					glBufferData(GL_ARRAY_BUFFER, packed.size() * sizeof(float),
+								 packed.data(), GL_DYNAMIC_DRAW);
+					draw.uploaded = packed;
+				}
+				draw.instanceCount = (int) bucket.instances.size();
+
+				glBindVertexArray(draw.vao);
+				frameDrawCalls++;
+				glDrawArraysInstanced(GL_TRIANGLES, 0, bucket.vertexCount, draw.instanceCount);
+			}
+			glBindVertexArray(0);
+			// The tank loop below expects the ordinary mesh program bound.
+			glUseProgram(meshProgram);
+		}
 	}
 	std::vector<float> unmodelledMine, unmodelledOther;
 	bool haveSight = false;

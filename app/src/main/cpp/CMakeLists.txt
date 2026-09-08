@@ -142,6 +142,7 @@ add_library(scorched_common STATIC
     porting/MovementStore.cpp
     porting/TargetModelStore.cpp
     porting/ChatStore.cpp
+    porting/InstanceBuffer.cpp
     porting/SkyDescription.cpp
     porting/ClientSync.cpp
     porting/ClientContext.cpp
