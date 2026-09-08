@@ -661,6 +661,22 @@ namespace
 						"the speech bubble is raised over the speaking tank's turret");
 				}
 				check(sawTalk, "a tank saying something raises a speech-bubble event for the HUD");
+
+				// The text half. ChannelManager::showText() only writes to
+				// the server log under S3D_SERVER, so a bot's taunt reached
+				// the bubble and never the chat; it has to go out on the
+				// channel like any other message.
+				bool sawInChannel = false;
+				std::list<ServerChannelManager::MessageEntry> &sent =
+					ScorchedServer::instance()->getServerChannelManager().getLastMessages();
+				std::list<ServerChannelManager::MessageEntry>::iterator sentItor;
+				for (sentItor = sent.begin(); sentItor != sent.end(); ++sentItor)
+				{
+					if ((*sentItor).message.find("Take that!") != std::string::npos)
+						sawInChannel = true;
+				}
+				check(sawInChannel, "the spoken line is broadcast on the general channel, not just logged");
+
 			}
 		}
 
