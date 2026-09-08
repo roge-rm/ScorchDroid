@@ -119,6 +119,7 @@ class MainActivity : AppCompatActivity() {
                 onDoneBuying = { submitMoveAsync(MoveType.FINISHED_BUY) },
                 onScores = { showScores() },
                 onCameraPresets = { showCameraPresets() },
+                onSimulationSpeed = { showSimulationSpeed() },
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
             )
         }
@@ -853,12 +854,10 @@ class MainActivity : AppCompatActivity() {
         // Resigning ends your round, so it keeps a confirmation step rather
         // than firing off a single tap.
         val entries = listOf<Pair<String, () -> Unit>>(
-            // Scores/chat and the camera views used to be here; they now
-            // hang off a long press on the message and camera buttons, which
-            // is where they belong - each extends the icon it sits on.
-            "Game speed..." to {
-                showSimulationSpeed()
-            },
+            // Scores/chat, the camera views and the game speed used to be
+            // here; each now hangs off a long press on the button it
+            // extends - message, camera, and skip-turn respectively. Only
+            // genuinely rare things are left behind the overflow.
             (if (hudState.hudHidden) "Show HUD" else "Hide HUD") to {
                 hudState.hudHidden = !hudState.hudHidden
                 hudState.dialog = HudDialog.None
