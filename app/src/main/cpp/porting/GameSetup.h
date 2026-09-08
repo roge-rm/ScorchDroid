@@ -53,6 +53,10 @@ namespace ScorchDroidSetup
 		// one thing - adding an option below without saying where it goes
 		// would otherwise put it silently on a default tab.
 		std::string group;
+		// M19: an advanced option, shown under a heading the player has to
+		// open. Upstream hides about forty of these behind its own
+		// "Advanced Options" button.
+		bool advanced = false;
 		std::string description;  // upstream's own one-line description
 		Kind kind = eInt;
 		std::string value;        // current value, as a string
@@ -140,6 +144,11 @@ namespace ScorchDroidSetup
 		std::string description;
 	};
 
+	// The first <name> inside each <tag> of an XML file, with the
+	// <description> that follows it, skipping anything inside a comment.
+	// Both tankais.xml and landscapes.xml have that shape.
+	std::vector<Bot> scanNamed(const std::string &path, const std::string &tag);
+
 	// Every bot [mod] defines, with its description, in the file's own order.
 	std::vector<Bot> botsFor(const std::string &dataRoot, const std::string &mod);
 
@@ -149,6 +158,17 @@ namespace ScorchDroidSetup
 	// dummies, which never fire back.
 	std::vector<Bot> bots(const std::string &dataRoot);
 
+	// M19: the landscapes the chosen mod defines, by name, in the order its
+	// own landscapes.xml lists them.
+	std::vector<std::string> landscapes(const std::string &dataRoot);
+
+	// Which of them a game may choose between. Upstream stores this as a
+	// colon-separated whitelist in one string option, and treats an empty one
+	// as "all of them" (LandscapeDefinitionsBase::landscapeEnabled) - so an
+	// empty list here means the same, and is what a fresh config has.
+	std::vector<std::string> selectedLandscapes();
+	bool setLandscapes(const std::vector<std::string> &names);
+
 	// Which AI fills the slots that are not the player's. Upstream gives
 	// every one of its twenty-four player slots its own PlayerType, and a
 	// desktop dialog to fill them in; this port sets them together, which is
@@ -156,6 +176,13 @@ namespace ScorchDroidSetup
 	// singlehard three Sharks and three Randoms).
 	//
 	// Slot one is left as "Human" - that is the player.
+	// M19: more than one, if you want a mixed game. The slots are filled
+	// round-robin from the list, which is how a set of chips becomes
+	// twenty-three PlayerType entries - two Sharks and a Moron fills them
+	// Shark, Moron, Shark, Shark, Moron, ... and so on.
+	std::vector<std::string> botTypes();
+	bool setBotTypes(const std::vector<std::string> &names);
+
 	std::string botType();
 	bool setBotType(const std::string &name);
 

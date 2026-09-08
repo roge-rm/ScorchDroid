@@ -1778,6 +1778,7 @@ Java_com_rm_scorchdroid_NativeBridge_getSetupOptions(JNIEnv *env, jobject /* thi
         }
         std::ostringstream row;
         row << option.name << "|" << option.group << "|"
+            << (option.advanced ? 1 : 0) << "|"
             << (int) option.kind << "|" << option.value << "|"
             << option.minValue << "|" << option.maxValue << "|" << option.stepValue << "|"
             << choices.str() << "|" << option.description;
@@ -1837,6 +1838,35 @@ Java_com_rm_scorchdroid_NativeBridge_getAvailableMods(JNIEnv *env, jobject /* th
     return result;
 }
 
+// Two small conversions used by the list-valued options below.
+static jobjectArray toStringArray(JNIEnv *env, const std::vector<std::string> &values) {
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray((jsize) values.size(), stringClass, nullptr);
+    for (size_t i = 0; i < values.size(); i++) {
+        jstring value = env->NewStringUTF(values[i].c_str());
+        env->SetObjectArrayElement(result, (jsize) i, value);
+        env->DeleteLocalRef(value);
+    }
+    return result;
+}
+
+static std::vector<std::string> fromStringArray(JNIEnv *env, jobjectArray array) {
+    std::vector<std::string> values;
+    if (!array) return values;
+    const jsize count = env->GetArrayLength(array);
+    for (jsize i = 0; i < count; i++) {
+        jstring item = (jstring) env->GetObjectArrayElement(array, i);
+        if (!item) continue;
+        const char *chars = env->GetStringUTFChars(item, nullptr);
+        if (chars) {
+            values.push_back(chars);
+            env->ReleaseStringUTFChars(item, chars);
+        }
+        env->DeleteLocalRef(item);
+    }
+    return values;
+}
+
 // M18: the bots the chosen mod offers, as "name|description" - upstream's
 // own words, which in the base game are its difficulty ladder. Led by
 // "Random", which is not an AI but an instruction to pick one.
@@ -1854,6 +1884,41 @@ Java_com_rm_scorchdroid_NativeBridge_getBots(JNIEnv *env, jobject /* this */) {
         env->DeleteLocalRef(value);
     }
     return result;
+}
+
+// M19: the mix - every bot the slots are filled from, round-robin.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getBotTypes(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return toStringArray(env, ScorchDroidSetup::botTypes());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setBotTypes(
+        JNIEnv *env, jobject /* this */, jobjectArray jNames) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return ScorchDroidSetup::setBotTypes(fromStringArray(env, jNames)) ? JNI_TRUE : JNI_FALSE;
+}
+
+// M19: which maps a game may choose between. An empty selection is
+// upstream's own "all of them".
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getLandscapes(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return toStringArray(env, ScorchDroidSetup::landscapes("."));
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getSelectedLandscapes(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return toStringArray(env, ScorchDroidSetup::selectedLandscapes());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setLandscapes(
+        JNIEnv *env, jobject /* this */, jobjectArray jNames) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return ScorchDroidSetup::setLandscapes(fromStringArray(env, jNames)) ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT jstring JNICALL

@@ -56,7 +56,11 @@ class MainActivity : AppCompatActivity() {
     // M18: the bots the chosen mod offers, and which one fills the slots.
     // Re-read whenever the mod changes - a mod brings its own AIs.
     private var availableBots by mutableStateOf<List<BotOption>>(emptyList())
-    private var selectedBot by mutableStateOf("")
+    private var selectedBots by mutableStateOf<List<String>>(emptyList())
+    // M19: the mod's landscapes, and which of them a game may use. An empty
+    // selection is upstream's own "all of them".
+    private var availableLandscapes by mutableStateOf<List<String>>(emptyList())
+    private var selectedLandscapes by mutableStateOf<List<String>>(emptyList())
     // M12: non-null exactly while a tutorial game is running.
     private var tutorial by mutableStateOf<TutorialState?>(null)
     private var selectedMod by mutableStateOf("none")
@@ -176,22 +180,26 @@ class MainActivity : AppCompatActivity() {
                         NativeBridge.setSelectedMod(it)
                         selectedMod = NativeBridge.getSelectedMod()
                         // The new mod's bots, which are rarely the same ones.
-                        availableBots = parseBots(NativeBridge.getBots())
-                        selectedBot = NativeBridge.getBotType()
+                        readPlayersAndMaps()
                     },
                     bots = availableBots,
-                    selectedBot = selectedBot,
-                    onBotChange = {
-                        NativeBridge.setBotType(it)
-                        selectedBot = NativeBridge.getBotType()
+                    selectedBots = selectedBots,
+                    onBotsChange = {
+                        NativeBridge.setBotTypes(it.toTypedArray())
+                        selectedBots = NativeBridge.getBotTypes().toList()
+                    },
+                    landscapes = availableLandscapes,
+                    selectedLandscapes = selectedLandscapes,
+                    onLandscapesChange = {
+                        NativeBridge.setLandscapes(it.toTypedArray())
+                        selectedLandscapes = NativeBridge.getSelectedLandscapes().toList()
                     },
                     onChange = { option, value -> changeSetupOption(option, value) },
                     onReset = {
                         NativeBridge.resetSetupOptions()
                         setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
                         selectedMod = NativeBridge.getSelectedMod()
-                        availableBots = parseBots(NativeBridge.getBots())
-                        selectedBot = NativeBridge.getBotType()
+                        readPlayersAndMaps()
                     },
                     onStart = { startGame() },
                     onBack = { appScreen = AppScreen.MENU },
@@ -313,6 +321,18 @@ class MainActivity : AppCompatActivity() {
         startGame()
     }
 
+    /**
+     * M18/M19: the parts of the setup screen that are not plain options - the
+     * bots and the landscapes. Both come from the chosen mod, so they are
+     * re-read whenever the mod changes as well as when the screen opens.
+     */
+    private fun readPlayersAndMaps() {
+        availableBots = parseBots(NativeBridge.getBots())
+        selectedBots = NativeBridge.getBotTypes().toList()
+        availableLandscapes = NativeBridge.getLandscapes().toList()
+        selectedLandscapes = NativeBridge.getSelectedLandscapes().toList()
+    }
+
     private fun openQuickGame() {
         appScreen = AppScreen.QUICK_GAME
     }
@@ -357,8 +377,7 @@ class MainActivity : AppCompatActivity() {
         // startServer() is far too late for it.
         availableMods = NativeBridge.getAvailableMods().toList()
         selectedMod = NativeBridge.getSelectedMod()
-        availableBots = parseBots(NativeBridge.getBots())
-        selectedBot = NativeBridge.getBotType()
+        readPlayersAndMaps()
         appScreen = AppScreen.SETUP
     }
 

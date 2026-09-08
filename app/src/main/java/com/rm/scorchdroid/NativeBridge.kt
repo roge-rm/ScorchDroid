@@ -314,6 +314,26 @@ object NativeBridge {
 
     external fun setBotType(name: String): Boolean
 
+    /**
+     * M19: the mix. The slots are filled round-robin from this list, so the
+     * proportions asked for are the proportions played. Never empty - a game
+     * needs someone to play against.
+     */
+    external fun getBotTypes(): Array<String>
+
+    external fun setBotTypes(names: Array<String>): Boolean
+
+    /** M19: every landscape the chosen mod defines, by name. */
+    external fun getLandscapes(): Array<String>
+
+    /**
+     * M19: the ones a game may choose between. Empty is upstream's own "all
+     * of them" (LandscapeDefinitionsBase::landscapeEnabled), not "none".
+     */
+    external fun getSelectedLandscapes(): Array<String>
+
+    external fun setLandscapes(names: Array<String>): Boolean
+
     external fun getAvailableMods(): Array<String>
 
     external fun getSelectedMod(): String
@@ -525,6 +545,8 @@ data class SetupOption(
     val name: String,
     /** M18: which tab of the setup screen this belongs on, decided natively. */
     val group: String,
+    /** M19: shown under the tab's "Advanced" heading rather than in front. */
+    val advanced: Boolean,
     val kind: SetupKind,
     val value: String,
     val minValue: Int,
@@ -561,11 +583,11 @@ private fun humanise(identifier: String): String =
     identifier.replace(Regex("(?<=[a-z0-9])(?=[A-Z])"), " ").trim()
 
 fun parseSetupOptions(rows: Array<String>): List<SetupOption> = rows.mapNotNull { row ->
-    // Nine fields, description last so it may contain anything - including
+    // Ten fields, description last so it may contain anything - including
     // the pipes and commas the earlier fields use as separators.
-    val parts = row.split("|", limit = 9)
-    if (parts.size != 9) return@mapNotNull null
-    val kind = when (parts[2].toIntOrNull()) {
+    val parts = row.split("|", limit = 10)
+    if (parts.size != 10) return@mapNotNull null
+    val kind = when (parts[3].toIntOrNull()) {
         0 -> SetupKind.BOUNDED_INT
         1 -> SetupKind.INT
         2 -> SetupKind.BOOL
@@ -575,17 +597,18 @@ fun parseSetupOptions(rows: Array<String>): List<SetupOption> = rows.mapNotNull 
     SetupOption(
         name = parts[0],
         group = parts[1],
+        advanced = parts[2] == "1",
         kind = kind,
-        value = parts[3],
-        minValue = parts[4].toIntOrNull() ?: 0,
-        maxValue = parts[5].toIntOrNull() ?: 0,
-        stepValue = parts[6].toIntOrNull() ?: 1,
-        choices = parts[7].split(",").filter { it.isNotBlank() }.mapNotNull { choice ->
+        value = parts[4],
+        minValue = parts[5].toIntOrNull() ?: 0,
+        maxValue = parts[6].toIntOrNull() ?: 0,
+        stepValue = parts[7].toIntOrNull() ?: 1,
+        choices = parts[8].split(",").filter { it.isNotBlank() }.mapNotNull { choice ->
             val split = choice.split("=", limit = 2)
             if (split.size != 2) null
             else SetupChoice(split[0].toIntOrNull() ?: return@mapNotNull null, split[1])
         },
-        description = parts[8],
+        description = parts[9],
     )
 }
 

@@ -66,8 +66,11 @@ fun GameSetupScreen(
     selectedMod: String,
     onModChange: (String) -> Unit,
     bots: List<BotOption>,
-    selectedBot: String,
-    onBotChange: (String) -> Unit,
+    selectedBots: List<String>,
+    onBotsChange: (List<String>) -> Unit,
+    landscapes: List<String>,
+    selectedLandscapes: List<String>,
+    onLandscapesChange: (List<String>) -> Unit,
     onChange: (SetupOption, String) -> Unit,
     onReset: () -> Unit,
     onStart: () -> Unit,
@@ -187,7 +190,7 @@ fun GameSetupScreen(
                     ModRow(mods, selectedMod, onModChange)
                 }
 
-                options.filter { it.group == tab }.forEach { option ->
+                options.filter { it.group == tab && !it.advanced }.forEach { option ->
                     SetupRow(option, onChange)
                     HorizontalDivider(
                         color = Color.White.copy(alpha = 0.08f),
@@ -199,7 +202,41 @@ fun GameSetupScreen(
                 // because the two are one question - how many opponents, and
                 // how good.
                 if (tab == "Players" && bots.isNotEmpty()) {
-                    BotRow(bots, selectedBot, onBotChange)
+                    BotRow(bots, selectedBots, onBotsChange)
+                }
+
+                // M19: which maps a game may choose between. On the World
+                // tab, which is where the landscape belongs, and in front
+                // rather than under Advanced - upstream gives it a whole tab.
+                if (tab == "World" && landscapes.isNotEmpty()) {
+                    LandscapeRow(landscapes, selectedLandscapes, onLandscapesChange)
+                }
+
+                // M19: the rest of what upstream lets a host decide, behind
+                // the same kind of heading its own dialog uses - scoring,
+                // the economy, the extra clocks, the movement rules. Opened
+                // in place rather than on another screen: they belong to the
+                // tab they are under, and a player who wants one is already
+                // on the right tab.
+                val advanced = options.filter { it.group == tab && it.advanced }
+                if (advanced.isNotEmpty()) {
+                    var expanded by remember(tab) { mutableStateOf(false) }
+                    TextButton(onClick = { expanded = !expanded }) {
+                        Text(
+                            if (expanded) "Hide advanced" else "Advanced (${advanced.size})",
+                            color = SetupAccent,
+                        )
+                    }
+                    if (expanded) {
+                        Spacer(Modifier.height(6.dp))
+                        advanced.forEach { option ->
+                            SetupRow(option, onChange)
+                            HorizontalDivider(
+                                color = Color.White.copy(alpha = 0.08f),
+                                modifier = Modifier.padding(vertical = 10.dp),
+                            )
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(24.dp))
@@ -224,21 +261,36 @@ fun GameSetupScreen(
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun BotRow(bots: List<BotOption>, selected: String, onChange: (String) -> Unit) {
+private fun BotRow(bots: List<BotOption>, selected: List<String>, onChange: (List<String>) -> Unit) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Text("Bots", color = Color.White, style = MaterialTheme.typography.titleSmall)
         Text(
-            text = bots.firstOrNull { it.name == selected }?.description
-                ?: "Which computer player fills the other places",
+            // One selected: upstream's own description of it, which is the
+            // difficulty. Several: say what the mix does, since no single
+            // description covers it.
+            text = when {
+                selected.size == 1 ->
+                    bots.firstOrNull { it.name == selected.first() }?.description
+                        ?: "Which computer players fill the other places"
+                selected.size > 1 -> "The other places are filled from these, in turn"
+                else -> "Which computer players fill the other places"
+            },
             color = Color.White.copy(alpha = 0.55f),
             style = MaterialTheme.typography.bodySmall,
         )
         Spacer(Modifier.height(6.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             bots.forEach { bot ->
+                val isOn = bot.name in selected
                 FilterChip(
-                    selected = bot.name == selected,
-                    onClick = { onChange(bot.name) },
+                    selected = isOn,
+                    onClick = {
+                        // Toggling, not choosing: several bots make a mixed
+                        // game. The last one cannot be turned off, because a
+                        // game with no opponents is not a game.
+                        val next = if (isOn) selected - bot.name else selected + bot.name
+                        if (next.isNotEmpty()) onChange(next)
+                    },
                     label = { Text(bot.name, style = MaterialTheme.typography.bodySmall) },
                     colors = FilterChipDefaults.filterChipColors(
                         containerColor = Color.White.copy(alpha = 0.06f),
@@ -253,16 +305,78 @@ private fun BotRow(bots: List<BotOption>, selected: String, onChange: (String) -
 }
 
 /**
- * Enums whose values form a scale rather than a set, and so read better as a
- * slider than as a row of chips.
+ * M19: which maps a game may choose between.
  *
- * Upstream declares WindForce as Random, None, 1, 2, 3, 4, 5, Breezy, Gale and
- * WindType as Never, Sometimes, Frequently, Constantly, Always - both in
- * increasing order, so dragging right means more wind and more change. The
- * other enums are not like that: WallType's Concrete, Bouncy, Random and
- * TurnType's several turn orders are unordered alternatives, and putting them
- * on a track would invent an ordering upstream does not have.
+ * Upstream gives this a tab of its own with a thumbnail per landscape and
+ * Select All / Select None buttons. The thumbnails are its own bitmaps and
+ * would be worth having; the names carry the meaning in the meantime.
+ *
+ * Nothing selected is upstream's own "all of them", not "none" - there is no
+ * way to say a game has no landscapes to play on, so All is the empty list.
  */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LandscapeRow(
+    landscapes: List<String>,
+    selected: List<String>,
+    onChange: (List<String>) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Maps", color = Color.White, style = MaterialTheme.typography.titleSmall)
+            TextButton(onClick = { onChange(emptyList()) }) {
+                Text("All", color = SetupAccent, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Text(
+            text = if (selected.isEmpty()) {
+                "Every landscape this mod defines"
+            } else {
+                "${selected.size} of ${landscapes.size} landscapes"
+            },
+            color = Color.White.copy(alpha = 0.55f),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(6.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            landscapes.forEach { name ->
+                // With nothing chosen every map is in play, so every chip
+                // reads as on - which is what the game will actually do.
+                val isOn = selected.isEmpty() || name in selected
+                FilterChip(
+                    selected = isOn,
+                    onClick = {
+                        val current = if (selected.isEmpty()) landscapes else selected
+                        val next = if (name in current) current - name else current + name
+                        // Turning the last one off would leave a game with
+                        // nowhere to play; read it as "back to all".
+                        onChange(if (next.isEmpty() || next.size == landscapes.size) {
+                            emptyList()
+                        } else {
+                            next
+                        })
+                    },
+                    label = { Text(name, style = MaterialTheme.typography.bodySmall) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = Color.White.copy(alpha = 0.06f),
+                        labelColor = Color.White.copy(alpha = 0.75f),
+                        selectedContainerColor = SetupAccent.copy(alpha = 0.3f),
+                        selectedLabelColor = Color.White,
+                    ),
+                )
+            }
+        }
+        HorizontalDivider(
+            color = Color.White.copy(alpha = 0.08f),
+            modifier = Modifier.padding(vertical = 10.dp),
+        )
+    }
+}
+
 private val SLIDER_ENUMS = setOf("WindForce", "WindType")
 
 @Composable
