@@ -67,6 +67,7 @@
 #include <ScoreboardState.h>
 #include <GameSetup.h>
 #include <PlayerProfile.h>
+#include <landscapedef/LandscapeDefinitionsBase.hpp>
 #include <tankai/TankAIStore.hpp>
 #include <tankai/TankAI.hpp>
 #include <common/FixedVector4.hpp>
@@ -2250,6 +2251,28 @@ static void testGameSetup()
 		check(moronDescription.find("stupid") != std::string::npos,
 			"a bot's description is upstream's own words");
 
+		// M19: a mixed roster, which is what upstream's per-slot PlayerType
+		// list is for. The slots are filled round-robin, so the proportions
+		// asked for are the proportions played.
+		check(ScorchDroidSetup::setBotTypes({ "Shark", "Moron" }),
+			"more than one kind of bot can be chosen");
+		{
+			std::vector<std::string> mix = ScorchDroidSetup::botTypes();
+			check(mix.size() == 2 && mix[0] == "Shark" && mix[1] == "Moron",
+				"...and reads back as the mix that was asked for");
+			OptionsGame probe;
+			const char *path = "/tmp/scorchdroid-mix.xml";
+			check(ScorchDroidSetup::writeSessionFile(path), "...written to the session config");
+			check(probe.readOptionsFromFile(path), "...and read back");
+			check(0 == strcmp(probe.getPlayerType(1), "Shark") &&
+				0 == strcmp(probe.getPlayerType(2), "Moron") &&
+				0 == strcmp(probe.getPlayerType(3), "Shark"),
+				"...dealt round-robin across the slots");
+			unlink(path);
+		}
+		check(!ScorchDroidSetup::setBotTypes({}),
+			"an empty mix is refused - a game needs someone to play against");
+
 		check(ScorchDroidSetup::setBotType("Shark"), "the bots can be chosen");
 		check(ScorchDroidSetup::botType() == "Shark", "...and the choice sticks");
 		{
@@ -2496,6 +2519,49 @@ static void testGameSetup()
 		ScorchDroidSetup::ensureBotsValidForMod(".");
 		std::vector<std::string> apocBots = ScorchDroidSetup::botNames(".", "apoc");
 		check(!apocBots.empty(), "...with the mod's own bot list readable");
+
+		// M19: which maps are in play. Upstream keeps this as a colon-
+		// separated whitelist in one string option, with empty meaning all.
+		{
+			// From the shipped config: the presets loaded above name their own
+			// landscapes (the tutorial plays on a short list of simple ones),
+			// and this is about what a normal game starts from.
+			ScorchDroidSetup::reset();
+			std::vector<std::string> all = ScorchDroidSetup::landscapes(".");
+			check(all.size() > 10, "the base game's landscapes are listed");
+			bool sawIslands = false, sawCavern = false;
+			for (size_t i = 0; i < all.size(); i++)
+			{
+				if (all[i] == "islands") sawIslands = true;
+				if (all[i] == "cavern") sawCavern = true;
+			}
+			check(sawIslands && sawCavern, "...by upstream's own names");
+			check(ScorchDroidSetup::selectedLandscapes().empty(),
+				"...with none singled out to begin with, which upstream reads as all of them");
+
+			check(ScorchDroidSetup::setLandscapes({ "islands", "cavern" }),
+				"a subset can be chosen");
+			std::vector<std::string> chosen = ScorchDroidSetup::selectedLandscapes();
+			check(chosen.size() == 2 && chosen[0] == "islands" && chosen[1] == "cavern",
+				"...and reads back");
+			{
+				OptionsGame probe;
+				const char *path = "/tmp/scorchdroid-land.xml";
+				check(ScorchDroidSetup::writeSessionFile(path), "...is written out");
+				check(probe.readOptionsFromFile(path), "...and read back");
+				check(0 == strcmp(probe.getLandscapes(), "islands:cavern"),
+					"...as the colon-separated list upstream parses");
+				// The engine's own filter is what decides, so ask it.
+				LandscapeDefinitionsBase definitions;
+				check(!definitions.landscapeEnabled(probe, "hilly"),
+					"...and the engine agrees a landscape outside the list is off");
+				check(definitions.landscapeEnabled(probe, "cavern"),
+					"...and one inside it is on");
+				unlink(path);
+			}
+			check(ScorchDroidSetup::setLandscapes({}), "and clearing it goes back to all of them");
+			check(ScorchDroidSetup::selectedLandscapes().empty(), "...leaving nothing singled out");
+		}
 
 		check(ScorchDroidSetup::presets(".", "no-such-mod").empty(),
 			"a mod that isn't there offers nothing rather than failing");

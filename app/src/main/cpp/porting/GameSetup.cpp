@@ -29,31 +29,74 @@ namespace
 	// of the game first, then the clocks, then the arsenal, then the
 	// physics - rather than OptionsGame's own, which is grouped by the
 	// section of the config file it lives in.
+	// M19: each entry also says whether it is an everyday option or an
+	// advanced one. Upstream keeps around forty-five of these behind an
+	// "Advanced Options" button on its own setup dialog, and the split here
+	// is the same judgement: the ones that change what a game *is* stay in
+	// front, and the ones that tune how it is scored, paid for and timed sit
+	// under a heading you have to open.
 	struct Exposed
 	{
 		const char *name;
 		const char *group;
+		bool advanced;
 	};
 	const Exposed kExposed[] = {
-		{ "NumberOfRounds",        "Game"    },
-		{ "MaxNumberOfRoundTurns", "Game"    },
-		{ "TurnType",              "Game"    },
-		{ "ShotTime",              "Game"    },
-		{ "BuyingTime",            "Game"    },
-		{ "ResignMode",            "Game"    },
-		{ "NumberOfPlayers",       "Players" },
-		{ "PlayerLives",           "Players" },
-		{ "Teams",                 "Players" },
-		{ "TeamBallance",          "Players" },
-		{ "MoneyStarting",         "Arms"    },
-		{ "StartArmsLevel",        "Arms"    },
-		{ "EndArmsLevel",          "Arms"    },
-		{ "WeaponSpeed",           "Arms"    },
-		{ "WallType",              "World"   },
-		{ "Gravity",               "World"   },
-		{ "WindForce",             "World"   },
-		{ "WindType",              "World"   },
-		{ nullptr, nullptr },
+		// --- Game -------------------------------------------------------
+		{ "NumberOfRounds",           "Game",    false },
+		{ "MaxNumberOfRoundTurns",    "Game",    false },
+		{ "TurnType",                 "Game",    false },
+		{ "ShotTime",                 "Game",    false },
+		{ "BuyingTime",               "Game",    false },
+		{ "ResignMode",               "Game",    false },
+		{ "RoundTime",                "Game",    true  },
+		{ "StartTime",                "Game",    true  },
+		{ "AIShotTime",               "Game",    true  },
+		{ "RemoveTime",               "Game",    true  },
+		{ "ScoreWonForRound",         "Game",    true  },
+		{ "ScoreWonForLives",         "Game",    true  },
+		{ "ScorePerKill",             "Game",    true  },
+		{ "ScorePerAssist",           "Game",    true  },
+		{ "ScorePerMoney",            "Game",    true  },
+		{ "ScorePerResign",           "Game",    true  },
+		{ "ScorePerSpectate",         "Game",    true  },
+		// --- Players ----------------------------------------------------
+		{ "NumberOfPlayers",          "Players", false },
+		{ "PlayerLives",              "Players", false },
+		{ "Teams",                    "Players", false },
+		{ "TeamBallance",             "Players", false },
+		{ "RemoveBotsAtPlayers",      "Players", true  },
+		{ "ResidualPlayers",          "Players", true  },
+		// --- Arms -------------------------------------------------------
+		{ "MoneyStarting",            "Arms",    false },
+		{ "StartArmsLevel",           "Arms",    false },
+		{ "EndArmsLevel",             "Arms",    false },
+		{ "WeaponSpeed",              "Arms",    false },
+		{ "WeaponScale",              "Arms",    true  },
+		{ "GiveAllWeapons",           "Arms",    true  },
+		{ "MaxNumberWeapons",         "Arms",    true  },
+		{ "DelayedDefenseActivation", "Arms",    true  },
+		{ "MoneyBuyOnRound",          "Arms",    true  },
+		{ "MoneyInterest",            "Arms",    true  },
+		{ "MoneyPerRound",            "Arms",    true  },
+		{ "MoneyWonForRound",         "Arms",    true  },
+		{ "MoneyWonForLives",         "Arms",    true  },
+		{ "MoneyWonPerKillPoint",     "Arms",    true  },
+		{ "MoneyWonPerAssistPoint",   "Arms",    true  },
+		{ "MoneyWonPerMultiKillPoint","Arms",    true  },
+		{ "MoneyWonPerHitPoint",      "Arms",    true  },
+		{ "MoneyPerHealthPoint",      "Arms",    true  },
+		// --- World ------------------------------------------------------
+		{ "WallType",                 "World",   false },
+		{ "Gravity",                  "World",   false },
+		{ "WindForce",                "World",   false },
+		{ "WindType",                 "World",   false },
+		{ "MovementRestriction",      "World",   true  },
+		{ "MaxClimbingDistance",      "World",   true  },
+		{ "MinFallingDistance",       "World",   true  },
+		{ "TankFallingDamage",        "World",   true  },
+		{ "CycleMaps",                "World",   true  },
+		{ nullptr, nullptr, false },
 	};
 
 	std::string trimmed(const std::string &value)
@@ -156,6 +199,7 @@ namespace ScorchDroidSetup
 			if (!entry) continue;
 			Option option;
 			option.group = kExposed[i].group;
+			option.advanced = kExposed[i].advanced;
 			if (describe(entry, option)) result.push_back(option);
 		}
 		return result;
@@ -358,6 +402,111 @@ namespace ScorchDroidSetup
 		return found;
 	}
 
+	std::vector<std::string> landscapes(const std::string &dataRoot)
+	{
+		std::string chosenMod;
+		{
+			std::lock_guard<std::mutex> lock(g_mutex);
+			chosenMod = g_options ? g_options->getMod() : "none";
+		}
+
+		std::vector<std::string> found;
+		// Same comment-aware scan as the bots, and for the same reason: a
+		// landscape inside a comment is one the engine will not offer, and a
+		// picker that listed it would produce a game that cannot start.
+		std::vector<Bot> scanned = scanNamed(
+			dataRoot + "/data/globalmods/" + chosenMod + "/data/landscapes.xml", "landscape");
+		if (scanned.empty() && chosenMod != "none")
+		{
+			// Upstream's own fallback (S3D::getModFile): a mod with no
+			// landscapes.xml of its own plays the base game's.
+			scanned = scanNamed(
+				dataRoot + "/data/globalmods/none/data/landscapes.xml", "landscape");
+		}
+		for (size_t i = 0; i < scanned.size(); i++) found.push_back(scanned[i].name);
+		return found;
+	}
+
+	std::vector<std::string> selectedLandscapes()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		std::vector<std::string> found;
+		if (!g_options) return found;
+		const std::string value = g_options->getLandscapes();
+		size_t start = 0;
+		while (start < value.size())
+		{
+			const size_t colon = value.find(':', start);
+			const std::string name = trimmed(value.substr(
+				start, colon == std::string::npos ? std::string::npos : colon - start));
+			if (!name.empty()) found.push_back(name);
+			if (colon == std::string::npos) break;
+			start = colon + 1;
+		}
+		return found;
+	}
+
+	bool setLandscapes(const std::vector<std::string> &names)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return false;
+		std::string value;
+		for (size_t i = 0; i < names.size(); i++)
+		{
+			if (!value.empty()) value += ":";
+			value += names[i];
+		}
+		// An empty list is upstream's own "all of them", not "none of them" -
+		// there is no way to say "no landscapes" and a game with nothing to
+		// play on could not start.
+		return g_options->getLandscapesEntry().setValueFromString(value);
+	}
+
+	std::vector<std::string> botTypes()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		std::vector<std::string> found;
+		if (!g_options) return found;
+		std::list<OptionEntry *> &players = g_options->getPlayerTypeOptions();
+		int index = 0;
+		for (std::list<OptionEntry *>::iterator itor = players.begin();
+			itor != players.end();
+			++itor, index++)
+		{
+			// Slot one is the player; the rest are the mix, and each distinct
+			// name in slot order is one chip in the UI.
+			if (index == 0) continue;
+			const std::string name = (*itor)->getValueAsString();
+			if (name.empty() || name == "Human") continue;
+			if (std::find(found.begin(), found.end(), name) == found.end())
+			{
+				found.push_back(name);
+			}
+		}
+		return found;
+	}
+
+	bool setBotTypes(const std::vector<std::string> &names)
+	{
+		if (names.empty()) return false;
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return false;
+
+		std::list<OptionEntry *> &players = g_options->getPlayerTypeOptions();
+		int index = 0;
+		for (std::list<OptionEntry *>::iterator itor = players.begin();
+			itor != players.end();
+			++itor, index++)
+		{
+			if (index == 0) continue;
+			// Round-robin rather than random, so the mix is the one asked
+			// for: two of three slots are Sharks if two of the three chips
+			// are, however many players the game ends up with.
+			(*itor)->setValueFromString(names[(index - 1) % names.size()]);
+		}
+		return true;
+	}
+
 	std::string botType()
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
@@ -408,6 +557,11 @@ namespace ScorchDroidSetup
 
 	std::vector<Bot> botsFor(const std::string &dataRoot, const std::string &mod)
 	{
+		return scanNamed(dataRoot + "/data/globalmods/" + mod + "/data/tankais.xml", "ai");
+	}
+
+	std::vector<Bot> scanNamed(const std::string &path, const std::string &tag)
+	{
 		// A scan rather than an XML parse: the file's shape is upstream's own
 		// and fixed - <ais> of <ai>, each opening with its <name> and then its
 		// <description> - and the alternative is standing up the whole XMLFile
@@ -418,8 +572,7 @@ namespace ScorchDroidSetup
 		// that read them would hand back bots the engine will refuse to
 		// create.
 		std::vector<Bot> found;
-		const std::string path =
-			dataRoot + "/data/globalmods/" + mod + "/data/tankais.xml";
+		const std::string openTag = "<" + tag + ">";
 		std::ifstream file(path.c_str());
 		if (!file.is_open()) return found;
 
@@ -445,7 +598,7 @@ namespace ScorchDroidSetup
 				const std::string live = line.substr(pos,
 					open == std::string::npos ? std::string::npos : open - pos);
 
-				if (live.find("<ai>") != std::string::npos)
+				if (live.find(openTag) != std::string::npos)
 				{
 					inAi = true;
 					wantDescription = false;
