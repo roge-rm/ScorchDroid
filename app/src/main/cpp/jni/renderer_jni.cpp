@@ -411,6 +411,32 @@ namespace
 		// against; pinch-zoom still goes closer for anyone who wants that.
 		float followDistance = 45.0f;
 		bool followMode = false;
+
+		// M6 parity: upstream's camera presets (TargetCamera::CamType).
+		// Free and Follow are this port's own two and stay exactly as they
+		// were - the camera button still toggles between them, since that
+		// is the one control reached mid-aim. The rest are upstream's, each
+		// a fixed (yaw, elevation, distance) framing of the current tank.
+		//
+		// Upstream measures its elevation from the *vertical* and this
+		// port's pitch from the horizontal, so its numbers arrive here as
+		// (pi/2 - elevation) - which is why "Top" is a large pitch and
+		// "Tank" a near-zero one, the opposite way round to how upstream
+		// writes them.
+		enum Preset
+		{
+			pFree = 0,
+			pFollow,
+			pTop,       // movePosition(rot, 0.174, 50)
+			pBehind,    // movePosition(rot, 1.0, 60) - upstream's AboveTank
+			pTank,      // movePosition(rot, 1.48, 15)
+			pAction,    // movePosition(rot, 0.7, 80)
+			pShot,      // follows the projectile; falls back to Behind
+		};
+		Preset preset = pFree;
+		// The bearing the shot camera watches from. Held steady while a
+		// shot is in the air - see the preset block in nativeOnDrawFrame.
+		float shotYaw = 0.0f;
 		// How much of the requested distance the terrain currently allows -
 		// see the occlusion pull-in in nativeOnDrawFrame. 1.0 is "nothing in
 		// the way". Kept between frames so the camera can ease back out
@@ -3463,11 +3489,41 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 
 	std::vector<float> myTankPositions, enemyTankPositions;  // fallback markers
+	// Real in-flight shot/explosion positions, straight from the running
+	// simulation's ActionController. Shots also report which tank fired
+	// them, so each one can use that tank's own projectile model (see the
+	// shotPlayerIds addition in patch 0009).
+	//
+	// Read here rather than at the draw site further down because the shot
+	// camera needs them: it frames the projectile, so it has to know where
+	// the projectile is before the view matrix is built.
+	std::vector<FixedVector> shotPositionsRaw, explosionPositionsRaw;
+	std::vector<unsigned int> shotPlayerIds;
+	std::vector<FixedVector> shotVelocities;
+	std::vector<unsigned int> shotWeaponIds;
+	ctx->getActionController().getShotAndExplosionPositions(
+		shotPositionsRaw, explosionPositionsRaw, &shotPlayerIds, &shotVelocities, &shotWeaponIds);
+
+	// The first shot in flight, in world space, for the shot camera. Upstream
+	// tracks the local tank's own projectile view points; this port has one
+	// human player, so the first live shot is that shot in every practical
+	// case and picking it needs no extra plumbing.
+	bool haveShot = false;
+	float shotWorldX = 0.0f, shotWorldY = 0.0f, shotWorldZ = 0.0f;
+	if (!shotPositionsRaw.empty()) {
+		FixedVector &shot = shotPositionsRaw[0];
+		shotWorldX = shot[0].asFloat();
+		shotWorldY = shot[2].asFloat();
+		shotWorldZ = worldZFromEngineY(shot[1].asFloat());
+		haveShot = true;
+	}
+
 	bool haveMyTank = false;
 	bool myTankAlive = false;
 	unsigned int myPlayerId = 0;
 	float myColorR = 1.0f, myColorG = 1.0f, myColorB = 1.0f;
 	float myTankX = 0.0f, myTankY = 0.0f, myTankZ = 0.0f;
+	float myTankYaw = 0.0f;
 	for (auto &entry : tanks) {
 		Tank *tank = entry.second;
 		FixedVector &pos = tank->getLife().getTargetPosition();
@@ -3605,6 +3661,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			myPlayerId = tank->getPlayerId();
 			myColorR = tankColor[0]; myColorG = tankColor[1]; myColorB = tankColor[2];
 			myTankX = x; myTankY = markerY; myTankZ = z;
+			// The turret bearing, for the camera presets that frame the
+			// tank from behind/above it (see the preset block below).
+			myTankYaw = heading;
 		} else {
 			enemyTankPositions.push_back(x); enemyTankPositions.push_back(markerY); enemyTankPositions.push_back(z);
 		}
@@ -3649,9 +3708,54 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		targetY = useFollow ? myTankY : g_camera.targetY;
 		targetZ = useFollow ? myTankZ : g_camera.targetZ;
 		float distance = g_camera.followMode ? g_camera.followDistance : g_camera.orbitDistance;
-		eyeX = targetX + distance * cosf(g_camera.pitch) * sinf(g_camera.yaw);
-		eyeY = targetY + distance * sinf(g_camera.pitch);
-		eyeZ = targetZ + distance * cosf(g_camera.pitch) * cosf(g_camera.yaw);
+		float pitch = g_camera.pitch;
+
+		// M6 parity: the fixed presets. Each overrides the framing for this
+		// frame only - the drag-controlled yaw/pitch/distance are left
+		// untouched underneath, so switching back to Free or Follow restores
+		// exactly the view the player had set up.
+		if (g_camera.preset >= OrbitCamera::pTop && haveMyTank) {
+			targetX = myTankX;
+			targetY = myTankY;
+			targetZ = myTankZ;
+
+			// Upstream frames these relative to the tank's own turret
+			// bearing, not the free camera's yaw, which is what makes
+			// "behind the tank" mean behind *it* rather than behind where
+			// you happened to be looking.
+			float presetYaw = myTankYaw;
+			switch (g_camera.preset) {
+				case OrbitCamera::pTop:    pitch = 1.397f; distance = 50.0f; break;
+				case OrbitCamera::pBehind: pitch = 0.571f; distance = 60.0f; break;
+				case OrbitCamera::pTank:   pitch = 0.150f; distance = 15.0f; break;
+				case OrbitCamera::pAction: pitch = 0.871f; distance = 80.0f; break;
+				case OrbitCamera::pShot:
+					// Upstream's CamShot watches the shot itself and drops
+					// back to the behind-the-tank view when there is none.
+					if (haveShot) {
+						targetX = shotWorldX;
+						targetY = shotWorldY;
+						targetZ = shotWorldZ;
+						pitch = 0.400f;
+						distance = 45.0f;
+						// Keep the previous bearing while a shot is in the
+						// air: recomputing it per frame from a moving
+						// projectile makes the camera spin around it.
+						presetYaw = g_camera.shotYaw;
+					} else {
+						pitch = 0.571f;
+						distance = 60.0f;
+						g_camera.shotYaw = presetYaw;
+					}
+					break;
+				default: break;
+			}
+			g_camera.yaw = presetYaw;
+		}
+
+		eyeX = targetX + distance * cosf(pitch) * sinf(g_camera.yaw);
+		eyeY = targetY + distance * sinf(pitch);
+		eyeZ = targetZ + distance * cosf(pitch) * cosf(g_camera.yaw);
 	}
 
 	// S6: in a cavern, keep the eye inside the room. Both clamps are a
@@ -4231,13 +4335,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// simulation's ActionController. Shots also report which tank fired
 	// them, so each one can use that tank's own projectile model (see the
 	// shotPlayerIds addition in patch 0009) rather than one shared mesh.
-	std::vector<FixedVector> shotPositionsRaw, explosionPositionsRaw;
-	std::vector<unsigned int> shotPlayerIds;
-	std::vector<FixedVector> shotVelocities;
-	std::vector<unsigned int> shotWeaponIds;
-	ctx->getActionController().getShotAndExplosionPositions(
-		shotPositionsRaw, explosionPositionsRaw, &shotPlayerIds, &shotVelocities, &shotWeaponIds);
-
 	std::vector<float> unmodelledShots, explosionPositions;
 	glUseProgram(meshProgram);
 	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
@@ -4614,6 +4711,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeGetTankOverlays(JNIEnv *env, jobject)
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeCameraDrag(JNIEnv *, jobject, jfloat dx, jfloat dy) {
 	std::lock_guard<std::mutex> lock(g_cameraMutex);
+	// A drag means the player wants to look somewhere themselves, so it
+	// drops out of any fixed preset rather than fighting it - the preset
+	// recomputes the framing every frame, so a drag inside one would be
+	// silently discarded and read as a dead control.
+	if (g_camera.preset >= OrbitCamera::pTop) {
+		g_camera.preset = g_camera.followMode ? OrbitCamera::pFollow : OrbitCamera::pFree;
+	}
 	// Both axes turn the view the way the ground would go if you had hold
 	// of it - the same sense as the two-finger pan, which moves the target
 	// against the finger so the world follows it.
@@ -4704,5 +4808,25 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeToggleCameraMode(JNIEnv *, jobject) {
 	std::lock_guard<std::mutex> lock(g_cameraMutex);
 	g_camera.followMode = !g_camera.followMode;
+	// The button toggles between this port's own two modes, so it also
+	// leaves any fixed preset - otherwise the toggle would appear to do
+	// nothing while a preset kept overriding the framing.
+	g_camera.preset = g_camera.followMode ? OrbitCamera::pFollow : OrbitCamera::pFree;
 	return g_camera.followMode ? JNI_TRUE : JNI_FALSE;
+}
+
+// M6 parity: pick one of upstream's camera presets (TargetCamera::CamType).
+// 0/1 are this port's own Free and Follow - the camera button's two - and
+// setting either just restores that mode; 2 and up are the fixed framings.
+// A drag drops back out of a fixed one (see nativeCameraDrag).
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeSetCameraPreset(JNIEnv *, jobject, jint preset) {
+	std::lock_guard<std::mutex> lock(g_cameraMutex);
+	if (preset < 0 || preset > OrbitCamera::pShot) return;
+	g_camera.preset = (OrbitCamera::Preset) preset;
+	// Free and Follow are the existing toggle's two states, so selecting
+	// one has to move the toggle with it or the camera button would show
+	// the wrong icon.
+	if (g_camera.preset == OrbitCamera::pFree) g_camera.followMode = false;
+	if (g_camera.preset == OrbitCamera::pFollow) g_camera.followMode = true;
 }

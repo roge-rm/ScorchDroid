@@ -769,6 +769,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // M6 parity: upstream's camera presets (TargetCamera::CamType). The
+    // camera *button* stays the quick free/follow toggle - it is the one
+    // control reached mid-aim - so the fixed framings live here instead of
+    // crowding it. Selecting one is a framing, not a mode lock: a drag drops
+    // straight back out of it (see nativeCameraDrag).
+    private fun showCameraPresets() {
+        val presets = CameraPreset.entries
+        hudState.dialog = HudDialog.ListChoice(
+            title = "Camera view",
+            items = presets.map { it.label },
+            cancelLabel = "Cancel",
+            onSelect = { index ->
+                gameRenderer.nativeSetCameraPreset(index)
+                // Keep the camera button's icon honest - selecting Free or
+                // Follow moves the toggle it shows.
+                hudState.cameraFollow = presets[index] == CameraPreset.FOLLOW
+                hudState.dialog = HudDialog.None
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+    }
+
     // Chat send. Off the main thread because it takes the engine mutex, which
     // the simulation tick holds for the duration of a step.
     private fun sendChatAsync(channel: String, text: String) {
@@ -786,6 +808,9 @@ class MainActivity : AppCompatActivity() {
         val entries = listOf<Pair<String, () -> Unit>>(
             "Scores and chat" to {
                 showScores()
+            },
+            "Camera view..." to {
+                showCameraPresets()
             },
             "Resign round..." to {
                 hudState.dialog = HudDialog.ListChoice(
