@@ -484,8 +484,18 @@ private fun ScoresContent(dialog: HudDialog.Scores) {
                 style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
             )
-            LazyColumn(modifier = Modifier.heightIn(max = 140.dp)) {
-                items(dialog.chat, key = { it.id }) { line ->
+            // Newest at the bottom and pinned there, like any chat log.
+            // reverseLayout lays out from the bottom up with index 0 at the
+            // bottom, so the list is passed newest-first: that both starts
+            // the view on the latest line and keeps it there as lines
+            // arrive. Without it the panel opened on the oldest lines it
+            // held - four "Game starting in N seconds..." - and clipped
+            // everything anyone had actually said.
+            LazyColumn(
+                modifier = Modifier.heightIn(max = 140.dp),
+                reverseLayout = true,
+            ) {
+                items(dialog.chat.asReversed(), key = { it.id }) { line ->
                     Text(
                         text = if (line.who.isEmpty()) line.text else "${line.who}: ${line.text}",
                         style = MaterialTheme.typography.bodySmall,
