@@ -73,6 +73,21 @@ namespace ScorchDroidSetup
 	// Forget every choice and go back to what the config file says.
 	void reset();
 
+	// M12: replaces the current options with those in [path], for the
+	// tutorial.
+	//
+	// Upstream's data/singletutorial.xml is the reusable half of its tutorial:
+	// seven inert "Target" players instead of bots that shoot back, no shot
+	// clock and no buying phase, generous money, a capped arms level, light
+	// steady wind and a short list of simple landscapes. That is exactly the
+	// setup a first game wants, and it is only an options file - unlike the
+	// step-by-step content, whose runner is client-only and whose conditions
+	// name upstream dialogs that do not exist here.
+	//
+	// Returns false if the file cannot be read, leaving the options untouched
+	// rather than half-applied.
+	bool loadPreset(const std::string &path);
+
 	// The mods available to choose, always with "none" first. Read from the
 	// data directory rather than hardcoded, so a mod dropped in alongside
 	// upstream's own appears without a code change.

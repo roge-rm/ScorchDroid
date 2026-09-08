@@ -2273,6 +2273,37 @@ static void testGameSetup()
 		unlink(apocPath);
 	}
 
+	// M12: the tutorial's setup is upstream's own file, which is the half of
+	// its tutorial that can be reused at all. Checked because a preset that
+	// silently failed to load would give a normal game with the tutorial's
+	// coach marks over it - confusing in a way a new player could not diagnose.
+	{
+		check(ScorchDroidSetup::loadPreset("data/singletutorial.xml"),
+			"the tutorial preset loads");
+		std::vector<ScorchDroidSetup::Option> tut = ScorchDroidSetup::options();
+		std::string shotTime, buyingTime;
+		for (size_t i = 0; i < tut.size(); i++)
+		{
+			if (tut[i].name == "ShotTime") shotTime = tut[i].value;
+			if (tut[i].name == "BuyingTime") buyingTime = tut[i].value;
+		}
+		// The two that make it a tutorial rather than a game: no clock on the
+		// shot, and no buying phase to sit through before playing.
+		check(shotTime == "0", "...with no shot clock");
+		check(buyingTime == "0", "...and no buying phase");
+
+		check(!ScorchDroidSetup::loadPreset("data/no-such-preset.xml"),
+			"a missing preset is refused rather than half-applied");
+		std::vector<ScorchDroidSetup::Option> after = ScorchDroidSetup::options();
+		std::string stillShotTime;
+		for (size_t i = 0; i < after.size(); i++)
+		{
+			if (after[i].name == "ShotTime") stillShotTime = after[i].value;
+		}
+		check(stillShotTime == "0", "...leaving the previous options untouched");
+		ScorchDroidSetup::reset();
+	}
+
 	// Every option has to survive the session file, not just the ones a test
 	// happens to name. The server now starts from that file rather than from
 	// the shipped config, so an option whose string form does not round-trip

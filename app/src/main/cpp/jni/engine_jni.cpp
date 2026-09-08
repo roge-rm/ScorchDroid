@@ -1768,6 +1768,19 @@ Java_com_rm_scorchdroid_NativeBridge_setSetupOption(
     return ScorchDroidSetup::set(name, value) ? JNI_TRUE : JNI_FALSE;
 }
 
+// M12: loads a preset options file over the current setup - upstream's own
+// tutorial configuration, in the only case that uses this. False if the file
+// could not be read, in which case nothing changed.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_loadSetupPreset(
+        JNIEnv *env, jobject /* this */, jstring jPath) {
+    const char *pathChars = env->GetStringUTFChars(jPath, nullptr);
+    std::string path(pathChars ? pathChars : "");
+    if (pathChars) env->ReleaseStringUTFChars(jPath, pathChars);
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return ScorchDroidSetup::loadPreset(path) ? JNI_TRUE : JNI_FALSE;
+}
+
 // The mods available to choose. "none" (upstream's base game) is always first;
 // the rest are whatever directories sit in data/globalmods, so a mod dropped in
 // alongside upstream's own appears with no code change.

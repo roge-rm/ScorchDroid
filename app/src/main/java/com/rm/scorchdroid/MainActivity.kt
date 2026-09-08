@@ -51,6 +51,8 @@ class MainActivity : AppCompatActivity() {
     private var setupOptions by mutableStateOf<List<SetupOption>>(emptyList())
     private var setupTitle by mutableStateOf("New Game")
     private var availableMods by mutableStateOf<List<String>>(emptyList())
+    // M12: non-null exactly while a tutorial game is running.
+    private var tutorial by mutableStateOf<TutorialState?>(null)
     private var selectedMod by mutableStateOf("none")
 
     // M4: the real Compose HUD's mutable state (see GameHud.kt) - written
@@ -128,11 +130,8 @@ class MainActivity : AppCompatActivity() {
                 )
                 AppScreen.SINGLE_PLAYER -> SinglePlayerScreen(
                     onNewGame = { openSetup("New Game") },
-                    onTutorial = { },
-                    // M12. Shown but disabled rather than hidden: it is a
-                    // planned part of the game, and a menu that quietly lacks
-                    // it says less than one that says "not yet".
-                    tutorialEnabled = false,
+                    onTutorial = { startTutorial() },
+                    tutorialEnabled = true,
                     onBack = { appScreen = AppScreen.MENU },
                 )
                 AppScreen.MULTIPLAYER -> MultiplayerScreen(
@@ -209,6 +208,12 @@ class MainActivity : AppCompatActivity() {
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
                 )
             }
+            // M12: over the HUD, and only during a tutorial game.
+            tutorial?.let { active ->
+                if (appScreen == AppScreen.GAME) {
+                    TutorialOverlay(active) { active.skip() }
+                }
+            }
         }
 
         // First run has real work to do - extracting upstream's ~90MB data/
@@ -235,11 +240,38 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * M12: starts the tutorial - upstream's own easy-game configuration with
+     * this port's own coach marks over it.
+     *
+     * No setup screen: the whole point is a game that needs no decisions
+     * first. The preset is loaded rather than merged, so a player who has been
+     * fiddling with rounds and wall types still gets the gentle version.
+     */
+    private fun startTutorial() {
+        val loaded = NativeBridge.loadSetupPreset("data/singletutorial.xml")
+        if (!loaded) {
+            // Nothing was changed, so a normal game would start instead - with
+            // tutorial text over it, which would be worse than saying so.
+            hudState.dialog = HudDialog.Message("The tutorial's settings could not be loaded.") {
+                hudState.dialog = HudDialog.None
+            }
+            return
+        }
+        tutorial = TutorialState()
+        startGame()
+    }
+
+    /**
      * M10: opens the pre-game setup screen. Both New Game and Host Game land
      * here - they differ in wording, not in what they configure, because a
      * single-player game on this port *is* a hosted game that nobody joined.
      */
     private fun openSetup(title: String) {
+        // Back to the shipped config: a player who ran the tutorial and then
+        // started a real game would otherwise inherit its seven inert targets
+        // and its missing shot clock, with the setup screen showing them as
+        // though they had chosen them.
+        NativeBridge.resetSetupOptions()
         setupTitle = title
         setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
         // The mod reaches the server through the session config, which is the
@@ -425,6 +457,7 @@ class MainActivity : AppCompatActivity() {
             surfaceHost.removeView(gameSurface)
         }
         hudState.reset()
+        tutorial = null
         aimSeeded = false
         lastChatVersion = 0
         lastChatLineId = 0
@@ -548,6 +581,8 @@ class MainActivity : AppCompatActivity() {
                 if (hudState.dialog === autoScoreDialog) hudState.dialog = HudDialog.None
                 autoScoreDialog = null
             }
+
+            tutorial?.observe(hudState)
 
             val moveId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
             if (moveId != 0) hudState.shotLocked = false
