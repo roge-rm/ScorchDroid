@@ -1,7 +1,16 @@
 package com.rm.scorchdroid
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,6 +22,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -31,11 +41,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.io.File
 import kotlin.math.roundToInt
 
 private val SettingsTop = Color(0xFF16213A)
@@ -53,7 +67,7 @@ private val SettingsAccent = Color(0xFFB39DFF)
  * device belongs in the pre-game setup screen instead.
  */
 @Composable
-fun SettingsScreen(settings: GameSettings, onBack: () -> Unit) {
+fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -86,6 +100,12 @@ fun SettingsScreen(settings: GameSettings, onBack: () -> Unit) {
 
             Group("Player")
             NameRow(settings)
+            // M16: the rest of upstream's PlayerDialog. Read from the shipped
+            // data - the mod's tanks.xml, upstream's colour palette, the
+            // avatars it ships - so a mod's own tanks appear here by itself.
+            TankModelRow(settings)
+            TankColorRow(settings)
+            AvatarRow(settings, dataRoot)
 
             Group("Sound")
             SwitchRow(
@@ -220,6 +240,244 @@ private fun NameRow(settings: GameSettings) {
 /** Commits when focus leaves the field. */
 private fun Modifier.onFocusChangedCommit(commit: () -> Unit): Modifier =
     this.onFocusChanged { state -> if (!state.isFocused) commit() }
+
+/**
+ * M16: the tank model, in a dialog rather than inline.
+ *
+ * The base game declares a hundred and five of them and a mod may declare
+ * more, so this is the one identity choice that cannot be a row of chips. The
+ * list is upstream's own order, which groups them roughly by category.
+ */
+@Composable
+private fun TankModelRow(settings: GameSettings) {
+    var picking by remember { mutableStateOf(false) }
+    // Read once, when the row first appears: the list only changes with the
+    // mod, and the mod cannot change while this screen is open.
+    val models = remember { NativeBridge.getTankModels().toList() }
+    if (models.isEmpty()) return
+
+    PickerRow(
+        title = "Tank",
+        subtitle = "Which tank you drive",
+        value = settings.tankModel.ifEmpty { "Random" },
+    ) { picking = true }
+
+    if (picking) {
+        AlertDialog(
+            onDismissRequest = { picking = false },
+            title = { Text("Tank") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                    // "Random" first, and it is not one of upstream's models -
+                    // it is the empty choice, which is what the game did
+                    // before anyone could pick.
+                    ChoiceLine("Random", settings.tankModel.isEmpty()) {
+                        settings.updateTankModel("")
+                        picking = false
+                    }
+                    models.forEach { model ->
+                        ChoiceLine(model, model == settings.tankModel) {
+                            settings.updateTankModel(model)
+                            picking = false
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { picking = false }) { Text("Close") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun ChoiceLine(label: String, selected: Boolean, onClick: () -> Unit) {
+    Text(
+        label,
+        color = if (selected) SettingsAccent else Color.Unspecified,
+        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+    )
+}
+
+@Composable
+private fun PickerRow(title: String, subtitle: String, value: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.fillMaxWidth(0.6f)) {
+            Text(title, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                subtitle,
+                color = Color.White.copy(alpha = 0.55f),
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Text(value, color = SettingsAccent, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+/**
+ * M16: the tank colour, as upstream's own twenty-six swatches.
+ *
+ * The game still has the last word: TankChangeSimAction ignores a colour
+ * another tank in the game already has, and hands you the one you were
+ * allocated instead. That is upstream's rule and worth keeping - two tanks the
+ * same colour is a real problem in a game about shooting at the right one.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun TankColorRow(settings: GameSettings) {
+    val colors = remember { NativeBridge.getTankColors() }
+    if (colors.isEmpty()) return
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Text("Colour", color = Color.White, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            "Your tank's colour, if it is free when the game starts",
+            color = Color.White.copy(alpha = 0.55f),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Swatch(
+                color = Color.Transparent,
+                selected = settings.tankColorIndex < 0,
+                label = "Any",
+            ) { settings.updateTankColorIndex(-1) }
+            colors.forEachIndexed { index, rgb ->
+                Swatch(
+                    color = Color(0xFF000000.toInt() or rgb),
+                    selected = index == settings.tankColorIndex,
+                ) { settings.updateTankColorIndex(index) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Swatch(
+    color: Color,
+    selected: Boolean,
+    label: String? = null,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(CircleShape)
+            .background(color)
+            .border(
+                width = if (selected) 3.dp else 1.dp,
+                color = if (selected) Color.White else Color.White.copy(alpha = 0.3f),
+                shape = CircleShape,
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (label != null) {
+            Text(
+                label,
+                color = Color.White.copy(alpha = 0.8f),
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+    }
+}
+
+/**
+ * M16: the avatar, shown against your name in the score table.
+ *
+ * Upstream ships nineteen and lets a player send any PNG; these are the ones
+ * everyone else already has, so no image has to cross the network for another
+ * player to see it. The files are read straight off the extracted data root -
+ * they are ordinary PNGs, a few kilobytes each.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AvatarRow(settings: GameSettings, dataRoot: String) {
+    val avatars = remember { NativeBridge.getAvatars().toList() }
+    if (avatars.isEmpty()) return
+
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Text("Avatar", color = Color.White, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            "Shown beside your name in the score table",
+            color = Color.White.copy(alpha = 0.55f),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(8.dp))
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .border(
+                        width = if (settings.avatar.isEmpty()) 3.dp else 1.dp,
+                        color = if (settings.avatar.isEmpty()) SettingsAccent
+                            else Color.White.copy(alpha = 0.3f),
+                        shape = RoundedCornerShape(6.dp),
+                    )
+                    .clickable { settings.updateAvatar("") },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("None", color = Color.White.copy(alpha = 0.7f),
+                    style = MaterialTheme.typography.labelSmall)
+            }
+            avatars.forEach { path ->
+                AvatarTile(path, dataRoot, path == settings.avatar) {
+                    settings.updateAvatar(path)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AvatarTile(path: String, dataRoot: String, selected: Boolean, onClick: () -> Unit) {
+    val image = rememberAvatarBitmap(dataRoot, path) ?: return
+    Image(
+        bitmap = image,
+        contentDescription = path.substringAfterLast('/').removeSuffix(".png"),
+        modifier = Modifier
+            .size(44.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .border(
+                width = if (selected) 3.dp else 1.dp,
+                color = if (selected) SettingsAccent else Color.White.copy(alpha = 0.3f),
+                shape = RoundedCornerShape(6.dp),
+            )
+            .clickable(onClick = onClick),
+    )
+}
+
+/**
+ * Decodes one avatar PNG, remembered per path so scrolling the settings screen
+ * does not decode nineteen files on every recomposition. Null when the file is
+ * missing or is not an image the platform reads, which the callers treat as
+ * "show nothing" rather than as an error.
+ */
+@Composable
+fun rememberAvatarBitmap(dataRoot: String, path: String): ImageBitmap? = remember(path) {
+    if (path.isEmpty()) return@remember null
+    runCatching {
+        BitmapFactory.decodeFile(File(dataRoot, path).path)?.asImageBitmap()
+    }.getOrNull()
+}
 
 @Composable
 private fun SwitchRow(

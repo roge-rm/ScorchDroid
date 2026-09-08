@@ -140,8 +140,11 @@ void ClientContext::sendTankChangeIfNeeded()
 		Tank *tank = itor->second;
 		if (tank->getDestinationId() != myDestinationId_) continue;
 
-		TankModel *tankModel = getTankModels().getRandomModel(
-			tank->getTeam(), false, tank->getTanketType()->getName());
+		// M16: the same identity the hosting path sends - see
+		// engine_jni.cpp's promoteHumanToPlaying(). Worth having on this side
+		// especially: in a joined game everyone else can see it.
+		const std::string modelName = ScorchDroidProfile::modelFor(
+			getTankModels(), tank->getTeam(), tank->getTanketType()->getName());
 		// playerType must be "Human" (not "" - see engine_jni.cpp's
 		// promoteHumanToPlaying() for the full story): the non-Human branch
 		// of TankChangeSimAction::invokeAction() unconditionally overwrites
@@ -150,9 +153,11 @@ void ClientContext::sendTankChangeIfNeeded()
 		// host - destinationId must be this tank's real one for the same
 		// reason, not a bot's literal 0.
 		ComsTankChangeMessage tankChangeMessage(
-			tank->getPlayerId(), tank->getTargetName(), tank->getColor(),
-			tank->getTanketType()->getName(), tankModel->getName(),
+			tank->getPlayerId(), tank->getTargetName(),
+			ScorchDroidProfile::colorFor(tank->getColor()),
+			tank->getTanketType()->getName(), modelName.c_str(),
 			tank->getDestinationId(), tank->getTeam(), "Human", false);
+		ScorchDroidProfile::applyAvatar(tankChangeMessage);
 		sendGameMessage(tankChangeMessage);
 		tankChangeSent_ = true;
 		break;

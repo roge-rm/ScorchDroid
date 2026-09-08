@@ -54,6 +54,7 @@ std::mutex g_engineMutex;
 #include <simactions/TankAccessorySimAction.hpp>
 #include <tankai/TankAIAdder.hpp>
 #include <server/ServerSimulator.hpp>
+#include <tank/TankAvatar.hpp>
 #include <tank/TankScore.hpp>
 #include <common/OptionsTransient.hpp>
 #include <common/ChannelText.hpp>
@@ -293,12 +294,25 @@ static void promoteHumanToPlaying(ScorchedServer *server, Tank *tank) {
     // (unconditional current->getTankAI()->removedPlayer() for any
     // destinationId==0 tank). destinationId must also be this tank's own
     // (not the bot's literal 0) for the same reason.
-    TankModel *tankModel = server->getTankModels().getRandomModel(
-        (int) tank->getTeam(), false, tank->getTanketType()->getName());
+    // M16: the player's own model, colour and avatar, where they chose one.
+    // This message is upstream's own "here is my tank", so the choices go in
+    // exactly where its PlayerDialog would put them; anything unchosen keeps
+    // what the engine picked, which is what happened before.
+    const std::string modelName = ScorchDroidProfile::modelFor(
+        server->getTankModels(), (int) tank->getTeam(),
+        tank->getTanketType()->getName());
     ComsTankChangeMessage tankChangeMessage(
-        tank->getPlayerId(), tank->getTargetName(), tank->getColor(),
-        tank->getTanketType()->getName(), tankModel->getName(),
+        tank->getPlayerId(), tank->getTargetName(),
+        ScorchDroidProfile::colorFor(tank->getColor()),
+        tank->getTanketType()->getName(), modelName.c_str(),
         tank->getDestinationId(), tank->getTeam(), "Human", false);
+    ScorchDroidProfile::applyAvatar(tankChangeMessage);
+    LOGI("Player identity: model=%s colour=%d,%d,%d avatar=%s",
+         modelName.c_str(),
+         (int) (tankChangeMessage.getPlayerColor()[0] * 255.0f),
+         (int) (tankChangeMessage.getPlayerColor()[1] * 255.0f),
+         (int) (tankChangeMessage.getPlayerColor()[2] * 255.0f),
+         tankChangeMessage.getPlayerIconName()[0] ? tankChangeMessage.getPlayerIconName() : "none");
     TankChangeSimAction *changeAction = new TankChangeSimAction(tankChangeMessage);
     server->getServerSimulator().addSimulatorAction(changeAction);
     LOGI("promoteHumanToPlaying: queued for player id=%u", tank->getPlayerId());
@@ -1606,7 +1620,7 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
 // purely a matter of reading it out; nothing is simulated or inferred.
 //
 // One pipe-delimited row per player, same convention as getWeaponShop():
-//   "playerId|name|isBot|team|score|kills|wins|money|alive|ping|r,g,b|isMe"
+//   "playerId|name|isBot|team|score|kills|wins|money|alive|ping|r,g,b|isMe|avatar"
 // Sorted by score descending, which is the order the list is useful in.
 // Upstream's own dialog also shows per-team totals and the round/turn
 // counters; those come from getRoundInfo() below rather than being wedged
@@ -1652,7 +1666,14 @@ Java_com_rm_scorchdroid_NativeBridge_getPlayerList(JNIEnv *env, jobject /* this 
                     << (int) (colour[0] * 255.0f) << ","
                     << (int) (colour[1] * 255.0f) << ","
                     << (int) (colour[2] * 255.0f) << "|"
-                    << (tank->getPlayerId() == myId ? 1 : 0);
+                    << (tank->getPlayerId() == myId ? 1 : 0) << "|"
+                    // M16: the avatar's file name, last because it is the
+                    // only field that could ever contain anything. Every bot
+                    // has one (TankAddSimAction gives them all computer.png)
+                    // and a human has whichever they chose, so the score
+                    // table can show a face against every row - which is
+                    // where upstream shows them too.
+                    << tank->getAvatar().getName();
                 rows.push_back(row.str());
             }
         }
@@ -1881,6 +1902,63 @@ Java_com_rm_scorchdroid_NativeBridge_setPlayerName(
     std::string name(nameChars ? nameChars : "");
     if (nameChars) env->ReleaseStringUTFChars(jName, nameChars);
     return env->NewStringUTF(ScorchDroidProfile::setName(name).c_str());
+}
+
+// M16: what the player can be. Three lists, all read from the shipped data
+// rather than declared here - the mod's tank models, upstream's own colour
+// palette, and the avatars it ships.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getTankModels(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    std::vector<std::string> models = ScorchDroidProfile::models(".", ScorchDroidSetup::mod());
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray((jsize) models.size(), stringClass, nullptr);
+    for (size_t i = 0; i < models.size(); i++) {
+        jstring value = env->NewStringUTF(models[i].c_str());
+        env->SetObjectArrayElement(result, (jsize) i, value);
+        env->DeleteLocalRef(value);
+    }
+    return result;
+}
+
+// 0xRRGGBB each, in upstream's own allocation order.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getTankColors(JNIEnv *env, jobject /* this */) {
+    std::vector<unsigned int> colors = ScorchDroidProfile::colors();
+    jintArray result = env->NewIntArray((jsize) colors.size());
+    std::vector<jint> values(colors.begin(), colors.end());
+    if (!values.empty()) env->SetIntArrayRegion(result, 0, (jsize) values.size(), &values[0]);
+    return result;
+}
+
+// Paths relative to the data root, so the UI can show the image and the
+// engine can read the same file back when the game starts.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getAvatars(JNIEnv *env, jobject /* this */) {
+    std::vector<std::string> avatars = ScorchDroidProfile::avatars(".");
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray((jsize) avatars.size(), stringClass, nullptr);
+    for (size_t i = 0; i < avatars.size(); i++) {
+        jstring value = env->NewStringUTF(avatars[i].c_str());
+        env->SetObjectArrayElement(result, (jsize) i, value);
+        env->DeleteLocalRef(value);
+    }
+    return result;
+}
+
+// The chosen identity. Each takes its own "unchosen" value - an empty model
+// name, a negative colour index, an empty avatar path - which means the game
+// picks, as it always did.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setPlayerIdentity(
+        JNIEnv *env, jobject /* this */, jstring jModel, jint colorIndex, jstring jAvatar) {
+    const char *modelChars = env->GetStringUTFChars(jModel, nullptr);
+    const char *avatarChars = env->GetStringUTFChars(jAvatar, nullptr);
+    ScorchDroidProfile::setModel(modelChars ? modelChars : "");
+    ScorchDroidProfile::setColorIndex((int) colorIndex);
+    ScorchDroidProfile::setAvatar(avatarChars ? avatarChars : "");
+    if (modelChars) env->ReleaseStringUTFChars(jModel, modelChars);
+    if (avatarChars) env->ReleaseStringUTFChars(jAvatar, avatarChars);
 }
 
 // The end-of-round scoreboard upstream raises by itself (ShowScoreAction,

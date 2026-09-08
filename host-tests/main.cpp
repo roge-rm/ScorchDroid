@@ -66,6 +66,7 @@
 #include <actions/ShowScoreAction.hpp>
 #include <ScoreboardState.h>
 #include <GameSetup.h>
+#include <PlayerProfile.h>
 #include <tankai/TankAIStore.hpp>
 #include <tankai/TankAI.hpp>
 #include <common/FixedVector4.hpp>
@@ -2454,6 +2455,92 @@ static void testGameSetup()
 	check(afterReset == originalRounds, "reset() goes back to what the config file says");
 }
 
+// M16: who the player is - the name, and now the tank model, colour and
+// avatar. The lists are all read from shipped data, so what is worth pinning
+// is that they are found at all and that a choice survives being made.
+static void testPlayerProfile()
+{
+	printf("player identity (M16: name, tank, colour, avatar):\n");
+
+	check(ScorchDroidProfile::name() == "Player",
+		"a player has a name before anything sets one");
+	check(ScorchDroidProfile::setName("  Dan  ") == "Dan",
+		"a name is trimmed on the way in");
+	check(ScorchDroidProfile::setName("   ") == "Dan",
+		"...and an empty one is refused rather than leaving a nameless tank");
+
+	// The base game's tanks.xml. A hundred and five entries, one of which is
+	// upstream's "Random" placeholder and is deliberately not offered.
+	std::vector<std::string> models = ScorchDroidProfile::models(".", "none");
+	check(models.size() > 50, "the base game offers a large list of tank models");
+	bool sawRandom = false, sawTiger = false;
+	for (size_t i = 0; i < models.size(); i++)
+	{
+		if (models[i] == "Random") sawRandom = true;
+		if (models[i] == "Tiger II") sawTiger = true;
+	}
+	check(sawTiger, "...including one we can name");
+	check(!sawRandom,
+		"...but not upstream's \"Random\" entry, which is the empty choice, not a tank");
+
+	// The Apocalypse mod ships no tanks.xml of its own, and upstream's
+	// getModFile falls back to the base game's. A mod picker that showed no
+	// tanks for it would be wrong about what the game will actually offer.
+	std::vector<std::string> apocModels = ScorchDroidProfile::models(".", "apoc");
+	check(apocModels.size() == models.size(),
+		"a mod with no tanks.xml of its own falls back to the base game's");
+
+	std::vector<unsigned int> colors = ScorchDroidProfile::colors();
+	check(colors.size() == 26, "upstream's palette comes through, all twenty-six");
+	check(colors[0] == 0xff0000u, "...starting with the red a solo player has always had");
+
+	std::vector<std::string> avatars = ScorchDroidProfile::avatars(".");
+	check(avatars.size() == 18, "the shipped avatars are found");
+	bool allPng = true, sawComputer = false;
+	for (size_t i = 0; i < avatars.size(); i++)
+	{
+		if (avatars[i].size() < 5 ||
+			avatars[i].compare(avatars[i].size() - 4, 4, ".png") != 0) allPng = false;
+		if (avatars[i] == "data/avatars/computer.png") sawComputer = true;
+	}
+	check(allPng, "...images only, not the licence note beside them");
+	check(sawComputer, "...including the one every bot wears");
+
+	// The choices themselves. Each has an unchosen value meaning "let the
+	// game pick", which is what this port did before M16.
+	check(ScorchDroidProfile::model().empty() &&
+		ScorchDroidProfile::colorIndex() < 0 &&
+		ScorchDroidProfile::avatar().empty(),
+		"nothing is chosen to begin with, so the game picks as it always did");
+
+	ScorchDroidProfile::setModel("Tiger II");
+	ScorchDroidProfile::setColorIndex(3);
+	ScorchDroidProfile::setAvatar("data/avatars/yoda.png");
+	check(ScorchDroidProfile::model() == "Tiger II" &&
+		ScorchDroidProfile::colorIndex() == 3 &&
+		ScorchDroidProfile::avatar() == "data/avatars/yoda.png",
+		"a chosen identity is held");
+
+	// colorFor is the half that can be checked without a running game: it
+	// answers with the chosen colour, and with the tank's own when the
+	// choice is out of range or absent.
+	Vector allocated(0.5f, 0.5f, 0.5f);
+	Vector chosen = ScorchDroidProfile::colorFor(allocated);
+	check(chosen != allocated, "a chosen colour replaces the allocated one");
+	ScorchDroidProfile::setColorIndex(9999);
+	check(ScorchDroidProfile::colorFor(allocated) == allocated,
+		"...and a colour index past the end of the palette is ignored");
+	ScorchDroidProfile::setColorIndex(-1);
+	check(ScorchDroidProfile::colorFor(allocated) == allocated,
+		"...as is no choice at all");
+
+	// Back to unchosen, so a later test starting a game gets the same tank
+	// it would have had before this ran.
+	ScorchDroidProfile::setModel("");
+	ScorchDroidProfile::setAvatar("");
+	ScorchDroidProfile::setName("Player");
+}
+
 int main(int argc, char **argv)
 {
 	// Upstream's own generic main() bootstrap (common/main.hpp) does this
@@ -2504,6 +2591,7 @@ int main(int argc, char **argv)
 	testClientJoin();
 	testServerRestart();
 	testGameSetup();
+	testPlayerProfile();
 
 	printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
 		failures, failures == 1 ? "" : "s");

@@ -60,6 +60,9 @@ class MainActivity : AppCompatActivity() {
     // modinfo.xml. Read once, after the engine has a data root - the list
     // cannot change while the app is running.
     private var presets by mutableStateOf<List<GamePreset>>(emptyList())
+    // M16: where the extracted data lives, so the settings screen can show
+    // the avatar images and the score table can show them again.
+    private var dataRootPath by mutableStateOf("")
 
     // M4: the real Compose HUD's mutable state (see GameHud.kt) - written
     // to directly from the tick loop, touch handlers, and dialogs below,
@@ -185,6 +188,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 AppScreen.SETTINGS -> SettingsScreen(
                     settings = settings,
+                    dataRoot = dataRootPath,
                     onBack = { appScreen = AppScreen.MENU },
                 )
                 AppScreen.ABOUT -> AboutScreen(
@@ -248,6 +252,7 @@ class MainActivity : AppCompatActivity() {
             val dataRoot = withContext(Dispatchers.IO) {
                 AssetDataExtractor.ensureExtracted(applicationContext)
             }
+            dataRootPath = dataRoot.absolutePath
             splashStatus = "Starting engine..."
             val initOk = withContext(Dispatchers.Default) {
                 NativeBridge.initEngine(dataRoot.absolutePath)
@@ -1163,6 +1168,7 @@ class MainActivity : AppCompatActivity() {
             entries = emptyList(),
             roundInfo = "",
             chat = emptyList(),
+            dataRoot = dataRootPath,
             onCancel = { hudState.dialog = HudDialog.None },
         )
         hudState.dialog = dialog
