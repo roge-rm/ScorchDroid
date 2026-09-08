@@ -86,6 +86,30 @@ namespace ScorchDroidSetup
 	std::string mod();
 	bool setMod(const std::string &name);
 
+	// The bot AIs a mod actually provides.
+	//
+	// Comment-aware, which is the whole point: the Apocalypse mod's
+	// data/tankais.xml *contains* definitions for Shark, Moron and three
+	// others, but they sit inside an XML comment, so upstream's parser never
+	// sees them and the mod really does offer only seven. A scan that missed
+	// that would report bots the engine cannot create - which is precisely
+	// the bug this exists to prevent, and precisely the mistake made while
+	// diagnosing it.
+	//
+	// Empty if the file cannot be read, which callers must treat as "don't
+	// know" rather than "no bots".
+	std::vector<std::string> botNames(const std::string &dataRoot, const std::string &mod);
+
+	// Replaces any configured bot AI the chosen mod does not provide with one
+	// it does, and returns how many entries changed.
+	//
+	// The shipped config asks for "Moron", which the base game defines and
+	// Apocalypse does not. Without this, choosing that mod produced a game
+	// that loaded its landscape and then waited forever for a bot that could
+	// never be created, logging "Failed to find a tank ai called Moron" every
+	// tick where nothing surfaced it.
+	int ensureBotsValidForMod(const std::string &dataRoot);
+
 	// Writes the chosen options to [path] as a config file for the server to
 	// read at startup, and returns false if it could not be written.
 	//

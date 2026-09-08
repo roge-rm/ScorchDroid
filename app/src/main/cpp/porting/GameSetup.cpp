@@ -7,6 +7,7 @@
 #include <mutex>
 #include <algorithm>
 #include <dirent.h>
+#include <fstream>
 
 namespace
 {
@@ -200,6 +201,95 @@ namespace ScorchDroidSetup
 		std::lock_guard<std::mutex> lock(g_mutex);
 		if (!g_options) return false;
 		return g_options->getModEntry().setValueFromString(name);
+	}
+
+	std::vector<std::string> botNames(const std::string &dataRoot, const std::string &mod)
+	{
+		// A scan rather than an XML parse: the file's shape is upstream's own
+		// and fixed - <ais> of <ai>, each opening with its <name> - and the
+		// alternative is standing up the whole XMLFile machinery, with a
+		// context, to read seven strings.
+		//
+		// Comments are tracked because they matter here: the Apocalypse mod
+		// keeps five of its twelve AI definitions inside one, and a scanner
+		// that read them would hand back bots the engine will refuse to
+		// create.
+		std::vector<std::string> names;
+		const std::string path =
+			dataRoot + "/data/globalmods/" + mod + "/data/tankais.xml";
+		std::ifstream file(path.c_str());
+		if (!file.is_open()) return names;
+
+		std::string line;
+		bool inComment = false;
+		bool inAi = false;
+		while (std::getline(file, line))
+		{
+			size_t pos = 0;
+			while (pos < line.size())
+			{
+				if (inComment)
+				{
+					const size_t close = line.find("-->", pos);
+					if (close == std::string::npos) { pos = line.size(); break; }
+					inComment = false;
+					pos = close + 3;
+					continue;
+				}
+				const size_t open = line.find("<!--", pos);
+				const std::string live = line.substr(pos,
+					open == std::string::npos ? std::string::npos : open - pos);
+
+				if (!inAi && live.find("<ai>") != std::string::npos) inAi = true;
+				if (inAi)
+				{
+					const size_t nameStart = live.find("<name>");
+					const size_t nameEnd = live.find("</name>");
+					if (nameStart != std::string::npos && nameEnd != std::string::npos &&
+						nameEnd > nameStart)
+					{
+						names.push_back(live.substr(nameStart + 6, nameEnd - nameStart - 6));
+						// The first <name> in an <ai> is the AI's own; the
+						// rest belong to its weapons.
+						inAi = false;
+					}
+				}
+
+				if (open == std::string::npos) { pos = line.size(); break; }
+				inComment = true;
+				pos = open + 4;
+			}
+		}
+		return names;
+	}
+
+	int ensureBotsValidForMod(const std::string &dataRoot)
+	{
+		std::string chosenMod;
+		{
+			std::lock_guard<std::mutex> lock(g_mutex);
+			if (!g_options) return 0;
+			chosenMod = g_options->getMod();
+		}
+
+		std::vector<std::string> valid = botNames(dataRoot, chosenMod);
+		if (valid.empty()) return 0;   // unreadable: leave the config alone
+
+		std::lock_guard<std::mutex> lock(g_mutex);
+		int changed = 0;
+		std::list<OptionEntry *> &players = g_options->getPlayerTypeOptions();
+		for (std::list<OptionEntry *>::iterator itor = players.begin();
+			itor != players.end();
+			++itor)
+		{
+			const std::string current = (*itor)->getValueAsString();
+			// "Human" is a player slot, not a bot, and an empty slot is empty.
+			if (current == "Human" || current.empty()) continue;
+			if (std::find(valid.begin(), valid.end(), current) != valid.end()) continue;
+			(*itor)->setValueFromString(valid[0]);
+			changed++;
+		}
+		return changed;
 	}
 
 	bool writeSessionFile(const std::string &path)
