@@ -86,6 +86,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <execinfo.h>
+#include <map>
 #include <set>
 #include <functional>
 
@@ -2270,6 +2271,71 @@ static void testGameSetup()
 		}
 		ScorchDroidSetup::setMod("none");
 		unlink(apocPath);
+	}
+
+	// Every option has to survive the session file, not just the ones a test
+	// happens to name. The server now starts from that file rather than from
+	// the shipped config, so an option whose string form does not round-trip
+	// would quietly change the game - and would do it for everyone, in the
+	// builds players use, with nothing on screen to say so.
+	{
+		// From the shipped state, so the comparison is against the file this
+		// test reads back rather than against edits made earlier above - which
+		// is what made the first run of this look like a round-trip failure
+		// when it was only my own changed round count.
+		ScorchDroidSetup::reset();
+
+		const char *roundTripPath = "/tmp/scorchdroid-host-tests-roundtrip.xml";
+		check(ScorchDroidSetup::writeSessionFile(roundTripPath),
+			"the session config is written for the round-trip check");
+
+		OptionsGame before;
+		before.readOptionsFromFile(SCORCHDROID_APP_CONFIG);
+		OptionsGame after;
+		check(after.readOptionsFromFile(roundTripPath),
+			"...and read back");
+
+		// Compare by name rather than by position, so a reordering shows up as
+		// a missing option rather than as a silent mismatch.
+		std::map<std::string, std::string> afterValues;
+		std::list<OptionEntry *> &afterList = after.getOptions();
+		for (std::list<OptionEntry *>::iterator itor = afterList.begin();
+			itor != afterList.end();
+			++itor)
+		{
+			afterValues[(*itor)->getName()] = (*itor)->getValueAsString();
+		}
+
+		std::string firstMismatch;
+		int mismatches = 0, compared = 0;
+		std::list<OptionEntry *> &beforeList = before.getOptions();
+		for (std::list<OptionEntry *>::iterator itor = beforeList.begin();
+			itor != beforeList.end();
+			++itor)
+		{
+			const std::string name = (*itor)->getName();
+			const std::string value = (*itor)->getValueAsString();
+			compared++;
+			std::map<std::string, std::string>::iterator found = afterValues.find(name);
+			if (found == afterValues.end() || found->second != value)
+			{
+				mismatches++;
+				if (firstMismatch.empty())
+				{
+					firstMismatch = name + " (\"" + value + "\" -> \"" +
+						(found == afterValues.end() ? std::string("missing") : found->second) + "\")";
+				}
+			}
+		}
+		if (mismatches > 0)
+		{
+			fprintf(stderr, "  %d of %d options changed; first: %s\n",
+				mismatches, compared, firstMismatch.c_str());
+		}
+		check(compared > 50, "the round-trip check actually compared the options");
+		check(mismatches == 0,
+			"every option survives being written to the session config and read back");
+		unlink(roundTripPath);
 	}
 
 	ScorchDroidSetup::reset();

@@ -17,6 +17,13 @@
     <name>NumberOfPlayers</name>
     <value>8</value>
   </option>
+  <!-- Bots are kicked once this many humans are in the game, which with 2
+       means a friend joining a practice game removes the bot entirely -
+       observed in the two-device join test, where the host logged
+       "(Bot) Fred ... Auto-kick" the moment the client arrived. That is fine
+       while a game has one bot, but if a "number of bots" setting is ever
+       added this will silently undo it as soon as someone joins. Revisit it
+       then rather than now. -->
   <option>
     <name>RemoveBotsAtPlayers</name>
     <value>2</value>
@@ -28,15 +35,28 @@
        2-player total above. PlayerType1 left as "Human" (the OptionsGame.cpp
        default) so ballanceBots() doesn't also try to add a bot into that
        slot. -->
+  <!-- The one entry here that names something a *mod* has to provide, and
+       the only such name in this file. The Apocalypse mod does not have
+       "Moron" - five of its AI definitions, that one included, sit inside an
+       XML comment - so a slot naming it never fills and the game waits
+       forever for a bot that cannot be created. GameSetup::
+       ensureBotsValidForMod substitutes an AI the chosen mod really provides
+       before the session config is written. Anything else added here that
+       names a weapon, tank type or AI needs the same treatment. -->
   <option>
     <name>PlayerType2</name>
     <value>Moron</value>
   </option>
   <!-- TurnSimultaneous (0): every tank can move/fire within the same round
-       window, rather than strict turn order (the default,
-       TurnSequentialLoserFirst) - simplifies touch-fire, which just directly
-       submits a move for whichever tank is tapped, with no turn-order
-       bookkeeping of our own. -->
+       window, rather than strict turn order (upstream's default,
+       TurnSequentialLoserFirst). Chosen for pace on a phone, not out of
+       necessity - the original note here claimed simultaneous "simplifies
+       touch-fire" and implied the sequential modes needed turn-order
+       bookkeeping we don't have. That was an M2-era worry and it is not
+       true: verified 2026-09-08 by playing a Sequential Loser First game
+       from the setup screen, which reached turn 3/15 with the shot clock,
+       the Fire button and the bot's replies all behaving. The setup screen
+       offers every turn type, so this is a default, not a constraint. -->
   <option>
     <name>TurnType</name>
     <value>0</value>
