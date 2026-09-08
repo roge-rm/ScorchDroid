@@ -56,6 +56,10 @@ class MainActivity : AppCompatActivity() {
     // M12: non-null exactly while a tutorial game is running.
     private var tutorial by mutableStateOf<TutorialState?>(null)
     private var selectedMod by mutableStateOf("none")
+    // M14: the ready-made games the installed mods describe in their own
+    // modinfo.xml. Read once, after the engine has a data root - the list
+    // cannot change while the app is running.
+    private var presets by mutableStateOf<List<GamePreset>>(emptyList())
 
     // M4: the real Compose HUD's mutable state (see GameHud.kt) - written
     // to directly from the tick loop, touch handlers, and dialogs below,
@@ -120,7 +124,13 @@ class MainActivity : AppCompatActivity() {
             // a confirmed action behind the overflow menu, and a stray back
             // swipe mid-round should never throw the game away.
             BackHandler(enabled = appScreen != AppScreen.MENU) {
-                if (appScreen != AppScreen.GAME) appScreen = AppScreen.MENU
+                when (appScreen) {
+                    AppScreen.GAME -> Unit
+                    // The only screen two levels down; back should undo one
+                    // step, not both.
+                    AppScreen.QUICK_GAME -> appScreen = AppScreen.SINGLE_PLAYER
+                    else -> appScreen = AppScreen.MENU
+                }
             }
             when (appScreen) {
                 AppScreen.SPLASH -> SplashScreen(splashStatus, null)
@@ -131,10 +141,17 @@ class MainActivity : AppCompatActivity() {
                     onAbout = { appScreen = AppScreen.ABOUT },
                 )
                 AppScreen.SINGLE_PLAYER -> SinglePlayerScreen(
+                    onQuickGame = { openQuickGame() },
+                    quickGameEnabled = presets.isNotEmpty(),
                     onNewGame = { openSetup("New Game") },
                     onTutorial = { startTutorial() },
                     tutorialEnabled = true,
                     onBack = { appScreen = AppScreen.MENU },
+                )
+                AppScreen.QUICK_GAME -> QuickGameScreen(
+                    presets = presets,
+                    onPick = { startPreset(it) },
+                    onBack = { appScreen = AppScreen.SINGLE_PLAYER },
                 )
                 AppScreen.MULTIPLAYER -> MultiplayerScreen(
                     onHost = { openSetup("Host Game") },
@@ -210,6 +227,12 @@ class MainActivity : AppCompatActivity() {
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
                 )
             }
+            // A game that fails to load has to be able to say so from the
+            // screen it was picked on. HudDialogHost is drawn by the game and
+            // joining screens; these two raise dialogs without being either.
+            if (appScreen == AppScreen.SINGLE_PLAYER || appScreen == AppScreen.QUICK_GAME) {
+                HudDialogHost(hudState.dialog)
+            }
             // M12: over the HUD, and only during a tutorial game.
             tutorial?.let { active ->
                 if (appScreen == AppScreen.GAME) {
@@ -240,6 +263,7 @@ class MainActivity : AppCompatActivity() {
                 settings.music = it
             }
             settings.applyAll()
+            presets = parsePresets(NativeBridge.getPresets())
             // Upstream's menu music is its "wait" loop.
             music?.setState(MusicPlayer.State.WAIT)
             licenseText = withContext(Dispatchers.IO) { readLicenseText() }
@@ -266,6 +290,31 @@ class MainActivity : AppCompatActivity() {
             return
         }
         tutorial = TutorialState()
+        startGame()
+    }
+
+    private fun openQuickGame() {
+        appScreen = AppScreen.QUICK_GAME
+    }
+
+    /**
+     * M14: starts one of the mods' own ready-made games.
+     *
+     * Like the tutorial, and for the same reason: the preset *replaces* the
+     * setup rather than merging into it, so "Easy Game" is upstream's easy
+     * game and not upstream's easy game plus whatever was last fiddled with in
+     * New Game. The mod comes with it - a mod's preset file names the mod
+     * itself, which is why picking an Apocalypse game needs no separate mod
+     * choice - and startGame() writes the session config from that, so the
+     * server loads the right mod before it reads anything else.
+     */
+    private fun startPreset(preset: GamePreset) {
+        if (!NativeBridge.loadSetupPreset(preset.gameFile)) {
+            hudState.dialog = HudDialog.Message("\"${preset.name}\" could not be loaded.") {
+                hudState.dialog = HudDialog.None
+            }
+            return
+        }
         startGame()
     }
 

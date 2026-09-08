@@ -1815,6 +1815,35 @@ Java_com_rm_scorchdroid_NativeBridge_getAvailableMods(JNIEnv *env, jobject /* th
     return result;
 }
 
+// M14: every ready-made game every installed mod offers, in mod order and
+// then in the order each mod's own modinfo.xml lists them.
+//
+// One call rather than one per mod because the answer is a menu, and a menu
+// wants to be built in one pass. Rows are "mod|name|gamefile|description",
+// description last so it can hold anything - it is upstream's prose, several
+// lines of it.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getPresets(JNIEnv *env, jobject /* this */) {
+    std::vector<std::string> mods = ScorchDroidSetup::mods(".");
+    std::vector<ScorchDroidSetup::Preset> all;
+    for (size_t i = 0; i < mods.size(); i++) {
+        std::vector<ScorchDroidSetup::Preset> found = ScorchDroidSetup::presets(".", mods[i]);
+        all.insert(all.end(), found.begin(), found.end());
+    }
+
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray((jsize) all.size(), stringClass, nullptr);
+    for (size_t i = 0; i < all.size(); i++) {
+        std::ostringstream row;
+        row << all[i].mod << "|" << all[i].name << "|" << all[i].gamefile << "|"
+            << all[i].description;
+        jstring value = env->NewStringUTF(row.str().c_str());
+        env->SetObjectArrayElement(result, (jsize) i, value);
+        env->DeleteLocalRef(value);
+    }
+    return result;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_rm_scorchdroid_NativeBridge_getSelectedMod(JNIEnv *env, jobject /* this */) {
     ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");

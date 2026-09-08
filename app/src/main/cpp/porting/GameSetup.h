@@ -93,6 +93,30 @@ namespace ScorchDroidSetup
 	// upstream's own appears without a code change.
 	std::vector<std::string> mods(const std::string &dataRoot);
 
+	// M14: one ready-made game a mod offers - Easy, Normal, Hard, target
+	// practice.
+	struct Preset
+	{
+		std::string mod;          // the mod it belongs to
+		std::string name;         // upstream's <shortdescription>, e.g. "Easy Game"
+		std::string description;  // upstream's <description>, several lines
+		std::string gamefile;     // path, ready to hand to loadPreset()
+	};
+
+	// The single-player games [mod] offers, in the order its own
+	// data/modinfo.xml lists them.
+	//
+	// Read rather than re-declared, which is the whole point: upstream's
+	// difficulty menu is not code, it is each mod's modinfo.xml naming a
+	// handful of options files. So the Apocalypse mod brings its own four
+	// entries - with its own bots and its own money - and any mod dropped in
+	// beside it does the same, with nothing here to update.
+	//
+	// Empty if the file is missing or unreadable; an entry whose options file
+	// does not exist is skipped rather than offered, since picking it could
+	// only fail.
+	std::vector<Preset> presets(const std::string &dataRoot, const std::string &mod);
+
 	// "none" for upstream's base game. Unlike every other option here, this
 	// one cannot be applied after the server starts: startServerInternal()
 	// calls setDataFileMod() and loadModFiles() partway through its own
