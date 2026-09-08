@@ -1734,7 +1734,18 @@ namespace
 		Clock tickClock;
 		int status = 0;
 		pid_t waited = 0;
-		for (int i = 0; i < 250; i++)
+		// This loop *is* the host: the client cannot converge, or even
+		// join, unless the server keeps stepping here, so the budget has to
+		// outlast the client's own caps rather than being a round number.
+		// Those are 150 ticks waiting to join, 100 waiting for its own tank
+		// and 300 waiting for the clock correction to land, all on 100ms
+		// sleeps - 550 in the worst case. Anything less kills the client
+		// mid-wait, and the failure then reads "the client never joined"
+		// when the truth is that the host gave up first, which is a
+		// genuinely misleading place to start debugging. Only the failure
+		// path is ever this slow; a healthy run exits in about fifteen
+		// seconds.
+		for (int i = 0; i < 700; i++)
 		{
 			unsigned int ticksDifference = tickClock.getTicksDifference();
 			fixed timeDifference(true, ((Sint64) ticksDifference) * 10);
@@ -1777,11 +1788,14 @@ namespace
 		if (joined)
 		{
 			unsigned int clientTanks = 0, clientWidth = 0, clientHeight = 0;
-			long long clientTimeDiff = 0;
+			long long clientTimeDiff = 0, clientStartDiff = 0;
+			int clientSettleTicks = 0;
 			FILE *resultFile = fopen(resultPath, "r");
 			bool parsed = resultFile &&
-				fscanf(resultFile, "joined tanks=%u width=%u height=%u timediff=%lld",
-					&clientTanks, &clientWidth, &clientHeight, &clientTimeDiff) == 4;
+				fscanf(resultFile,
+					"joined tanks=%u width=%u height=%u timediff=%lld startdiff=%lld ticks=%d",
+					&clientTanks, &clientWidth, &clientHeight, &clientTimeDiff,
+					&clientStartDiff, &clientSettleTicks) == 6;
 			if (resultFile) fclose(resultFile);
 			check(parsed, "parsed the client process's result file");
 
@@ -1818,19 +1832,29 @@ namespace
 				// message timestamps, so a broken correction shows up as a
 				// large residual rather than a suspiciously perfect zero.
 				//
-				// Threshold picked from measurement, not guessed. With the
-				// correction removed the residual sits at a flat 0.68-0.77s
-				// and never closes; with it, after this test's ~8s settle
-				// it measures 0.10-0.14s, and given 15s it reaches 0.007s
-				// (i.e. it really converges, this is just mid-convergence).
-				// 0.35s sits ~2.4x above the observed corrected value and
-				// ~1.9x below the uncorrected floor, so it discriminates
-				// without being flaky. A longer settle would assert more
-				// tightly at the cost of suite runtime, which is the whole
-				// point of host-tests.
-				fprintf(stderr, "  (client/host clock difference: %lld internal units, %.3fs)\n",
-					clientTimeDiff, (double) clientTimeDiff / (double) fixed::FIXED_RESOLUTION);
-				const long long maxDriftInternal = (long long) (fixed::FIXED_RESOLUTION * 35 / 100);
+				// Threshold measured, not guessed, and the client has
+				// already waited for it rather than for a fixed time (see
+				// runClientProcess). With the correction removed the
+				// residual sits at a flat 0.68-0.77s and never closes, so
+				// the client burns its whole 30s cap and arrives here well
+				// outside 0.15s; with it, the residual falls under 0.15s
+				// and keeps going (given 15s it reaches 0.007s).
+				//
+				// The earlier version of this asserted 0.35s after a fixed
+				// 8s settle and failed about one run in three. The cause
+				// was not the threshold: convergence closes a twentieth of
+				// the gap *per message*, so 8s on a machine whose host
+				// process is fighting two emulators for a core carries far
+				// fewer messages than 8s on an idle one, and the test was
+				// really measuring how busy the machine was. Waiting for
+				// the condition removes that dependence entirely - a loaded
+				// machine now takes more ticks to get to the same place
+				// instead of failing.
+				fprintf(stderr, "  (client/host clock difference: %.3fs, from %.3fs at join, %d ticks)\n",
+					(double) clientTimeDiff / (double) fixed::FIXED_RESOLUTION,
+					(double) clientStartDiff / (double) fixed::FIXED_RESOLUTION,
+					clientSettleTicks);
+				const long long maxDriftInternal = (long long) (fixed::FIXED_RESOLUTION * 15 / 100);
 				check(clientTimeDiff < maxDriftInternal && clientTimeDiff > -maxDriftInternal,
 					"the joined client's clock converges on the host's rather than staying a level-load behind");
 			}
@@ -1865,6 +1889,10 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 
 	bool joined = false;
 	bool failed = false;
+	// Reported alongside the final difference so a failure says whether the
+	// correction did nothing or merely ran out of room.
+	long long startDiff = 0;
+	int settleTicks = 0;
 	for (int i = 0; i < 150 && !joined && !failed; i++)
 	{
 		client.tick();
@@ -1899,16 +1927,31 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 			}
 			if (!ownTankSeen) usleep(100 * 1000);
 		}
-		// Keep ticking a while longer for two reasons: the TankLoaded/
-		// TankChange actions that follow the add need to settle before the
-		// count is reported, and the clock-drift correction
-		// (ClientSync::syncToServerTime) needs enough live messages to
-		// converge - it deliberately closes only a twentieth of the gap per
-		// message, and the host's ComsNetStatMessage (which supplies the
-		// round-trip estimate) only starts arriving a couple of seconds in.
-		for (int i = 0; i < 80; i++)
+		// Keep ticking for two reasons: the TankLoaded/TankChange actions
+		// that follow the add need to settle before the count is reported,
+		// and the clock-drift correction (ClientSync::syncToServerTime)
+		// needs enough live messages to converge - it deliberately closes
+		// only a twentieth of the gap per message, and the host's
+		// ComsNetStatMessage (which supplies the round-trip estimate) only
+		// starts arriving a couple of seconds in.
+		//
+		// Waits for the correction to *land* rather than for a fixed number
+		// of ticks. That distinction is the whole reason this test used to
+		// fail one run in three: convergence is driven by the message count,
+		// not by wall-clock time, so on a loaded machine - where the host
+		// process gets a fraction of a core and sends proportionally fewer
+		// steps - a fixed 8s carried nowhere near enough messages, and the
+		// test failed for the machine being busy rather than for anything
+		// being wrong. The cap is generous for the same reason: it is there
+		// to stop a genuine regression hanging, not to time the run.
+		ClientSync &syncing = (ClientSync &) client.getSimulator();
+		startDiff = (long long) syncing.getServerTimeDifference().getInternalData();
+		const long long converged = (long long) (fixed::FIXED_RESOLUTION * 15 / 100);
+		for (settleTicks = 0; settleTicks < 300; settleTicks++)
 		{
 			client.tick();
+			long long diff = (long long) syncing.getServerTimeDifference().getInternalData();
+			if (diff < converged && diff > -converged) break;
 			usleep(100 * 1000);
 		}
 	}
@@ -1921,11 +1964,12 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 		// clock), in fixed's internal units, computed purely from timestamps
 		// the *host* put in its messages - see testClientJoin()'s assertion.
 		ClientSync &sync = (ClientSync &) client.getSimulator();
-		fprintf(f, "joined tanks=%zu width=%d height=%d timediff=%lld\n",
+		fprintf(f, "joined tanks=%zu width=%d height=%d timediff=%lld startdiff=%lld ticks=%d\n",
 			client.getTargetContainer().getTanks().size(),
 			client.getLandscapeMaps().getGroundMaps().getHeightMap().getMapWidth(),
 			client.getLandscapeMaps().getGroundMaps().getHeightMap().getMapHeight(),
-			(long long) sync.getServerTimeDifference().getInternalData());
+			(long long) sync.getServerTimeDifference().getInternalData(),
+			startDiff, settleTicks);
 	}
 	else
 	{
