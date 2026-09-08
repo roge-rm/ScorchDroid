@@ -20,13 +20,17 @@ Cheers, enjoy! rm
   shoreline foam and moving waves, a sky with the landscape's own colour gradient, clouds, sun and
   stars, distance fog, baked sun shadows, trees and scenery, and cavern roofs.
 - Weapon effects driven by the simulation's own events — explosions, napalm, lasers, lightning,
-  shield hits, sky flashes, teleports, and smoke.
+  shield hits, sky flashes, teleports, smoke, mushroom clouds, thrown debris, arena wall flashes,
+  floating damage numbers and speech bubbles.
 - Touch controls: drag to orbit, pinch to zoom, tap to aim, plus angle/elevation/power sliders and
   a Fire button that don't depend on screen-to-world mapping.
 - Seven camera views including a shot camera that follows the projectile.
 - LAN multiplayer — host or join, with automatic game discovery over NSD.
 - In-game chat and a live score table.
 - The full shop: weapons and defensive accessories, with purchases acknowledged immediately.
+- A main menu — single player, multiplayer, and an About screen carrying the GPL notice and the
+  exact upstream commit the build came from. Games can be left and started again without
+  restarting the app.
 
 ## Requirements
 
