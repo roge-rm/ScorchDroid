@@ -490,8 +490,13 @@ data class SetupOption(
 
 data class SetupChoice(val value: Int, val rawLabel: String) {
     /** "WallConcrete" -> "Concrete", "TurnSequentialRandom" -> "Sequential Random". */
-    val label: String get() = humanise(rawLabel.removePrefix("Wall").removePrefix("Turn").removePrefix("Wind"))
-        .ifEmpty { humanise(rawLabel) }
+    val label: String get() = humanise(
+        // WindChange before Wind: the WindType values are all
+        // "WindChangeSomething", and stripping only "Wind" leaves every one of
+        // them starting with a "Change" that the row's own label already says.
+        rawLabel.removePrefix("Wall").removePrefix("Turn")
+            .removePrefix("WindChange").removePrefix("Wind")
+    ).ifEmpty { humanise(rawLabel) }
 }
 
 enum class SetupKind { BOUNDED_INT, INT, BOOL, ENUM }
