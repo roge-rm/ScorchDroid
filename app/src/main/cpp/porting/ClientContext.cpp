@@ -24,6 +24,10 @@
 #include <coms/ComsInitializeModMessage.hpp>
 #include <coms/ComsLoadLevelMessage.hpp>
 #include <coms/ComsLevelLoadedMessage.hpp>
+#include <coms/ComsChannelMessage.hpp>
+#include <coms/ComsChannelTextMessage.hpp>
+#include <lang/LangString.hpp>
+#include <ChatStore.h>
 #include <coms/ComsSimulateMessage.hpp>
 #include <coms/ComsSimulateResultMessage.hpp>
 #include <engine/ModFiles.hpp>
@@ -88,6 +92,17 @@ bool ClientContext::connectToServer(const char *host, int port)
 	getComsMessageHandler().addHandler(ComsLoadLevelMessage::ComsLoadLevelMessageType, this);
 	getComsMessageHandler().addHandler(ComsSimulateMessage::ComsSimulateMessageType, this);
 	getComsMessageHandler().addHandler(ComsNetStatMessage::ComsNetStatMessageType, this);
+	// Chat. Without this registration the host's channel text arrives and is
+	// discarded by ComsMessageHandler as an unhandled type, well before
+	// processMessage() above ever sees it.
+	getComsMessageHandler().addHandler(ComsChannelTextMessage::ComsChannelTextMessageType, this);
+	// ...and the registration's own reply. Registering for channels makes
+	// the host call refreshDestination(), which sends a ComsChannelMessage
+	// back; without a handler for it ComsMessageHandler treats it as an
+	// unknown type and errors the connection, and the client then silently
+	// stops receiving everything else - which is exactly what happened, and
+	// what the host-tests' "client sees every tank" check caught.
+	getComsMessageHandler().addHandler(ComsChannelMessage::ComsChannelMessageType, this);
 
 	if (!netInterface->connect(host, port))
 	{
@@ -348,6 +363,40 @@ bool ClientContext::processMessage(NetMessage &message, const char *messageType,
 		sendToServer(levelLoadedMessage);
 
 		state_ = sJoined;
+		subscribeToChatChannels();
+		return true;
+	}
+
+	if (0 == strcmp(messageType, ComsChannelMessage::ComsChannelMessageType.getName().c_str()))
+	{
+		// The host confirming which channels this destination now has. There
+		// is nothing to do with it here - the channel list this port speaks
+		// on is fixed - but it must be read and accepted, not left unhandled.
+		ComsChannelMessage channelMessage;
+		channelMessage.readMessage(reader);
+		return true;
+	}
+
+	if (0 == strcmp(messageType, ComsChannelTextMessage::ComsChannelTextMessageType.getName().c_str()))
+	{
+		// Chat, and the game's own running commentary. The host only sends
+		// a channel's text to destinations that asked for it, which is what
+		// subscribeToChatChannels() below does on joining - without that
+		// registration this handler is simply never reached, which is why a
+		// joined client saw no chat at all before.
+		ComsChannelTextMessage textMessage;
+		if (!textMessage.readMessage(reader)) return true;
+
+		ChannelText &text = textMessage.getChannelText();
+		ScorchDroidChat::Line line;
+		line.channel = text.getChannel();
+		line.text = LangStringUtil::convertFromLang(text.getMessage());
+
+		// The message carries the speaker's player id, not their name.
+		Tank *tank = getTargetContainer().getTankById(text.getSrcPlayerId());
+		if (tank) line.who = tank->getCStrName();
+
+		ScorchDroidChat::push(line);
 		return true;
 	}
 
@@ -420,4 +469,27 @@ void ClientContext::sendToServer(ComsMessage &message, unsigned int flags)
 	message.writeMessage(buffer);
 	buffer.addToBuffer(false);  // Not compressed.
 	getNetInterface().sendMessageServer(buffer, flags);
+}
+
+void ClientContext::subscribeToChatChannels()
+{
+	// The host's ServerChannelManager only forwards a channel's text to
+	// destinations that have registered for it (see its registerClient and
+	// the hasChannel() test in sendText), so without this a joined client is
+	// silently deaf to all chat. Upstream's ClientChannelManager does the
+	// same thing through its receiver-registration machinery; this is the
+	// same message with a fixed local id, since this port has exactly one
+	// local player per destination.
+	//
+	// The list is upstream's own player-visible set. "spam", "admin" and
+	// "whisper" are deliberately left out: the first is noise, and the other
+	// two need authentication this port does not implement.
+	static const char *kChannels[] = { "general", "team", "info", "announce", "combat", "banner" };
+
+	ComsChannelMessage message(ComsChannelMessage::eRegisterRequest, kChatLocalId);
+	for (const char *channel : kChannels)
+	{
+		message.getChannels().push_back(ChannelDefinition(channel, 0));
+	}
+	sendToServer(message);
 }

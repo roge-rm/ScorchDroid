@@ -51,6 +51,10 @@ std::mutex g_engineMutex;
 #include <tankai/TankAIAdder.hpp>
 #include <server/ServerSimulator.hpp>
 #include <tank/TankScore.hpp>
+#include <common/OptionsTransient.hpp>
+#include <common/ChannelText.hpp>
+#include <coms/ComsChannelTextMessage.hpp>
+#include <ChatStore.h>
 #include <weapons/AccessoryStore.hpp>
 #include <weapons/AccessoryPart.hpp>
 #include <coms/ComsBuyAccessoryMessage.hpp>
@@ -1123,6 +1127,66 @@ Java_com_rm_scorchdroid_NativeBridge_getPhaseSecondsRemaining(JNIEnv *, jobject)
 
 static Clock tickClock;
 
+// M6 parity: in-game chat, host side.
+//
+// This needs no patch, unlike the effect/sound/deform hooks, because chat
+// never goes through a client-only drawing path. Typed chat reaches
+// ServerChannelManager::sendText(), which is ordinary src/server code this
+// build compiles, and which already keeps its own rolling log of the last
+// 25 messages for upstream's server console - each with a monotonically
+// increasing id. Polling that is the whole hosting-side implementation.
+//
+// (ChannelManager::showText() - the other obvious hook - is *not* the right
+// place: it carries the sim-action notices like "player joined" and, in this
+// build, only reaches the Logger. Typed chat does not go through it at all.)
+//
+// The entries are pre-formatted for that console as
+//   [channel][name] : "message"
+// so they are unpicked back into their parts here rather than shown raw,
+// which is what lets the HUD colour by channel and tell a player's line from
+// the server's own.
+static unsigned int g_lastChatMessageId = 0;
+
+static void pollServerChat(ScorchedServer *server) {
+    std::list<ServerChannelManager::MessageEntry> &messages =
+        server->getServerChannelManager().getLastMessages();
+    for (auto &entry : messages) {
+        if (entry.messageid <= g_lastChatMessageId) continue;
+        g_lastChatMessageId = entry.messageid;
+
+        ScorchDroidChat::Line line;
+        line.text = entry.message;
+
+        // "[channel][name] : "message"" or "[channel] : "message"" when the
+        // server itself is speaking. Parsed defensively - a channel filter
+        // or a mod could produce something else, and an unrecognised line is
+        // better shown whole than dropped.
+        const std::string &raw = entry.message;
+        size_t open = raw.find('[');
+        size_t close = raw.find(']');
+        if (open == 0 && close != std::string::npos) {
+            line.channel = raw.substr(1, close - 1);
+            size_t rest = close + 1;
+            if (rest < raw.size() && raw[rest] == '[') {
+                size_t nameEnd = raw.find(']', rest);
+                if (nameEnd != std::string::npos) {
+                    line.who = raw.substr(rest + 1, nameEnd - rest - 1);
+                    rest = nameEnd + 1;
+                }
+            }
+            // Drop the ` : "` and the trailing quote the console format adds.
+            size_t quote = raw.find('"', rest);
+            if (quote != std::string::npos) {
+                size_t endQuote = raw.rfind('"');
+                line.text = (endQuote > quote)
+                    ? raw.substr(quote + 1, endQuote - quote - 1)
+                    : raw.substr(quote + 1);
+            }
+        }
+        ScorchDroidChat::push(line);
+    }
+}
+
 // Drives the real game simulation forward. Host mode replicates
 // ServerMain.cpp's serverLoop() (excluded from this build - see the
 // porting plan - because it also pulls in the deferred UDP-based
@@ -1183,6 +1247,8 @@ Java_com_rm_scorchdroid_NativeBridge_tickEngine(JNIEnv *env, jobject /* this */)
             g_humanPromoted = true;
         }
     }
+
+    pollServerChat(server);
 
     // ServerStateNewGame::newGame() (see ServerStateNewGame.cpp) resets
     // *any* tank it finds not already TankState::sLoading back to sLoading
@@ -1494,4 +1560,172 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
         env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(events[i].c_str()));
     }
     return result;
+}
+
+// M6 parity: the score / player list (upstream's SHOW_SCORE_DIALOG). Every
+// number here is ordinary src/common state that this build already keeps -
+// TankScore has score, kills, wins, money, rank, skill and ping - so this is
+// purely a matter of reading it out; nothing is simulated or inferred.
+//
+// One pipe-delimited row per player, same convention as getWeaponShop():
+//   "playerId|name|isBot|team|score|kills|wins|money|alive|ping|r,g,b|isMe"
+// Sorted by score descending, which is the order the list is useful in.
+// Upstream's own dialog also shows per-team totals and the round/turn
+// counters; those come from getRoundInfo() below rather than being wedged
+// into the same rows.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getPlayerList(JNIEnv *env, jobject /* this */) {
+    std::vector<std::string> rows;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        if (ctx) {
+            Tank *myTank = findMyTank();
+            const unsigned int myId = myTank ? myTank->getPlayerId() : 0;
+
+            std::vector<Tank *> sorted;
+            std::map<unsigned int, Tank *> &tanks = ctx->getTargetContainer().getTanks();
+            for (auto &entry : tanks) sorted.push_back(entry.second);
+            std::sort(sorted.begin(), sorted.end(), [](Tank *a, Tank *b) {
+                if (a->getScore().getScore() != b->getScore().getScore()) {
+                    return a->getScore().getScore() > b->getScore().getScore();
+                }
+                // A stable tie-break, so the list doesn't reshuffle itself
+                // between polls while several players sit on zero.
+                return a->getPlayerId() < b->getPlayerId();
+            });
+
+            for (Tank *tank : sorted) {
+                Vector &colour = tank->getColor();
+                std::ostringstream row;
+                row << tank->getPlayerId() << "|"
+                    << tank->getCStrName() << "|"
+                    << (tank->getTankAI() ? 1 : 0) << "|"
+                    << tank->getTeam() << "|"
+                    << tank->getScore().getScore() << "|"
+                    << tank->getScore().getKills() << "|"
+                    << tank->getScore().getWins() << "|"
+                    << tank->getScore().getMoney() << "|"
+                    // "Alive" as the HUD means it: in the game and not dead.
+                    // TankState::sNormal alone isn't enough - a spectator is
+                    // present but not playing.
+                    << (tank->getState().getTankPlaying() ? 1 : 0) << "|"
+                    << tank->getScore().getPing() << "|"
+                    << (int) (colour[0] * 255.0f) << ","
+                    << (int) (colour[1] * 255.0f) << ","
+                    << (int) (colour[2] * 255.0f) << "|"
+                    << (tank->getPlayerId() == myId ? 1 : 0);
+                rows.push_back(row.str());
+            }
+        }
+    }
+
+    jobjectArray result = env->NewObjectArray((jsize) rows.size(), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < rows.size(); i++) {
+        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(rows[i].c_str()));
+    }
+    return result;
+}
+
+// The round/turn counters the score dialog heads itself with, as
+// "round|totalRounds|turn|totalTurns". Upstream reads exactly these four off
+// OptionsTransient and OptionsGame (see ScoreDialog.cpp).
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getRoundInfo(JNIEnv *env, jobject /* this */) {
+    std::ostringstream out;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        if (!ctx) return env->NewStringUTF("");
+        out << ctx->getOptionsTransient().getCurrentRoundNo() << "|"
+            << ctx->getOptionsGame().getNoRounds() << "|"
+            << ctx->getOptionsTransient().getCurrentTurnNo() << "|"
+            << ctx->getOptionsGame().getNoTurns();
+    }
+    return env->NewStringUTF(out.str().c_str());
+}
+
+// M6 parity: send a chat message on a channel ("general" or "team" - the two
+// upstream exposes to a player; the rest are read-only or admin).
+//
+// The two modes take genuinely different routes, because a host has no
+// socket to itself:
+//  - Hosting, this is a direct ServerChannelManager::sendText(), the same
+//    call the server makes when it receives a client's message. That both
+//    logs it (so pollServerChat above picks it up and the sender sees their
+//    own line) and fans it out to every subscribed client.
+//  - Joined, it is a ComsChannelTextMessage to the host, which is exactly
+//    what upstream's ClientChannelManager::sendText does - including setting
+//    srcPlayerId, without which ServerChannelManager rejects the message as
+//    not provably from this tank.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_sendChat(
+        JNIEnv *env, jobject /* this */, jstring jChannel, jstring jText) {
+    const char *channelChars = env->GetStringUTFChars(jChannel, nullptr);
+    const char *textChars = env->GetStringUTFChars(jText, nullptr);
+    std::string channel(channelChars ? channelChars : "general");
+    std::string text(textChars ? textChars : "");
+    if (channelChars) env->ReleaseStringUTFChars(jChannel, channelChars);
+    if (textChars) env->ReleaseStringUTFChars(jText, textChars);
+
+    if (text.empty()) return JNI_FALSE;
+
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    Tank *tank = findMyTank();
+    if (!tank) return JNI_FALSE;
+
+    ChannelText channelText(channel, LANG_STRING(text));
+    channelText.setSrcPlayerId(tank->getPlayerId());
+
+    if (g_mode == EngineMode::kHost) {
+        if (!ScorchedServer::serverStarted()) return JNI_FALSE;
+        ScorchedServer::instance()->getServerChannelManager().sendText(channelText, true);
+        return JNI_TRUE;
+    }
+
+    if (g_mode == EngineMode::kClient && g_clientContext) {
+        ComsChannelTextMessage message(channelText);
+        // sendGameMessage rather than the private sendToServer: it also
+        // refuses to send before the handshake has reached sJoined, which is
+        // the right answer for chat typed while still connecting.
+        if (!g_clientContext->sendGameMessage(message)) return JNI_FALSE;
+        // Shown locally at once rather than waiting for the host to echo it
+        // back: the round trip is a send boundary away, and a chat box that
+        // appears to swallow what you typed reads as broken. If the host
+        // rejects or filters it, the only cost is a line the others never
+        // saw - the same trade the shop's optimistic "buying..." makes.
+        ScorchDroidChat::Line line;
+        line.channel = channel;
+        line.who = tank->getCStrName();
+        line.text = text;
+        ScorchDroidChat::push(line);
+        return JNI_TRUE;
+    }
+    return JNI_FALSE;
+}
+
+// The chat log, oldest first, as "id|channel|who|text". Text is last so it
+// may contain pipes without needing escaping.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getChatLines(
+        JNIEnv *env, jobject /* this */, jint afterId) {
+    std::vector<ScorchDroidChat::Line> lines =
+        ScorchDroidChat::since((unsigned int) std::max(afterId, 0));
+
+    jobjectArray result = env->NewObjectArray(
+        (jsize) lines.size(), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < lines.size(); i++) {
+        std::ostringstream row;
+        row << lines[i].id << "|" << lines[i].channel << "|"
+            << lines[i].who << "|" << lines[i].text;
+        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(row.str().c_str()));
+    }
+    return result;
+}
+
+// Bumped on every new chat line, so the HUD can poll one int rather than
+// rebuilding the list every frame to discover nothing arrived.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getChatVersion(JNIEnv *env, jobject /* this */) {
+    return (jint) ScorchDroidChat::version();
 }

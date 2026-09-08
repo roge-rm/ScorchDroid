@@ -28,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.DoneAll
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.MoreVert
@@ -45,6 +46,21 @@ import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import kotlinx.coroutines.delay
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -179,7 +195,26 @@ class GameHudState {
     // since it's written from ordinary (non-Composable) Kotlin in
     // MainActivity.
     var dialog: HudDialog by mutableStateOf(HudDialog.None)
+
+    // M6 parity: in-game chat. Messages appear briefly in the top-right,
+    // under the session icons, newest at the top, each fading on its own
+    // timer rather than the whole stack clearing at once - so a burst of
+    // traffic doesn't wipe a line you were halfway through reading.
+    var chatToasts by mutableStateOf<List<ChatToast>>(emptyList())
+    // Whether the inline compose box is open. Deliberately not a HudDialog:
+    // those are modal AlertDialogs that cover the battlefield, and typing a
+    // message is something you do *while* watching the game.
+    var chatComposing by mutableStateOf(false)
+    // "general" or "team" - the two channels upstream lets a player speak
+    // on. The rest are read-only or need admin authentication.
+    var chatChannel by mutableStateOf("general")
 }
+
+/** A chat line currently on screen, with the moment it arrived. */
+data class ChatToast(val line: ChatLine, val shownAtMillis: Long)
+
+/** How long each message stays on screen before it fades out. */
+const val CHAT_TOAST_MILLIS = 5_000L
 
 @Composable
 fun GameHud(
@@ -197,6 +232,8 @@ fun GameHud(
     onUndo: () -> Unit,
     onSkip: () -> Unit,
     onDoneBuying: () -> Unit,
+    onScores: () -> Unit,
+    onSendChat: (String) -> Unit,
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
         // Top-left: status line (phase/turn/aim feedback - see
@@ -246,11 +283,30 @@ fun GameHud(
             // misleading. Worth rewriting once the controls settle rather
             // than keeping a stale one on screen.
             HudIconButton(
+                icon = Icons.AutoMirrored.Filled.Chat,
+                description = "Send a message",
+                onClick = { state.chatComposing = true },
+            )
+            HudIconButton(
                 icon = if (state.cameraFollow) Icons.Filled.CenterFocusStrong else Icons.Filled.Public,
                 description = if (state.cameraFollow) "Camera: following your tank" else "Camera: free-fly",
                 onClick = onToggleCamera,
             )
         }
+
+        // Chat, directly under those icons. Transient by design: it is a
+        // glance, not a log - the full history is in the score dialog's
+        // sibling, and anything important repeats.
+        ChatOverlay(
+            state = state,
+            onSend = onSendChat,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .windowInsetsPadding(WindowInsets.displayCutout)
+                .padding(horizontal = 12.dp)
+                // Clear of the icon row above.
+                .padding(top = 72.dp),
+        )
 
         // Everything else lives in a stacked strip along the bottom edge.
         // Portrait has scarce width but plenty of height, so stacking two
@@ -729,5 +785,169 @@ private fun HudIconButton(
         modifier = Modifier.padding(horizontal = 2.dp).size(44.dp),
     ) {
         Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
+    }
+}
+
+/**
+ * M6 parity: the in-game chat overlay - a transient stack of recent messages
+ * plus the inline compose box.
+ *
+ * Deliberately not a modal dialog. Chat happens *during* the round, often
+ * while watching a shot land, so covering the battlefield to type would make
+ * it useless for the one thing it is for. The compose box is a single row
+ * pinned under the message stack; the system keyboard takes the bottom of the
+ * screen and the game stays visible above it.
+ *
+ * Each message carries its own arrival time and expires on its own timer, so
+ * a burst does not wipe a line halfway through being read; new ones push in
+ * at the top and the rest slide down.
+ */
+@Composable
+private fun ChatOverlay(
+    state: GameHudState,
+    onSend: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // Drop expired messages. Ticking here rather than filtering at the poll
+    // site keeps the expiry independent of whether any new chat is arriving -
+    // the last message of a conversation has to time out too.
+    LaunchedEffect(state.chatToasts.size, state.chatToasts.firstOrNull()?.line?.id) {
+        while (state.chatToasts.isNotEmpty()) {
+            delay(250)
+            val now = System.currentTimeMillis()
+            state.chatToasts = state.chatToasts.filter {
+                now - it.shownAtMillis < CHAT_TOAST_MILLIS
+            }
+        }
+    }
+
+    Column(
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = modifier.widthIn(max = 260.dp),
+    ) {
+        // Newest first, so the eye lands on the latest without hunting.
+        state.chatToasts.sortedByDescending { it.line.id }.forEach { toast ->
+            ChatToastRow(toast)
+        }
+
+        if (state.chatComposing) {
+            ChatComposer(
+                channel = state.chatChannel,
+                onChannelChange = { state.chatChannel = it },
+                onSend = { text ->
+                    onSend(text)
+                    state.chatComposing = false
+                },
+                onDismiss = { state.chatComposing = false },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ChatToastRow(toast: ChatToast) {
+    // Fade the last second rather than vanishing, so a message leaving does
+    // not read as a glitch.
+    var visible by remember(toast.line.id) { mutableStateOf(true) }
+    val alpha by animateFloatAsState(if (visible) 1f else 0f, label = "chatFade")
+    LaunchedEffect(toast.line.id) {
+        delay(CHAT_TOAST_MILLIS - 800)
+        visible = false
+    }
+
+    Surface(
+        color = Color.Black.copy(alpha = 0.55f * alpha),
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Row(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            if (toast.line.who.isNotEmpty()) {
+                Text(
+                    text = "${toast.line.who}: ",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = channelColor(toast.line.channel).copy(alpha = alpha),
+                )
+            }
+            Text(
+                text = toast.line.text,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = alpha),
+            )
+        }
+    }
+}
+
+/**
+ * Upstream colours its channels so the game's own commentary reads
+ * differently from a player talking. The exact palette is ours - upstream's
+ * lives in its GLW widget set - but the distinction is the point.
+ */
+private fun channelColor(channel: String): Color = when (channel) {
+    "team" -> Color(0xFF7FD8FF)
+    "info", "announce", "banner" -> Color(0xFFFFD37F)
+    "combat" -> Color(0xFFFF9E80)
+    else -> Color(0xFFB6F7A8)
+}
+
+@Composable
+private fun ChatComposer(
+    channel: String,
+    onChannelChange: (String) -> Unit,
+    onSend: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+    // Open the keyboard as soon as the box appears - the tap on the chat
+    // icon was already the "I want to type" gesture, so asking for a second
+    // one would be busywork.
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    Surface(
+        color = Color.Black.copy(alpha = 0.75f),
+        shape = MaterialTheme.shapes.small,
+    ) {
+        Column(modifier = Modifier.padding(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Channel picker: two options, so a toggle rather than a menu.
+                listOf("general", "team").forEach { option ->
+                    Text(
+                        text = option,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (channel == option) channelColor(option) else Color.White.copy(alpha = 0.5f),
+                        modifier = Modifier
+                            .clickable { onChannelChange(option) }
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "Close",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodySmall,
+                placeholder = {
+                    Text("Message", style = MaterialTheme.typography.bodySmall)
+                },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                keyboardActions = KeyboardActions(onSend = {
+                    if (text.isNotBlank()) onSend(text.trim())
+                    text = ""
+                }),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester),
+            )
+        }
     }
 }

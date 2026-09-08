@@ -101,6 +101,17 @@ private:
 	// same ~10 lines, against this context instead.
 	void sendToServer( ComsMessage& message, unsigned int flags = 0 );
 
+	// Asks the host to start sending this destination the chat channels.
+	// The host sends a channel's text only to destinations that registered
+	// for it, so a client that never does this receives no chat at all.
+	void subscribeToChatChannels();
+
+	// The per-destination "local id" the channel registration is keyed by.
+	// Upstream allocates one per receiver in its client channel manager;
+	// this port has exactly one local player per destination, so a constant
+	// is enough.
+	static const unsigned int kChatLocalId = 1;
+
 	void fail( const std::string& reason );
 
 	// A freshly-joined tank sits in TankState::sLoading/sSpectator (not

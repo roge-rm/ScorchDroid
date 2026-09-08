@@ -206,6 +206,33 @@ object NativeBridge {
      * MainActivity.engineAngleFromDial first; [power] is 0..1.
      */
     external fun setAim(angleDegrees: Float, elevationDegrees: Float, power: Float): Boolean
+
+    /**
+     * M6 parity: the score / player list (upstream's SHOW_SCORE_DIALOG), one
+     * pipe-delimited row per player, sorted by score descending. See
+     * [parsePlayerList].
+     */
+    external fun getPlayerList(): Array<String>
+
+    /** "round|totalRounds|turn|totalTurns", the score dialog's own heading. */
+    external fun getRoundInfo(): String
+
+    /**
+     * Sends a chat message on a channel ("general" or "team"). Hosting, this
+     * goes straight into the server's channel manager; joined, it is a
+     * ComsChannelTextMessage to the host. False if there is no tank to speak
+     * as yet, or (joined) the handshake has not finished.
+     */
+    external fun sendChat(channel: String, text: String): Boolean
+
+    /**
+     * Chat lines newer than [afterId], oldest first, as "id|channel|who|text".
+     * Text is last so it may contain pipes. See [parseChatLines].
+     */
+    external fun getChatLines(afterId: Int): Array<String>
+
+    /** Bumped on every new chat line, so the HUD can poll one int. */
+    external fun getChatVersion(): Int
 }
 
 /**
@@ -301,5 +328,68 @@ fun parseWeaponShop(rows: Array<String>): List<WeaponShopEntry> = rows.mapNotNul
         isCurrentWeapon = parts[4] == "1",
         type = parts[5],
         tabGroup = parts[6],
+    )
+}
+
+/**
+ * One row of the score table. [colorArgb] is the tank's own engine colour,
+ * the same one its model and name plate use.
+ */
+data class PlayerEntry(
+    val playerId: Int,
+    val name: String,
+    val isBot: Boolean,
+    val team: Int,
+    val score: Int,
+    val kills: Int,
+    val wins: Int,
+    val money: Int,
+    val alive: Boolean,
+    val ping: Int,
+    val colorArgb: Int,
+    val isMe: Boolean,
+)
+
+fun parsePlayerList(rows: Array<String>): List<PlayerEntry> = rows.mapNotNull { row ->
+    val parts = row.split("|")
+    if (parts.size != 12) return@mapNotNull null
+    val rgb = parts[10].split(",")
+    if (rgb.size != 3) return@mapNotNull null
+    PlayerEntry(
+        playerId = parts[0].toIntOrNull() ?: return@mapNotNull null,
+        name = parts[1],
+        isBot = parts[2] == "1",
+        team = parts[3].toIntOrNull() ?: 0,
+        score = parts[4].toIntOrNull() ?: 0,
+        kills = parts[5].toIntOrNull() ?: 0,
+        wins = parts[6].toIntOrNull() ?: 0,
+        money = parts[7].toIntOrNull() ?: 0,
+        alive = parts[8] == "1",
+        ping = parts[9].toIntOrNull() ?: 0,
+        colorArgb = (0xFF shl 24) or
+            ((rgb[0].toIntOrNull() ?: 255) shl 16) or
+            ((rgb[1].toIntOrNull() ?: 255) shl 8) or
+            (rgb[2].toIntOrNull() ?: 255),
+        isMe = parts[11] == "1",
+    )
+}
+
+/** One chat line. [who] is empty when the game itself is talking. */
+data class ChatLine(
+    val id: Int,
+    val channel: String,
+    val who: String,
+    val text: String,
+)
+
+fun parseChatLines(rows: Array<String>): List<ChatLine> = rows.mapNotNull { row ->
+    // Split into exactly four, so a message containing pipes survives.
+    val parts = row.split("|", limit = 4)
+    if (parts.size != 4) return@mapNotNull null
+    ChatLine(
+        id = parts[0].toIntOrNull() ?: return@mapNotNull null,
+        channel = parts[1],
+        who = parts[2],
+        text = parts[3],
     )
 }

@@ -51,6 +51,7 @@
 #include <landscapemap/MovementMap.hpp>
 #include <TargetModelStore.h>
 #include <SkyDescription.hpp>
+#include <ChatStore.h>
 #include <weapons/WeaponMoveTank.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
@@ -794,6 +795,54 @@ namespace
 	// colour map with upstream's own indexing (Hemisphere::drawColored), and
 	// getting that wrong produces a sky that is merely "a bit off" rather
 	// than obviously broken.
+	// M6 parity: the chat log's own bookkeeping. Worth pinning because the
+	// HUD depends on two properties that are easy to break silently - ids
+	// must be monotonic even across a clear(), and since() must return only
+	// what the caller has not already been shown. Get either wrong and the
+	// on-screen stack either restarts a message's timer forever or drops it.
+	void testChatStore()
+	{
+		printf("\nchat store (ids, since, version):\n");
+
+		ScorchDroidChat::clear();
+		const unsigned int startVersion = ScorchDroidChat::version();
+
+		ScorchDroidChat::Line first;
+		first.channel = "general";
+		first.who = "Player";
+		first.text = "hello";
+		ScorchDroidChat::push(first);
+
+		ScorchDroidChat::Line second;
+		second.channel = "info";
+		second.text = "Game started";
+		ScorchDroidChat::push(second);
+
+		std::vector<ScorchDroidChat::Line> all = ScorchDroidChat::snapshot();
+		check(all.size() == 2, "both pushed lines are in the log");
+		if (all.size() != 2) return;
+
+		check(all[0].id < all[1].id, "ids increase with each push");
+		check(all[0].who == "Player" && all[1].who.empty(),
+			"the speaker is kept, and is empty when the server is talking");
+		check(ScorchDroidChat::version() > startVersion, "the version moves on a push");
+
+		std::vector<ScorchDroidChat::Line> fresh = ScorchDroidChat::since(all[0].id);
+		check(fresh.size() == 1 && fresh[0].id == all[1].id,
+			"since() returns only lines newer than the one already seen");
+		check(ScorchDroidChat::since(all[1].id).empty(),
+			"since() the newest line returns nothing");
+
+		// Ids must not restart, or the HUD would confuse a new line with one
+		// it is already counting down.
+		const unsigned int lastId = all[1].id;
+		ScorchDroidChat::clear();
+		check(ScorchDroidChat::snapshot().empty(), "clear() empties the log");
+		ScorchDroidChat::push(first);
+		check(ScorchDroidChat::snapshot().at(0).id > lastId,
+			"ids keep counting across a clear rather than restarting");
+	}
+
 	void testSkyDescription()
 	{
 		printf("\nsky description (landscape colour map, sun, fog):\n");
@@ -1632,6 +1681,7 @@ int main(int argc, char **argv)
 	testTerrainDeformation();
 	testCameraPickRay();
 	testSkyDescription();
+	testChatStore();
 	testLandscapeTargets();
 	testTankMovement();
 	testRealTcpHostAndConnect();
