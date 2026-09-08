@@ -73,6 +73,30 @@ namespace ScorchDroidSetup
 	// Forget every choice and go back to what the config file says.
 	void reset();
 
+	// The mods available to choose, always with "none" first. Read from the
+	// data directory rather than hardcoded, so a mod dropped in alongside
+	// upstream's own appears without a code change.
+	std::vector<std::string> mods(const std::string &dataRoot);
+
+	// "none" for upstream's base game. Unlike every other option here, this
+	// one cannot be applied after the server starts: startServerInternal()
+	// calls setDataFileMod() and loadModFiles() partway through its own
+	// startup, long before applyTo() could run. That is what writeSessionFile
+	// below exists for.
+	std::string mod();
+	bool setMod(const std::string &name);
+
+	// Writes the chosen options to [path] as a config file for the server to
+	// read at startup, and returns false if it could not be written.
+	//
+	// This is how the mod choice takes effect, and the reason it is worth
+	// doing for everything rather than only the mod: options that arrive
+	// through the config file are in place before startServerInternal() reads
+	// any of them, and they are what OptionsScorched snapshots, so nothing has
+	// to be re-applied afterwards and nothing can be reverted by
+	// commitChanges().
+	bool writeSessionFile(const std::string &path);
+
 	// Copies the chosen values into a running server's options.
 	//
 	// MUST be followed by OptionsScorched::updateChangeSet(), and the caller

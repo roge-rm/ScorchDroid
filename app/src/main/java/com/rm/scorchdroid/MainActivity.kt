@@ -46,6 +46,8 @@ class MainActivity : AppCompatActivity() {
     // declared here - see GameSetup.h.
     private var setupOptions by mutableStateOf<List<SetupOption>>(emptyList())
     private var setupTitle by mutableStateOf("New Game")
+    private var availableMods by mutableStateOf<List<String>>(emptyList())
+    private var selectedMod by mutableStateOf("none")
 
     // M4: the real Compose HUD's mutable state (see GameHud.kt) - written
     // to directly from the tick loop, touch handlers, and dialogs below,
@@ -130,7 +132,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 AppScreen.MULTIPLAYER -> MultiplayerScreen(
                     onHost = { openSetup("Host Game") },
-                    onJoin = { startGame(GameMode.JOIN) },
+                    onJoin = { startJoinFlow() },
                     onBack = { appScreen = AppScreen.MENU },
                 )
                 // M11 builds this screen; until then the button is honest
@@ -138,13 +140,25 @@ class MainActivity : AppCompatActivity() {
                 AppScreen.SETUP -> GameSetupScreen(
                     title = setupTitle,
                     options = setupOptions,
+                    mods = availableMods,
+                    selectedMod = selectedMod,
+                    onModChange = {
+                        NativeBridge.setSelectedMod(it)
+                        selectedMod = NativeBridge.getSelectedMod()
+                    },
                     onChange = { option, value -> changeSetupOption(option, value) },
                     onReset = {
                         NativeBridge.resetSetupOptions()
                         setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
+                        selectedMod = NativeBridge.getSelectedMod()
                     },
-                    onStart = { startGame(GameMode.HOST) },
+                    onStart = { startGame() },
                     onBack = { appScreen = AppScreen.MENU },
+                )
+                AppScreen.JOINING -> JoiningScreen(
+                    status = hudState.statusText,
+                    dialog = hudState.dialog,
+                    onBack = { cancelJoinFlow() },
                 )
                 AppScreen.SETTINGS -> SettingsPlaceholderScreen(
                     onBack = { appScreen = AppScreen.MENU },
@@ -180,6 +194,7 @@ class MainActivity : AppCompatActivity() {
                 onDefenses = { showDefenses() },
                 onActions = { showActionsMenu() },
                 onUndo = { revertToLastAim() },
+                onQuitToMenu = { confirmQuitToMenu() },
                 onSkip = { submitMoveAsync(MoveType.SKIP) },
                 onDoneBuying = { submitMoveAsync(MoveType.FINISHED_BUY) },
                 onScores = { showScores() },
@@ -218,6 +233,17 @@ class MainActivity : AppCompatActivity() {
     private fun openSetup(title: String) {
         setupTitle = title
         setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
+        // Deliberately not offered yet. The plumbing works - the mod reaches
+        // the server through the session config, which is the only route that
+        // can work, since startServerInternal() loads mod files partway
+        // through its own startup - but selecting the Apocalypse mod produces
+        // a game that loads its landscape and then never starts, logging
+        // "Failed to find a tank ai called Moron" every tick while the bot
+        // slot goes unfilled. The mod does define that AI, so the cause is
+        // something else and is not yet understood. Offering a picker that
+        // yields an unstartable game would be worse than not offering one.
+        availableMods = emptyList()
+        selectedMod = NativeBridge.getSelectedMod()
         appScreen = AppScreen.SETUP
     }
 
@@ -262,8 +288,62 @@ class MainActivity : AppCompatActivity() {
      * writing a second "forget everything" path that would need to stay in
      * step with the first.
      */
-    private fun startGame(mode: GameMode) {
+    private fun startGame() {
         if (gameJob != null) return
+        attachGameSurface()
+        appScreen = AppScreen.GAME
+        gameJob = CoroutineScope(Dispatchers.Main).launch { startAsHost() }
+    }
+
+    /**
+     * M10: find and connect to a game, staying on a menu screen while it
+     * happens.
+     *
+     * The GL surface is deliberately not built until the connection is up.
+     * Building it first - which is what happened when Join went through
+     * startGame() - put the discovery dialog on top of the aiming sliders and
+     * Fire button of a game that did not exist yet.
+     */
+    private fun startJoinFlow() {
+        if (gameJob != null) return
+        appScreen = AppScreen.JOINING
+        hudState.statusText = "Looking for a game..."
+        gameJob = CoroutineScope(Dispatchers.Main).launch {
+            val target = pickJoinTarget()
+            if (target == null) {
+                gameJob = null
+                appScreen = AppScreen.MULTIPLAYER
+                return@launch
+            }
+
+            hudState.statusText = "Connecting to ${target.first}:${target.second}..."
+            val connecting = withContext(Dispatchers.Default) {
+                NativeBridge.startJoinGame(target.first, target.second)
+            }
+            if (!connecting) {
+                hudState.statusText =
+                    "Couldn't reach ${target.first}:${target.second}. Tap Cancel to go back."
+                return@launch
+            }
+
+            // Connected, so there is now a game to draw.
+            attachGameSurface()
+            appScreen = AppScreen.GAME
+            awaitJoinAndPlay()
+        }
+    }
+
+    /** Abandons a join that hasn't connected yet and returns to the menu. */
+    private fun cancelJoinFlow() {
+        gameJob?.cancel()
+        gameJob = null
+        hudState.dialog = HudDialog.None
+        NativeBridge.stopGame()
+        hudState.reset()
+        appScreen = AppScreen.MULTIPLAYER
+    }
+
+    private fun attachGameSurface() {
         val surface = GLSurfaceView(this).apply {
             setEGLContextClientVersion(3)
             // Only a hint - the driver may drop the context anyway under
@@ -284,14 +364,25 @@ class MainActivity : AppCompatActivity() {
         setUpCameraControls(surface, gameRenderer)
         gameSurface = surface
         surfaceHost.addView(surface)
+    }
 
-        appScreen = AppScreen.GAME
-        gameJob = CoroutineScope(Dispatchers.Main).launch {
-            when (mode) {
-                GameMode.HOST -> startAsHost()
-                GameMode.JOIN -> startAsClient()
-            }
-        }
+    /**
+     * M10: quitting is a long press on the undo button rather than an entry in
+     * the overflow menu (rm's call). It keeps its confirmation - it abandons
+     * the game outright, with no saving or rejoining - and a long press is
+     * hard enough to do by accident that the pairing is safe.
+     */
+    private fun confirmQuitToMenu() {
+        hudState.dialog = HudDialog.ListChoice(
+            title = "Leave this game?",
+            items = listOf("Yes, quit to menu"),
+            cancelLabel = "Cancel",
+            onSelect = {
+                hudState.dialog = HudDialog.None
+                quitToMenu()
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
     }
 
     /**
@@ -318,8 +409,6 @@ class MainActivity : AppCompatActivity() {
         appScreen = AppScreen.MENU
     }
 
-    private enum class GameMode { HOST, JOIN }
-
     private suspend fun CoroutineScope.startAsHost() {
         hudState.statusText = "Starting local game..."
         val gameOk = withContext(Dispatchers.Default) { NativeBridge.startLocalGame(BuildConfig.DEBUG) }
@@ -336,22 +425,13 @@ class MainActivity : AppCompatActivity() {
     // already existed (see showFindGames doc comment history) - now tapping
     // a result actually connects, and there's a manual host:port entry too
     // for a PC host (or a device not advertising via NSD).
-    private suspend fun CoroutineScope.startAsClient() {
-        hudState.statusText = "Choose a game to join..."
-        val target = pickJoinTarget() ?: run {
-            hudState.statusText = "No game selected - restart the app to try again"
-            return
-        }
-
-        hudState.statusText = "Connecting to ${target.first}:${target.second}..."
-        val connecting = withContext(Dispatchers.Default) {
-            NativeBridge.startJoinGame(target.first, target.second)
-        }
-        if (!connecting) {
-            hudState.statusText = "Failed to open a connection to ${target.first}:${target.second}"
-            return
-        }
-
+    /**
+     * The second half of joining: the connection is open, so pump the
+     * handshake through to sJoined and then play. Split from the finding and
+     * connecting half (startJoinFlow) because only this part belongs on the
+     * game screen.
+     */
+    private suspend fun CoroutineScope.awaitJoinAndPlay() {
         // The handshake itself (connect -> auth -> mod-check -> load-level,
         // see ClientContext.hpp) only advances as tickEngine() pumps the
         // network, same as everything else - so this loop has to run
@@ -1062,20 +1142,6 @@ class MainActivity : AppCompatActivity() {
                     onSelect = {
                         submitMoveAsync(MoveType.RESIGN)
                         hudState.dialog = HudDialog.None
-                    },
-                    onCancel = { hudState.dialog = HudDialog.None },
-                )
-            },
-            // M9: the way out. Confirmed, because it abandons the game
-            // outright - there is no saving or rejoining it afterwards.
-            "Quit to menu..." to {
-                hudState.dialog = HudDialog.ListChoice(
-                    title = "Leave this game?",
-                    items = listOf("Yes, quit to menu"),
-                    cancelLabel = "Cancel",
-                    onSelect = {
-                        hudState.dialog = HudDialog.None
-                        quitToMenu()
                     },
                     onCancel = { hudState.dialog = HudDialog.None },
                 )

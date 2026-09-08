@@ -311,7 +311,27 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
         LOGE("startLocalGame: engine already started (mode=%d)", (int) g_mode);
         return JNI_FALSE;
     }
-    ScorchedServerSettingsOptions settings("scorchdroid_server.xml", false, false);
+    // M10: the server reads the player's own setup rather than the shipped
+    // config directly. Written out first, because some options - the mod above
+    // all - are consumed *inside* startServerInternal(), which calls
+    // setDataFileMod() and loadModFiles() partway through its own startup.
+    // Anything applied afterwards would be too late for those, and a mod that
+    // silently failed to load would look like the mod being broken rather than
+    // never selected. Options that arrive this way are also what
+    // OptionsScorched snapshots, so they cannot be reverted by commitChanges()
+    // at the first round.
+    //
+    // Falls back to the shipped config if the file can't be written, so a
+    // read-only or full data directory costs the player their choices rather
+    // than the game.
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    const char *kSessionFile = "scorchdroid_session.xml";
+    const bool wroteSession = ScorchDroidSetup::writeSessionFile(kSessionFile);
+    if (!wroteSession) {
+        LOGE("Could not write %s - starting with the shipped config instead", kSessionFile);
+    }
+    ScorchedServerSettingsOptions settings(
+        wroteSession ? kSessionFile : "scorchdroid_server.xml", false, false);
 
     // M5: local=false makes ScorchedServer::startServerInternal() set up a
     // real NetServerTCP3 instead of NetLoopBack (see ScorchedServer.cpp) -
@@ -326,11 +346,6 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
     if (!started) return JNI_FALSE;
 
     OptionsScorched &options = ScorchedServer::instance()->getOptionsGame();
-
-    // M10: the player's own choices from the setup screen - rounds, turns,
-    // wall type, money.
-    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
-    ScorchDroidSetup::applyTo(options);
 
     // Debug builds start rich, purely so testing does not have to play
     // several rounds to afford the thing being tested - a nuke to see the
@@ -347,10 +362,10 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
              kDebugStartMoney, ok ? 1 : 0);
     }
 
-    // Once, after every write above, and outside the debug branch it used to
-    // live inside - a release build applies the setup screen's choices too,
-    // and having this inside `if (debugBuild)` would have reverted every one
-    // of them in exactly the builds players use.
+    // Once, after every write above. The setup screen's own choices no longer
+    // need it - they arrive through the session config, before the snapshot is
+    // taken - but the debug money flag above is still written after startup
+    // and does.
     //
     // updateChangeSet() re-takes the snapshot OptionsScorched keeps of the
     // main options. Without it these writes are undone the moment the first
@@ -1739,6 +1754,44 @@ Java_com_rm_scorchdroid_NativeBridge_setSetupOption(
 
     ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
     return ScorchDroidSetup::set(name, value) ? JNI_TRUE : JNI_FALSE;
+}
+
+// The mods available to choose. "none" (upstream's base game) is always first;
+// the rest are whatever directories sit in data/globalmods, so a mod dropped in
+// alongside upstream's own appears with no code change.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getAvailableMods(JNIEnv *env, jobject /* this */) {
+    // "." is the data root: initEngine() chdir'd there, which is also why
+    // every config path in this file is relative.
+    std::vector<std::string> mods = ScorchDroidSetup::mods(".");
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray((jsize) mods.size(), stringClass, nullptr);
+    for (size_t i = 0; i < mods.size(); i++) {
+        jstring value = env->NewStringUTF(mods[i].c_str());
+        env->SetObjectArrayElement(result, (jsize) i, value);
+        env->DeleteLocalRef(value);
+    }
+    return result;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getSelectedMod(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return env->NewStringUTF(ScorchDroidSetup::mod().c_str());
+}
+
+// Not validated here: any string is a legal mod name as far as upstream's
+// option is concerned, and a name with no directory behind it would fail at
+// load time. The UI only offers names from getAvailableMods(), which is where
+// the guarantee comes from.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setSelectedMod(
+        JNIEnv *env, jobject /* this */, jstring jName) {
+    const char *nameChars = env->GetStringUTFChars(jName, nullptr);
+    std::string name(nameChars ? nameChars : "none");
+    if (nameChars) env->ReleaseStringUTFChars(jName, nameChars);
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return ScorchDroidSetup::setMod(name) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Back to what the shipped config says.
