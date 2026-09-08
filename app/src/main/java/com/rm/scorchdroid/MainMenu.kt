@@ -239,27 +239,6 @@ fun JoiningScreen(status: String, dialog: HudDialog, onBack: () -> Unit) {
 }
 
 /**
- * M11 builds the real settings screen. Until then the menu entry leads
- * somewhere that says so, rather than to a button that does nothing.
- */
-@Composable
-fun SettingsPlaceholderScreen(onBack: () -> Unit) {
-    MenuBackdrop {
-        Title("Settings")
-        Spacer(Modifier.height(24.dp))
-        Text(
-            text = "Not built yet.\n\nSound, graphics detail, HUD and control options " +
-                "will live here.",
-            color = Color.White.copy(alpha = 0.75f),
-            style = MaterialTheme.typography.bodyMedium,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(24.dp))
-        TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
-    }
-}
-
-/**
  * M9: the licence notice, and the reason it exists.
  *
  * ScorchDroid links Scorched3D's GPLv2+ code into the APK, so distributing a
