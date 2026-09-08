@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.ShoppingCart
@@ -208,6 +209,17 @@ class GameHudState {
     // "general" or "team" - the two channels upstream lets a player speak
     // on. The rest are read-only or need admin authentication.
     var chatChannel by mutableStateOf("general")
+
+    // M6 parity: upstream's HUD_ITEMS key, which toggles its HUD panel off.
+    // Here that means everything except a single button to bring it back -
+    // without one there would be no way to undo it on a touch screen, which
+    // has no spare key to bind.
+    var hudHidden by mutableStateOf(false)
+
+    // M6 parity: the simulation-speed multiplier, shown only when it is not
+    // 1x - upstream does the same (SpeedChange::draw prints "8.0X" only when
+    // speed != 1.0), because a permanent "1x" would be noise.
+    var speedLabel by mutableStateOf("")
 }
 
 /** A chat line currently on screen, with the moment it arrived. */
@@ -235,6 +247,27 @@ fun GameHud(
     onScores: () -> Unit,
     onSendChat: (String) -> Unit,
 ) {
+    // M6 parity: upstream's HUD_ITEMS toggle. Everything goes except one
+    // button to bring it back - a keyboard can rebind the same key to
+    // restore the HUD, a touch screen has nothing to press.
+    if (state.hudHidden) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .windowInsetsPadding(WindowInsets.displayCutout)
+                    .padding(12.dp),
+            ) {
+                HudIconButton(
+                    icon = Icons.Filled.Visibility,
+                    description = "Show the HUD again",
+                    onClick = { state.hudHidden = false },
+                )
+            }
+        }
+        return
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         // Top-left: status line (phase/turn/aim feedback - see
         // NativeBridge.getMyStatusLabel()) plus the hosting address once
@@ -250,6 +283,7 @@ fun GameHud(
             if (state.statusText.isNotEmpty()) HudText(state.statusText)
             if (state.hostingLabel.isNotEmpty()) HudText(state.hostingLabel)
             if (state.windLabel.isNotEmpty()) HudText(state.windLabel)
+            if (state.speedLabel.isNotEmpty()) HudText(state.speedLabel)
             // Upstream shows "Click ground to activate {0}" as a banner the
             // moment such a weapon is selected; this is the same prompt in
             // the place this HUD already puts status.

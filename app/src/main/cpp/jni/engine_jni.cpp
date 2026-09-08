@@ -1729,3 +1729,54 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_rm_scorchdroid_NativeBridge_getChatVersion(JNIEnv *env, jobject /* this */) {
     return (jint) ScorchDroidChat::version();
 }
+
+// M6 parity: simulation speed (upstream's SIMULATION_SPEED_* keys - eighth,
+// quarter, half, normal, x2, x4, x8). Simulator::setFast() is ordinary
+// src/common state, so this is upstream's own mechanism, not a re-timing of
+// the tick loop here.
+//
+// Host only, deliberately. Upstream's SpeedChange sets the *client*
+// simulator's speed and only touches the server's when not connected to one
+// (SpeedChange.cpp) - because in a real game the host sets the pace and a
+// client that ran its own simulation faster would drift out of step with it.
+// This port's joined client is a ClientSync slaved to the host's clock, so
+// the same reasoning applies with more force: it returns false rather than
+// desynchronising.
+//
+// speedNumerator/speedDenominator rather than a float, because the engine's
+// clock is fixed-point: 1/8 has an exact fixed representation and 0.125f
+// converted through a float does not necessarily land on it.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setSimulationSpeed(
+        JNIEnv *env, jobject /* this */, jint numerator, jint denominator) {
+    if (numerator <= 0 || denominator <= 0) return JNI_FALSE;
+
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    if (g_mode != EngineMode::kHost || !ScorchedServer::serverStarted()) return JNI_FALSE;
+
+    ScorchedServer::instance()->getSimulator().setFast(fixed(numerator) / fixed(denominator));
+    return JNI_TRUE;
+}
+
+// The current speed multiplier, as "numerator|denominator" - so the UI can
+// show which setting is in effect without keeping its own copy that could
+// drift from the engine's.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getSimulationSpeed(JNIEnv *env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    ScorchedContext *ctx = activeContext();
+    if (!ctx) return env->NewStringUTF("1|1");
+
+    // getFast() is a fixed; recovering the original fraction exactly means
+    // comparing against the seven upstream offers rather than dividing.
+    fixed speed = ctx->getSimulator().getFast();
+    const int fractions[][2] = { {1,8}, {1,4}, {1,2}, {1,1}, {2,1}, {4,1}, {8,1} };
+    for (auto &f : fractions) {
+        if (speed == fixed(f[0]) / fixed(f[1])) {
+            std::ostringstream out;
+            out << f[0] << "|" << f[1];
+            return env->NewStringUTF(out.str().c_str());
+        }
+    }
+    return env->NewStringUTF("1|1");
+}
