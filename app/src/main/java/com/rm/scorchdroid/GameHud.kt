@@ -281,6 +281,7 @@ fun GameHud(
     onDefenses: () -> Unit,
     onActions: () -> Unit,
     onUndo: () -> Unit,
+    onQuitToMenu: () -> Unit,
     onSkip: () -> Unit,
     onDoneBuying: () -> Unit,
     onScores: () -> Unit,
@@ -477,7 +478,12 @@ fun GameHud(
             // in a menu - only genuinely rare things like resigning sit
             // behind the overflow.
             Row(verticalAlignment = Alignment.CenterVertically) {
-                HudIconButton(Icons.Filled.Undo, "Revert to last angles", onUndo)
+                HudIconButton(
+                    icon = Icons.Filled.Undo,
+                    description = "Revert to last angles (hold to quit to menu)",
+                    onClick = onUndo,
+                    onLongClick = onQuitToMenu,
+                )
                 HudIconButton(
                     icon = Icons.Filled.SkipNext,
                     description = "Skip turn (hold for game speed)",

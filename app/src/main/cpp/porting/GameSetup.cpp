@@ -5,6 +5,8 @@
 #include <common/OptionEntry.hpp>
 
 #include <mutex>
+#include <algorithm>
+#include <dirent.h>
 
 namespace
 {
@@ -155,6 +157,60 @@ namespace ScorchDroidSetup
 		delete g_options;
 		g_options = new OptionsGame();
 		g_options->readOptionsFromFile(g_settingsFile);
+	}
+
+	std::vector<std::string> mods(const std::string &dataRoot)
+	{
+		// "none" is upstream's own name for the base game, not a placeholder
+		// meaning "no mod", and it is always first so the list reads as a
+		// choice rather than as an optional extra.
+		std::vector<std::string> found;
+		found.push_back("none");
+
+		const std::string modsDir = dataRoot + "/data/globalmods";
+		DIR *dir = opendir(modsDir.c_str());
+		if (!dir) return found;
+		while (struct dirent *entry = readdir(dir))
+		{
+			std::string name = entry->d_name;
+			if (name == "." || name == ".." || name == "none") continue;
+			// Directories only: anything else in here is not a mod.
+			const std::string path = modsDir + "/" + name;
+			DIR *sub = opendir(path.c_str());
+			if (!sub) continue;
+			closedir(sub);
+			found.push_back(name);
+		}
+		closedir(dir);
+		// Stable order, so the list does not reshuffle between visits just
+		// because the filesystem returned entries differently.
+		std::sort(found.begin() + 1, found.end());
+		return found;
+	}
+
+	std::string mod()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return "none";
+		return g_options->getMod();
+	}
+
+	bool setMod(const std::string &name)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return false;
+		return g_options->getModEntry().setValueFromString(name);
+	}
+
+	bool writeSessionFile(const std::string &path)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return false;
+		// Every option, not just the changed ones: this file replaces the
+		// shipped config as what the server reads, so anything omitted would
+		// silently fall back to a compiled default rather than to what the
+		// shipped config says.
+		return g_options->writeOptionsToFile(path, true);
 	}
 
 	void applyTo(OptionsScorched &options)

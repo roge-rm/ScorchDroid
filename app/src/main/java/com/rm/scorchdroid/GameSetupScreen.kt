@@ -55,6 +55,9 @@ private val SetupAccent = Color(0xFFB39DFF)
 fun GameSetupScreen(
     title: String,
     options: List<SetupOption>,
+    mods: List<String>,
+    selectedMod: String,
+    onModChange: (String) -> Unit,
     onChange: (SetupOption, String) -> Unit,
     onReset: () -> Unit,
     onStart: () -> Unit,
@@ -91,6 +94,12 @@ fun GameSetupScreen(
                     color = Color.White.copy(alpha = 0.08f),
                     modifier = Modifier.padding(vertical = 10.dp),
                 )
+            }
+
+            // Last, and only when there is a choice to make: with just
+            // upstream's base game installed a one-item picker is noise.
+            if (mods.size > 1) {
+                ModRow(mods, selectedMod, onModChange)
             }
 
             Spacer(Modifier.height(8.dp))
@@ -229,4 +238,44 @@ private fun BoolControl(option: SetupOption, onChange: (SetupOption, String) -> 
             checkedTrackColor = SetupAccent.copy(alpha = 0.4f),
         ),
     )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ModRow(mods: List<String>, selected: String, onChange: (String) -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text("Mod", color = Color.White, style = MaterialTheme.typography.titleSmall)
+        Text(
+            text = "Which set of weapons, landscapes and models to play with",
+            color = Color.White.copy(alpha = 0.55f),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(6.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            mods.forEach { mod ->
+                FilterChip(
+                    selected = mod == selected,
+                    onClick = { onChange(mod) },
+                    // "none" is upstream's own name for the base game, which
+                    // reads as an absence rather than a choice on a button.
+                    label = {
+                        Text(
+                            if (mod == "none") "Scorched3D" else mod.replaceFirstChar { it.uppercase() },
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = Color.White.copy(alpha = 0.06f),
+                        labelColor = Color.White.copy(alpha = 0.75f),
+                        selectedContainerColor = SetupAccent.copy(alpha = 0.3f),
+                        selectedLabelColor = Color.White,
+                    ),
+                )
+            }
+        }
+        HorizontalDivider(
+            color = Color.White.copy(alpha = 0.08f),
+            modifier = Modifier.padding(vertical = 10.dp),
+        )
+    }
 }

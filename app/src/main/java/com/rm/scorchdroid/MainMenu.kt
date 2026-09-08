@@ -37,7 +37,7 @@ import androidx.compose.ui.unit.sp
  * change M9 is really about: until now the app *was* the game, the host/join
  * choice happened once at launch, and the only way out was to kill it.
  */
-enum class AppScreen { SPLASH, MENU, SINGLE_PLAYER, MULTIPLAYER, SETUP, SETTINGS, ABOUT, GAME }
+enum class AppScreen { SPLASH, MENU, SINGLE_PLAYER, MULTIPLAYER, SETUP, JOINING, SETTINGS, ABOUT, GAME }
 
 /** The palette the menu screens share, so they read as one thing. */
 private val MenuTop = Color(0xFF16213A)
@@ -202,6 +202,36 @@ fun MultiplayerScreen(
         Spacer(Modifier.height(12.dp))
         TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
     }
+}
+
+/**
+ * M10: shown while finding and connecting to a game.
+ *
+ * It exists because the join flow used to run over the *game* screen: picking
+ * Join built the GL surface and switched to the HUD immediately, so the
+ * discovery dialog appeared on top of aiming sliders and a Fire button
+ * belonging to a game that did not exist yet. The surface is now built only
+ * once a connection is established.
+ *
+ * The discovery and manual-address dialogs themselves are unchanged and still
+ * come from [HudDialogHost] - they are the same dialogs, just no longer over a
+ * pretend battlefield.
+ */
+@Composable
+fun JoiningScreen(status: String, dialog: HudDialog, onBack: () -> Unit) {
+    MenuBackdrop {
+        Title("Join Game")
+        Spacer(Modifier.height(28.dp))
+        Text(
+            text = status,
+            color = Color.White.copy(alpha = 0.75f),
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(20.dp))
+        TextButton(onClick = onBack) { Text("Cancel", color = MenuAccent) }
+    }
+    HudDialogHost(dialog)
 }
 
 /**

@@ -2164,6 +2164,40 @@ static void testGameSetup()
 	check(serverOptions.getNoRounds() == chosenRounds,
 		"and survives the first round rather than being reverted by commitChanges()");
 
+	// The mod list, and the session file that is the only way a mod choice can
+	// take effect - startServerInternal() calls setDataFileMod() and
+	// loadModFiles() partway through its own startup, so an applyTo() after
+	// startServer() would always be too late for it.
+	std::vector<std::string> availableMods = ScorchDroidSetup::mods(".");
+	check(!availableMods.empty() && availableMods[0] == "none",
+		"the mod list starts with upstream's own base game");
+	bool sawApoc = false;
+	for (size_t i = 0; i < availableMods.size(); i++)
+	{
+		if (availableMods[i] == "apoc") sawApoc = true;
+	}
+	check(sawApoc, "the bundled Apocalypse mod is found by looking in data/globalmods");
+
+	check(ScorchDroidSetup::setMod("apoc"), "a mod can be chosen");
+	check(ScorchDroidSetup::mod() == "apoc", "...and reads back");
+
+	const char *sessionPath = "/tmp/scorchdroid-host-tests-session.xml";
+	check(ScorchDroidSetup::writeSessionFile(sessionPath),
+		"the session config is written");
+	{
+		// Read it back the way the server will, into a fresh OptionsGame, and
+		// check both a value the player changed and the mod survived the trip.
+		OptionsGame reread;
+		check(reread.readOptionsFromFile(sessionPath),
+			"...and reads back as a config file the server can load");
+		check(reread.getNoRounds() == chosenRounds,
+			"...carrying the chosen round count");
+		check(std::string(reread.getMod()) == "apoc",
+			"...and the chosen mod, which is the whole reason for writing it");
+	}
+	ScorchDroidSetup::setMod("none");
+	unlink(sessionPath);
+
 	ScorchDroidSetup::reset();
 	std::string afterReset;
 	std::vector<ScorchDroidSetup::Option> reloaded = ScorchDroidSetup::options();

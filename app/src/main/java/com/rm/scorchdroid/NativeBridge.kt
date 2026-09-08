@@ -248,6 +248,18 @@ object NativeBridge {
     external fun resetSetupOptions()
 
     /**
+     * The mods that can be chosen: "none" (upstream's base game) first, then
+     * whatever sits in data/globalmods. Only names from this list should be
+     * passed to [setSelectedMod] - the engine does not validate them, and a
+     * name with no directory behind it fails at load time.
+     */
+    external fun getAvailableMods(): Array<String>
+
+    external fun getSelectedMod(): String
+
+    external fun setSelectedMod(name: String): Boolean
+
+    /**
      * Sends a chat message on a channel ("general" or "team"). Hosting, this
      * goes straight into the server's channel manager; joined, it is a
      * ComsChannelTextMessage to the host. False if there is no tank to speak
