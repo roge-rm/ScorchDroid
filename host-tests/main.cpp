@@ -53,6 +53,7 @@
 #include <SkyDescription.hpp>
 #include <ChatStore.h>
 #include <InstanceBuffer.hpp>
+#include <TreeGeometry.hpp>
 #include <weapons/WeaponMoveTank.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
@@ -806,6 +807,79 @@ namespace
 	// tree in the wrong place, or tint the lot black, and the symptom would
 	// be a scene that looks wrong with nothing to point at - the GL calls
 	// around it cannot be tested from here, but this can.
+	// M6: upstream's tree geometry, ported from its client-only
+	// ModelRendererTree. Checks the properties that would silently produce a
+	// wrong-looking forest rather than a crash: that every type builds
+	// something, that the result is whole triangles, that it is deterministic
+	// (upstream's is not - see TreeGeometry.hpp), that the texture
+	// coordinates stay inside the atlas, and that the geometry stands on the
+	// ground rather than sinking through it.
+	void testTreeGeometry()
+	{
+		printf("\ntree geometry (ported from ModelRendererTree):\n");
+
+		const TreeModelFactory::TreeType types[] = {
+			TreeModelFactory::ePineNormal, TreeModelFactory::ePineSnow,
+			TreeModelFactory::ePineBurnt,  TreeModelFactory::ePine2,
+			TreeModelFactory::ePine4Snow,  TreeModelFactory::ePalmNormal,
+			TreeModelFactory::ePalmBurnt,  TreeModelFactory::ePalmB,
+			TreeModelFactory::eOak,        TreeModelFactory::eOak4,
+		};
+
+		bool allBuilt = true, allTriangles = true, uvInRange = true, standsOnGround = true;
+		int totalVertices = 0;
+		for (TreeModelFactory::TreeType type : types)
+		{
+			std::vector<float> verts;
+			const int count = ScorchDroidTrees::build(type, verts);
+			totalVertices += count;
+			if (count == 0) { allBuilt = false; continue; }
+            if (count % 3 != 0) allTriangles = false;
+
+			float minY = 1e9f, maxY = -1e9f;
+			for (size_t i = 0; i < verts.size(); i += ScorchDroidTrees::kFloatsPerVertex)
+			{
+				minY = std::min(minY, verts[i + 1]);
+				maxY = std::max(maxY, verts[i + 1]);
+				const float u = verts[i + 6], v = verts[i + 7];
+				// Upstream's cells sit inside 0..1 with a little slack for
+				// the radial sweep; well outside would mean sampling the
+				// wrong species.
+				if (u < -0.05f || u > 1.05f || v < -0.05f || v > 1.05f) uvInRange = false;
+			}
+			// The origin is the base: nothing may hang more than a hair
+			// below it or the tree floats/sinks when placed on the ground.
+			if (minY < -0.02f) standsOnGround = false;
+			if (maxY <= 0.0f) allBuilt = false;
+		}
+
+		check(allBuilt, "every sampled tree type builds real geometry");
+		check(allTriangles, "the output is whole triangles");
+		check(uvInRange, "texture coordinates stay within the atlas");
+		check(standsOnGround, "geometry sits on its origin rather than below it");
+		check(totalVertices > 100, "the forest is more than a token amount of geometry");
+
+		// Deterministic: upstream re-randomises every run, which would mean a
+		// landscape looked different each time it loaded.
+		std::vector<float> first, second;
+		ScorchDroidTrees::build(TreeModelFactory::ePineNormal, first);
+		ScorchDroidTrees::build(TreeModelFactory::ePineNormal, second);
+		check(first == second, "building the same type twice gives identical geometry");
+
+		// Distinct species must not collapse onto the same atlas cell.
+		std::vector<float> pine, snow;
+		ScorchDroidTrees::build(TreeModelFactory::ePineNormal, pine);
+		ScorchDroidTrees::build(TreeModelFactory::ePineSnow, snow);
+		check(pine != snow, "a snow pine differs from a green one");
+
+		check(ScorchDroidTrees::atlasFor(TreeModelFactory::ePineNormal) !=
+			  ScorchDroidTrees::atlasFor(TreeModelFactory::ePine2),
+			"the two pine families sample different atlases");
+		check(ScorchDroidTrees::isBurnt(TreeModelFactory::ePineBurnt) &&
+			  !ScorchDroidTrees::isBurnt(TreeModelFactory::ePineNormal),
+			"only the burnt types are marked burnt");
+	}
+
 	void testInstancePacking()
 	{
 		printf("\ninstance packing (instanced scenery draw):\n");
@@ -1727,6 +1801,7 @@ int main(int argc, char **argv)
 	testTerrainDeformation();
 	testCameraPickRay();
 	testSkyDescription();
+	testTreeGeometry();
 	testInstancePacking();
 	testChatStore();
 	testLandscapeTargets();
