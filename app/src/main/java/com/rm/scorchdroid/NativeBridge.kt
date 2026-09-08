@@ -20,14 +20,6 @@ object NativeBridge {
     external fun getGameStateDebugString(): String
 
     /**
-     * M4 touch-fire: (normX, normY) in the same [-0.9, 0.9] landscape space
-     * the renderer draws in - fires "my tank" (see getMyTankId) aimed at the
-     * tapped landscape point, at the given elevation (touch-controlled via
-     * the elevation SeekBar - see MainActivity).
-     */
-    external fun handleTap(normX: Float, normY: Float, elevationDegrees: Float): Boolean
-
-    /**
      * M4: playerId of the local human-controlled tank added by
      * startLocalGame() (see addHumanTank() in engine_jni.cpp), or 0 if it
      * hasn't been added to the target container yet.
@@ -38,8 +30,8 @@ object NativeBridge {
      * M4 drag-to-aim: directly submits a move for the given tank, exactly as
      * a real client's ComsPlayedMoveMessage would - see engine_jni.cpp.
      * angle/elevation are in degrees, power is 0..1. Used by the drag-based
-     * aim gesture (see MainActivity.setUpTouchToFire) once the player
-     * releases; handleTap covers the plain-tap case.
+     * aim gesture (see MainActivity.setUpCameraControls) once the player
+     * releases.
      */
     external fun fireWeapon(playerId: Int, angleDegrees: Float, elevationDegrees: Float, power: Float): Boolean
 

@@ -299,15 +299,20 @@ class MainActivity : AppCompatActivity() {
             }
             hudState.positionSelectWeapon =
                 positionSelect.split("|").getOrNull(1).orEmpty()
-            // Development perf readout - see GameHudState.perfLabel.
-            val stats = gameRenderer.nativeGetFrameStats().split("|")
-            val fps = stats.getOrNull(0).orEmpty()
-            val calls = stats.getOrNull(1).orEmpty()
-            val targets = stats.getOrNull(2).orEmpty()
-            hudState.perfLabel = if (fps.isEmpty()) {
-                ""
-            } else {
-                "$fps fps | $calls draws | $targets targets"
+            // Development perf readout - see GameHudState.perfLabel. Debug
+            // builds only: it is a diagnostic that has earned its keep
+            // several times over (it is what found the trees not drawing),
+            // but it has no business on screen in a release.
+            if (BuildConfig.DEBUG) {
+                val stats = gameRenderer.nativeGetFrameStats().split("|")
+                val fps = stats.getOrNull(0).orEmpty()
+                val calls = stats.getOrNull(1).orEmpty()
+                val targets = stats.getOrNull(2).orEmpty()
+                hudState.perfLabel = if (fps.isEmpty()) {
+                    ""
+                } else {
+                    "$fps fps | $calls draws | $targets targets"
+                }
             }
             // M6: seed the aiming sliders from where the tank is actually
             // pointing, once, as soon as we have a tank - the engine gives
@@ -431,8 +436,10 @@ class MainActivity : AppCompatActivity() {
     // a real perspective camera without ray-casting against the terrain
     // mesh - not done in this slice). The old M2-era tap-to-fire
     // (NativeBridge.handleTap) and drag-slingshot fire are retired from
-    // this surface as a result; NativeBridge.handleTap() itself is left in
-    // place native-side in case a ray-cast-based revival happens later.
+    // this surface as a result. That path has since been *replaced* rather
+    // than merely retired - tap-to-aim now goes through the terrain
+    // ray-cast (nativePickTerrain + aimAtPoint), so the old normalized-space
+    // handleTap has been deleted rather than left lying around unused.
     //
     // ScaleGestureDetector owns pinch-zoom; a plain last-position diff
     // drives orbit drag, suppressed while a scale gesture is in progress

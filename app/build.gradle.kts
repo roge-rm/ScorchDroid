@@ -3,6 +3,13 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Staged before `android { }` so the assets source set below can point at
+// it by task provider rather than by path string - see the srcDir call.
+val stageScorchedData = tasks.register<Sync>("stageScorchedData") {
+    from(layout.projectDirectory.dir("../third_party/scorched3d/data"))
+    into(layout.buildDirectory.dir("generated/assets-staging/data"))
+}
+
 android {
     namespace = "com.rm.scorchdroid"
     compileSdk {
@@ -37,6 +44,9 @@ android {
 
     buildFeatures {
         compose = true
+        // For BuildConfig.DEBUG, which gates the on-screen performance
+        // readout - see GameHudState.perfLabel.
+        buildConfig = true
     }
 
     externalNativeBuild {
@@ -54,18 +64,21 @@ android {
     // plain fopen()/paths, not AAssetManager.
     sourceSets {
         getByName("main") {
-            assets.srcDirs("build/generated/assets-staging")
+            // builtBy(stageScorchedData), not a bare path: a plain string
+            // srcDir tells Gradle where the assets are but not what produces
+            // them, so every task that reads the assets directory has to be
+            // told to depend on the staging task by hand. That was done for
+            // the merge*Assets tasks and missed generateReleaseLintVitalReportModel,
+            // which broke the release build outright - Gradle 9 fails the
+            // build on an undeclared implicit dependency rather than warning.
+            // Declaring the producer once here wires every consumer.
+            assets.srcDir(
+                files(layout.buildDirectory.dir("generated/assets-staging"))
+                    .builtBy(stageScorchedData)
+            )
         }
     }
 }
-
-val stageScorchedData = tasks.register<Sync>("stageScorchedData") {
-    from(layout.projectDirectory.dir("../third_party/scorched3d/data"))
-    into(layout.buildDirectory.dir("generated/assets-staging/data"))
-}
-
-tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
-    .configureEach { dependsOn(stageScorchedData) }
 
 // Runs scripts/apply_patches.sh on every build (not just when CMakeLists.txt
 // changes - CMake's own execute_process() only re-runs on reconfigure, which

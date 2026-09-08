@@ -1290,57 +1290,6 @@ Java_com_rm_scorchdroid_NativeBridge_tickEngine(JNIEnv *env, jobject /* this */)
     refreshMovementMask(server->getContext(), findMyTank());
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_rm_scorchdroid_NativeBridge_fireWeapon(JNIEnv *env, jobject thiz, jint playerId,
-                                                 jfloat angleDegrees, jfloat elevationDegrees,
-                                                 jfloat power);
-
-// M4 touch-fire: given a tap in the same normalized [-0.9, 0.9] landscape
-// space the renderer draws in (see renderer_jni.cpp), fires "my tank" (see
-// getMyTankId()/addHumanTank() above) aimed at the tapped landscape point,
-// at the given elevation (touch-controlled via the elevation SeekBar - see
-// MainActivity) and a fixed 0.7 power - a minimal "tap where you want to
-// hit" aim gesture, not full drag-based power control for the tap case.
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_rm_scorchdroid_NativeBridge_handleTap(JNIEnv *env, jobject thiz, jfloat normX, jfloat normY, jfloat elevationDegrees) {
-    unsigned int myId = 0;
-    float angle;
-    {
-        std::lock_guard<std::mutex> lock(g_engineMutex);
-        ScorchedContext *ctx = activeContext();
-        if (!ctx) return JNI_FALSE;
-
-        Tank *from = findMyTank();
-        if (!from || !from->getAlive()) return JNI_FALSE;
-        myId = from->getPlayerId();
-
-        HeightMap &heightMap = ctx->getLandscapeMaps().getGroundMaps().getHeightMap();
-        int mapW = heightMap.getMapWidth();
-        int mapH = heightMap.getMapHeight();
-        if (mapW <= 0) mapW = 1;
-        if (mapH <= 0) mapH = 1;
-
-        float tapLandscapeX = (normX + 0.9f) / 1.8f * (float) mapW;
-        float tapLandscapeY = (normY + 0.9f) / 1.8f * (float) mapH;
-
-        FixedVector &fromPos = from->getLife().getTargetPosition();
-        float dx = tapLandscapeX - fromPos[0].asFloat();
-        float dy = tapLandscapeY - fromPos[1].asFloat();
-        // The engine's fire angle isn't the standard atan2(dy,dx) (CCW from
-        // +X) - TankLib::getVelocityVector() gives
-        // vx = -sin(xy), vy = cos(xy), i.e. a bearing measured
-        // counterclockwise from +Y (xy=90 points to -X/"west", not
-        // +X/"east" the way a normal clockwise compass would). For a
-        // desired direction (dx,dy) that inverts to angle = atan2(-dx, dy).
-        // Using plain atan2(dy,dx) here fired at a rotated/mirrored angle
-        // relative to the tapped point.
-        angle = (float) (atan2(-dx, dy) * 180.0 / M_PI);
-        if (angle < 0) angle += 360.0f;
-    }
-
-    return Java_com_rm_scorchdroid_NativeBridge_fireWeapon(
-        env, thiz, (jint) myId, (jfloat) angle, elevationDegrees, 0.7f);
-}
 
 // M2 touch-fire, M5 Phase 2: submits a move for the given tank, exactly as
 // a real client's ComsPlayedMoveMessage would (see
