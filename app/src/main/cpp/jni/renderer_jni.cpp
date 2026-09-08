@@ -3281,37 +3281,54 @@ namespace
 		}
 	}
 
-	// The aim sight blade. Upstream sweeps ~36-45deg of arc either side
-	// (126deg -> 90deg and 90deg -> 135deg in 9deg steps, fading out over
-	// 45deg), which reads as an uncomfortably wide wedge on a phone-sized
-	// screen - so the span is narrowed here, with the fade tied to it so
-	// the blade still fades to nothing exactly at its edge. Geometry is
-	// otherwise upstream's: a quad strip from radius 2 to 10, mirrored
-	// about the aim line, brightest along it.
-	constexpr float kSightSpanDegrees = 16.0f;  // arc either side of the aim line
-	constexpr int   kSightSteps = 4;
+	// The aim sight blade, with upstream's own footprint.
+	//
+	// This was a fan of arc either side of the aim line - upstream's *old*
+	// sight (drawOldSight), narrowed from its 45deg to 16deg because 45
+	// covered half the screen on a phone. Even narrowed it was far fatter
+	// than the game's actual sight, which is the textured one
+	// (TargetRendererImplTank::drawSight): aimtop.png, a tapered red blade
+	// drawn from radius 3 to radius 15 along the barrel and only two units
+	// across at its wide end - about 5deg, not 16. So the shape comes from
+	// there now: a spike pointing out of the gun rather than a wedge
+	// spreading from it.
+	//
+	// Untextured still, with the old sight's own centre-bright fade
+	// standing in for aimtop.png's alpha edges. Upstream's blue ground
+	// bearing marker (aimbot.png) and its protractor ring
+	// (aimrotation.png) are not drawn: the bearing is already on a slider
+	// and a dial in this port's HUD, where it does not need reading off
+	// the floor.
+	constexpr float kSightNear = 3.0f;        // where the blade starts, at the gun
+	constexpr float kSightFar = 15.0f;        // and ends, out along the aim line
+	constexpr float kSightHalfWidth = 1.0f;   // half its width at the far end
+	constexpr int   kSightColumns = 4;        // strips across it, for the fade
 
 	void buildSightGeometry()
 	{
 		if (sightVertexCount > 0) return;
 
 		std::vector<float> verts;
-		auto emit = [&](float angleDeg, float side) {
-			float dx = angleDeg * (float) M_PI / 180.0f;
-			float color = 1.0f - fabsf(90.0f - angleDeg) / kSightSpanDegrees;
-			if (color < 0.0f) color = 0.0f;
-			for (float radius : { 2.0f, 10.0f }) {
-				verts.push_back(side * 0.03f * color);
-				verts.push_back(radius * cosf(dx));    // upstream z -> our y
-				verts.push_back(-radius * sinf(dx));   // upstream y -> our -z
+		auto emit = [&](float lateral) {
+			// Brightest along the aim line, fading to nothing at the edge -
+			// which is also what stops the blade from reading as a solid
+			// object sitting in the battlefield.
+			const float color = 1.0f - fabsf(lateral);
+			// A spike: the near end is a point at the gun, the far end is
+			// the full width, so the sides converge on the aim line.
+			for (float radius : { kSightNear, kSightFar }) {
+				const float taper = (radius - kSightNear) / (kSightFar - kSightNear);
+				verts.push_back(lateral * kSightHalfWidth * taper);
+				verts.push_back(0.0f);
+				verts.push_back(-radius);  // forward, after the upload's remap
 				verts.push_back(1.0f * color);
 				verts.push_back(0.5f * color);
 				verts.push_back(0.5f * color);
 			}
 		};
-		const float step = kSightSpanDegrees / (float) kSightSteps;
-		for (int i = kSightSteps; i >= 0; i--) emit(90.0f + i * step, +1.0f);
-		for (int i = 0; i <= kSightSteps; i++) emit(90.0f + i * step, -1.0f);
+		for (int i = -kSightColumns; i <= kSightColumns; i++) {
+			emit((float) i / (float) kSightColumns);
+		}
 
 		sightVertexCount = (int) (verts.size() / 6);
 		glGenVertexArrays(1, &sightVao);
@@ -3364,6 +3381,23 @@ namespace
 	{
 		if (!id.modelValid()) return nullptr;
 		return ModelStore::instance()->loadModel(id);
+	}
+
+	// The model every shot falls back to, straight out of upstream's own
+	// Accessory::getWeaponMesh - a V2 rocket. Almost every weapon reaches
+	// it, because declaring a <projectilemodel> is the exception, not the
+	// rule: the Baby Missile, the Missile and most of the arsenal say
+	// nothing about what they look like in flight and rely on this.
+	//
+	// Resolved through the mod path like any other data file, so a mod that
+	// ships its own v2missile gets its own rocket.
+	ModelID &defaultProjectileModelId()
+	{
+		static ModelID id;
+		if (!id.modelValid()) {
+			id.initFromString("MilkShape", "data/accessories/v2missile/v2missile.txt", "");
+		}
+		return id;
 	}
 
 	// Models are Z-up with +y forward (upstream's world convention, the same
@@ -5128,7 +5162,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		Mat4 sightMvp = Mat4::multiply(mvp, sightTransform);
 		glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, sightMvp.m);
 		glBindVertexArray(sightVao);
+		// Two-sided: it is a flat blade you are meant to see from wherever
+		// the camera happens to be, and one winding is always facing away.
+		// The old fan was wound so that it survived culling by luck - the
+		// narrower strip is not, and vanished entirely until this.
+		glDisable(GL_CULL_FACE);
 		frameDrawCalls++; glDrawArrays(GL_TRIANGLE_STRIP, 0, sightVertexCount);
+		glEnable(GL_CULL_FACE);
 	}
 
 	glUseProgram(pointProgram);
@@ -5149,23 +5189,36 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		FixedVector &p = shotPositionsRaw[i];
 		float wx = p[0].asFloat(), wy = p[2].asFloat(), wz = worldZFromEngineY(p[1].asFloat());
 
-		// Upstream's precedence: the weapon's own model first, falling back
-		// to the firing tank's projectilemodel (see Accessory::getWeaponMesh).
-		// Most tanks define no projectilemodel, so consulting only the
-		// fallback - as this did at first - means almost no shot ever gets
-		// a mesh.
+		// Upstream's precedence, all three steps of it (see
+		// Accessory::getWeaponMesh): the weapon's own <projectilemodel>,
+		// then the firing tank's, then a default missile for everything
+		// else. That last step is the one that matters - almost no weapon
+		// and almost no tank declares a projectile model, so without it the
+		// Baby Missile and most of the arsenal flew as a bare dot. It is
+		// also why a Gorilla throws bananas and Bender throws bottles:
+		// those tanks declare one and their shots inherit it.
+		//
+		// The first step was reading the accessory's own <model>, which is
+		// its inventory model, not the projectile's - a different field
+		// that these weapons do not set either.
 		Model *projectileModel = nullptr;
+		float projectileScale = 1.0f;
 		if (i < shotWeaponIds.size() && shotWeaponIds[i] != 0) {
 			Accessory *weapon = ctx->getAccessoryStore().findByAccessoryId(shotWeaponIds[i]);
 			if (weapon) {
-				projectileModel = loadModelSafely(weapon->getModel());
+				WeaponProjectile *projectile = (WeaponProjectile *) weapon->getAction();
+				projectileModel = loadModelSafely(projectile->getModelID());
+				// <projectilescale>, which upstream applies on top of the
+				// mesh's own size normalisation. The Baby Missile is half
+				// size by it, and looks it beside a real Missile.
+				projectileScale = projectile->getScale(*ctx).asFloat();
 				// Flame and smoke trail. Upstream emits these from particle
 				// emitters attached to the shot (MissileActionRenderer), and
 				// both default to *on* for every projectile - so this is what
 				// makes an ordinary missile read as a missile rather than a
 				// travelling dot. Per-weapon colours, sizes and lifetimes are
 				// the weapon's own.
-				emitProjectileTrail((WeaponProjectile *) weapon->getAction(), wx, wy, wz);
+				emitProjectileTrail(projectile, wx, wy, wz);
 			}
 		}
 		if (!projectileModel && i < shotPlayerIds.size()) {
@@ -5178,6 +5231,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				}
 			}
 		}
+		if (!projectileModel) projectileModel = loadModelSafely(defaultProjectileModelId());
 
 		GpuModel *gpu = uploadModel(projectileModel);
 		if (!gpu) {
@@ -5208,7 +5262,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 		Mat4 model = Mat4::multiply(
 			Mat4::translate(wx, wy, wz),
-			Mat4::multiply(orientation, Mat4::scale(gpu->scale)));
+			Mat4::multiply(orientation, Mat4::scale(gpu->scale * projectileScale)));
 		Mat4 shotMvp = Mat4::multiply(mvp, model);
 		drawMeshGroup(gpu->hull, meshMvpLoc, shotMvp);
 		drawMeshGroup(gpu->turret, meshMvpLoc, shotMvp);
