@@ -41,6 +41,12 @@ class MainActivity : AppCompatActivity() {
     // exactly while a game is running.
     private var gameJob: Job? = null
 
+    // M10: the game-setup screen's state. The options come from the engine
+    // (upstream's own entries, ranges and descriptions) rather than being
+    // declared here - see GameSetup.h.
+    private var setupOptions by mutableStateOf<List<SetupOption>>(emptyList())
+    private var setupTitle by mutableStateOf("New Game")
+
     // M4: the real Compose HUD's mutable state (see GameHud.kt) - written
     // to directly from the tick loop, touch handlers, and dialogs below,
     // all plain (non-Composable) Kotlin code, so a plain mutable holder is
@@ -114,7 +120,7 @@ class MainActivity : AppCompatActivity() {
                     onAbout = { appScreen = AppScreen.ABOUT },
                 )
                 AppScreen.SINGLE_PLAYER -> SinglePlayerScreen(
-                    onNewGame = { startGame(GameMode.HOST) },
+                    onNewGame = { openSetup("New Game") },
                     onTutorial = { },
                     // M12. Shown but disabled rather than hidden: it is a
                     // planned part of the game, and a menu that quietly lacks
@@ -123,12 +129,23 @@ class MainActivity : AppCompatActivity() {
                     onBack = { appScreen = AppScreen.MENU },
                 )
                 AppScreen.MULTIPLAYER -> MultiplayerScreen(
-                    onHost = { startGame(GameMode.HOST) },
+                    onHost = { openSetup("Host Game") },
                     onJoin = { startGame(GameMode.JOIN) },
                     onBack = { appScreen = AppScreen.MENU },
                 )
                 // M11 builds this screen; until then the button is honest
                 // about it rather than doing nothing when tapped.
+                AppScreen.SETUP -> GameSetupScreen(
+                    title = setupTitle,
+                    options = setupOptions,
+                    onChange = { option, value -> changeSetupOption(option, value) },
+                    onReset = {
+                        NativeBridge.resetSetupOptions()
+                        setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
+                    },
+                    onStart = { startGame(GameMode.HOST) },
+                    onBack = { appScreen = AppScreen.MENU },
+                )
                 AppScreen.SETTINGS -> SettingsPlaceholderScreen(
                     onBack = { appScreen = AppScreen.MENU },
                 )
@@ -191,6 +208,31 @@ class MainActivity : AppCompatActivity() {
             licenseText = withContext(Dispatchers.IO) { readLicenseText() }
             appScreen = AppScreen.MENU
         }
+    }
+
+    /**
+     * M10: opens the pre-game setup screen. Both New Game and Host Game land
+     * here - they differ in wording, not in what they configure, because a
+     * single-player game on this port *is* a hosted game that nobody joined.
+     */
+    private fun openSetup(title: String) {
+        setupTitle = title
+        setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
+        appScreen = AppScreen.SETUP
+    }
+
+    /**
+     * Sends one choice to the engine and re-reads the list.
+     *
+     * Re-read rather than patched locally: the engine is the authority on
+     * whether a value was accepted, and on what the option now reads as. A
+     * rejected value (out of upstream's range, or not one of an enum's
+     * choices) then simply leaves the control where it was, which is the right
+     * behaviour and costs no validation logic here.
+     */
+    private fun changeSetupOption(option: SetupOption, value: String) {
+        NativeBridge.setSetupOption(option.name, value)
+        setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
     }
 
     /**
