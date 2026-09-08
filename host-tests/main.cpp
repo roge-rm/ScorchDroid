@@ -2191,6 +2191,79 @@ static void testGameSetup()
 				options[o].name == "AutoBallanceTeams") sawDepricated = true;
 		}
 		check(!sawDepricated, "no deprecated option reaches the setup screen");
+
+		// M18: every option says which tab it belongs on, so an option added
+		// without one cannot end up on a default tab by accident.
+		bool allGrouped = true;
+		for (size_t o = 0; o < options.size(); o++)
+		{
+			if (options[o].group.empty()) allGrouped = false;
+		}
+		check(allGrouped, "every option is filed under a tab");
+
+		// The player count is really two options and has to move as one -
+		// the shipped config's minimum is 2, so setting only the maximum
+		// left a game "of eight" starting with a single bot.
+		check(ScorchDroidSetup::set("NumberOfPlayers", "6"),
+			"the player count can be raised");
+		{
+			OptionsGame probe;
+			const char *path = "/tmp/scorchdroid-players.xml";
+			check(ScorchDroidSetup::writeSessionFile(path), "...and written out");
+			check(probe.readOptionsFromFile(path), "...and read back");
+			check(probe.getNoMaxPlayers() == 6 && probe.getNoMinPlayers() == 6,
+				"...with the minimum moved to match, so the bots actually turn up");
+			unlink(path);
+		}
+		ScorchDroidSetup::reset();
+	}
+
+	// M18: choosing the bots. Upstream has no difficulty dial - the choice
+	// is which of its named AIs fills the slots, and its own descriptions
+	// are the difficulty ladder.
+	{
+		std::vector<ScorchDroidSetup::Bot> bots = ScorchDroidSetup::bots(".");
+		check(bots.size() > 3, "the base game offers a handful of bots");
+		check(bots[0].name == "Random",
+			"...led by upstream's Random, which is an instruction, not an AI");
+
+		bool sawMoron = false, sawShark = false, sawTarget = false, described = true;
+		for (size_t i = 0; i < bots.size(); i++)
+		{
+			if (bots[i].name == "Moron") sawMoron = true;
+			if (bots[i].name == "Shark") sawShark = true;
+			if (bots[i].name == "Target") sawTarget = true;
+			if (bots[i].description.empty()) described = false;
+		}
+		check(sawMoron && sawShark, "...including the ends of its difficulty range");
+		check(!sawTarget, "...but not the inert practice dummy, which never fires back");
+		check(described, "...each with upstream's own description of how good it is");
+
+		// The scan has to read a *description* the same way it reads a name:
+		// from the live file, not from inside a comment.
+		std::vector<ScorchDroidSetup::Bot> all = ScorchDroidSetup::botsFor(".", "none");
+		std::string moronDescription;
+		for (size_t i = 0; i < all.size(); i++)
+		{
+			if (all[i].name == "Moron") moronDescription = all[i].description;
+		}
+		check(moronDescription.find("stupid") != std::string::npos,
+			"a bot's description is upstream's own words");
+
+		check(ScorchDroidSetup::setBotType("Shark"), "the bots can be chosen");
+		check(ScorchDroidSetup::botType() == "Shark", "...and the choice sticks");
+		{
+			OptionsGame probe;
+			const char *path = "/tmp/scorchdroid-bots.xml";
+			check(ScorchDroidSetup::writeSessionFile(path), "...is written to the session config");
+			check(probe.readOptionsFromFile(path), "...and read back");
+			check(0 == strcmp(probe.getPlayerType(0), "Human"),
+				"...leaving the first slot for the player");
+			check(0 == strcmp(probe.getPlayerType(1), "Shark") &&
+				0 == strcmp(probe.getPlayerType(5), "Shark"),
+				"...and filling every other slot, not just the ones in use");
+			unlink(path);
+		}
 		ScorchDroidSetup::reset();
 	}
 

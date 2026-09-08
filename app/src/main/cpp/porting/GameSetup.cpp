@@ -29,26 +29,40 @@ namespace
 	// of the game first, then the clocks, then the arsenal, then the
 	// physics - rather than OptionsGame's own, which is grouped by the
 	// section of the config file it lives in.
-	const char *kExposed[] = {
-		"NumberOfRounds",
-		"MaxNumberOfRoundTurns",
-		"PlayerLives",
-		"TurnType",
-		"Teams",
-		"TeamBallance",
-		"WallType",
-		"MoneyStarting",
-		"ShotTime",
-		"BuyingTime",
-		"StartArmsLevel",
-		"EndArmsLevel",
-		"WeaponSpeed",
-		"Gravity",
-		"WindForce",
-		"WindType",
-		"ResignMode",
-		nullptr,
+	struct Exposed
+	{
+		const char *name;
+		const char *group;
 	};
+	const Exposed kExposed[] = {
+		{ "NumberOfRounds",        "Game"    },
+		{ "MaxNumberOfRoundTurns", "Game"    },
+		{ "TurnType",              "Game"    },
+		{ "ShotTime",              "Game"    },
+		{ "BuyingTime",            "Game"    },
+		{ "ResignMode",            "Game"    },
+		{ "NumberOfPlayers",       "Players" },
+		{ "PlayerLives",           "Players" },
+		{ "Teams",                 "Players" },
+		{ "TeamBallance",          "Players" },
+		{ "MoneyStarting",         "Arms"    },
+		{ "StartArmsLevel",        "Arms"    },
+		{ "EndArmsLevel",          "Arms"    },
+		{ "WeaponSpeed",           "Arms"    },
+		{ "WallType",              "World"   },
+		{ "Gravity",               "World"   },
+		{ "WindForce",             "World"   },
+		{ "WindType",              "World"   },
+		{ nullptr, nullptr },
+	};
+
+	std::string trimmed(const std::string &value)
+	{
+		const size_t first = value.find_first_not_of(" \t\r\n");
+		if (first == std::string::npos) return "";
+		const size_t last = value.find_last_not_of(" \t\r\n");
+		return value.substr(first, last - first + 1);
+	}
 
 	OptionEntry *findEntry(OptionsGame &game, const std::string &name)
 	{
@@ -136,11 +150,12 @@ namespace ScorchDroidSetup
 		std::lock_guard<std::mutex> lock(g_mutex);
 		std::vector<Option> result;
 		if (!g_options) return result;
-		for (int i = 0; kExposed[i]; i++)
+		for (int i = 0; kExposed[i].name; i++)
 		{
-			OptionEntry *entry = findEntry(*g_options, kExposed[i]);
+			OptionEntry *entry = findEntry(*g_options, kExposed[i].name);
 			if (!entry) continue;
 			Option option;
+			option.group = kExposed[i].group;
 			if (describe(entry, option)) result.push_back(option);
 		}
 		return result;
@@ -152,9 +167,9 @@ namespace ScorchDroidSetup
 		if (!g_options) return false;
 
 		bool exposed = false;
-		for (int i = 0; kExposed[i]; i++)
+		for (int i = 0; kExposed[i].name; i++)
 		{
-			if (name == kExposed[i]) { exposed = true; break; }
+			if (name == kExposed[i].name) { exposed = true; break; }
 		}
 		if (!exposed) return false;
 
@@ -164,7 +179,22 @@ namespace ScorchDroidSetup
 		// a value outside its range and an enum refuses one that isn't in its
 		// list, which is exactly the behaviour a setup screen should inherit
 		// rather than reimplement.
-		return entry->setValueFromString(value);
+		if (!entry->setValueFromString(value)) return false;
+
+		// M18: how many players there are is really two options - the
+		// maximum, and the minimum the round waits for before it starts
+		// (ServerStateEnoughPlayers fills up to the minimum with bots). A
+		// screen that offered both would be asking a question nobody playing
+		// alone wants to answer, and setting only the maximum does nothing at
+		// all: the shipped config's minimum is 2, so a game "of eight" still
+		// started with one bot. Upstream's own single-player files set the
+		// pair together for the same reason - singleeasy is 3 and 3.
+		if (name == "NumberOfPlayers")
+		{
+			OptionEntry *minimum = findEntry(*g_options, "NumberOfMinPlayers");
+			if (minimum) minimum->setValueFromString(value);
+		}
+		return true;
 	}
 
 	void reset()
@@ -298,26 +328,106 @@ namespace ScorchDroidSetup
 		return g_options->getModEntry().setValueFromString(name);
 	}
 
+	std::vector<Bot> bots(const std::string &dataRoot)
+	{
+		std::string chosenMod;
+		{
+			std::lock_guard<std::mutex> lock(g_mutex);
+			chosenMod = g_options ? g_options->getMod() : "none";
+		}
+
+		std::vector<Bot> found;
+		// Upstream's own first entry, and not an AI: ServerStateEnoughPlayers
+		// treats "Random" as "any of them", filling the slot with whichever
+		// bot it likes. Its single-player files use it to mix a game up.
+		Bot random;
+		random.name = "Random";
+		random.description = "A different computer player each time";
+		found.push_back(random);
+
+		std::vector<Bot> scanned = botsFor(dataRoot, chosenMod);
+		for (size_t i = 0; i < scanned.size(); i++)
+		{
+			// Target is upstream's inert practice dummy - it never fires
+			// back. It belongs in the target-practice preset, not in a list
+			// of opponents, where picking it would look like a game that
+			// never fights back for no stated reason.
+			if (scanned[i].name == "Target" || scanned[i].name == "Hard Target") continue;
+			found.push_back(scanned[i]);
+		}
+		return found;
+	}
+
+	std::string botType()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return "";
+		// Slot two: the first that is not the player. Slot one is the human
+		// and says nothing about the bots.
+		std::list<OptionEntry *> &players = g_options->getPlayerTypeOptions();
+		int index = 0;
+		for (std::list<OptionEntry *>::iterator itor = players.begin();
+			itor != players.end();
+			++itor, index++)
+		{
+			if (index == 1) return (*itor)->getValueAsString();
+		}
+		return "";
+	}
+
+	bool setBotType(const std::string &name)
+	{
+		if (name.empty()) return false;
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return false;
+
+		std::list<OptionEntry *> &players = g_options->getPlayerTypeOptions();
+		int index = 0;
+		for (std::list<OptionEntry *>::iterator itor = players.begin();
+			itor != players.end();
+			++itor, index++)
+		{
+			// Every slot but the first, whatever the player count happens to
+			// be: the ones past it are simply never reached
+			// (ServerStateEnoughPlayers stops at NumberOfPlayers), and
+			// leaving them behind would mean raising the count later quietly
+			// brought back the previous choice.
+			if (index == 0) continue;
+			(*itor)->setValueFromString(name);
+		}
+		return true;
+	}
+
 	std::vector<std::string> botNames(const std::string &dataRoot, const std::string &mod)
 	{
+		std::vector<std::string> names;
+		std::vector<Bot> scanned = botsFor(dataRoot, mod);
+		for (size_t i = 0; i < scanned.size(); i++) names.push_back(scanned[i].name);
+		return names;
+	}
+
+	std::vector<Bot> botsFor(const std::string &dataRoot, const std::string &mod)
+	{
 		// A scan rather than an XML parse: the file's shape is upstream's own
-		// and fixed - <ais> of <ai>, each opening with its <name> - and the
-		// alternative is standing up the whole XMLFile machinery, with a
-		// context, to read seven strings.
+		// and fixed - <ais> of <ai>, each opening with its <name> and then its
+		// <description> - and the alternative is standing up the whole XMLFile
+		// machinery, with a context, to read seven strings.
 		//
 		// Comments are tracked because they matter here: the Apocalypse mod
 		// keeps five of its twelve AI definitions inside one, and a scanner
 		// that read them would hand back bots the engine will refuse to
 		// create.
-		std::vector<std::string> names;
+		std::vector<Bot> found;
 		const std::string path =
 			dataRoot + "/data/globalmods/" + mod + "/data/tankais.xml";
 		std::ifstream file(path.c_str());
-		if (!file.is_open()) return names;
+		if (!file.is_open()) return found;
 
 		std::string line;
 		bool inComment = false;
 		bool inAi = false;
+		bool wantDescription = false;
+		bool inDescription = false;
 		while (std::getline(file, line))
 		{
 			size_t pos = 0;
@@ -335,7 +445,12 @@ namespace ScorchDroidSetup
 				const std::string live = line.substr(pos,
 					open == std::string::npos ? std::string::npos : open - pos);
 
-				if (!inAi && live.find("<ai>") != std::string::npos) inAi = true;
+				if (live.find("<ai>") != std::string::npos)
+				{
+					inAi = true;
+					wantDescription = false;
+					inDescription = false;
+				}
 				if (inAi)
 				{
 					const size_t nameStart = live.find("<name>");
@@ -343,10 +458,40 @@ namespace ScorchDroidSetup
 					if (nameStart != std::string::npos && nameEnd != std::string::npos &&
 						nameEnd > nameStart)
 					{
-						names.push_back(live.substr(nameStart + 6, nameEnd - nameStart - 6));
+						Bot bot;
+						bot.name = live.substr(nameStart + 6, nameEnd - nameStart - 6);
+						found.push_back(bot);
 						// The first <name> in an <ai> is the AI's own; the
-						// rest belong to its weapons.
+						// rest belong to its weapons. The description that
+						// follows is its own too, and only the first one.
 						inAi = false;
+						wantDescription = true;
+					}
+				}
+				else if (wantDescription && !found.empty())
+				{
+					// Upstream writes these over one line or several, so the
+					// text is collected until the closing tag rather than
+					// read off a single line.
+					std::string text = live;
+					const size_t descStart = live.find("<description>");
+					if (descStart != std::string::npos)
+					{
+						inDescription = true;
+						text = live.substr(descStart + 13);
+					}
+					if (inDescription)
+					{
+						const size_t descEnd = text.find("</description>");
+						if (descEnd != std::string::npos)
+						{
+							text = text.substr(0, descEnd);
+							inDescription = false;
+							wantDescription = false;
+						}
+						std::string &into = found.back().description;
+						if (!into.empty() && !text.empty()) into += " ";
+						into += trimmed(text);
 					}
 				}
 
@@ -355,7 +500,13 @@ namespace ScorchDroidSetup
 				pos = open + 4;
 			}
 		}
-		return names;
+
+		// Trailing whitespace from a description broken over several lines.
+		for (size_t i = 0; i < found.size(); i++)
+		{
+			found[i].description = trimmed(found[i].description);
+		}
+		return found;
 	}
 
 	int ensureBotsValidForMod(const std::string &dataRoot)
@@ -402,10 +553,10 @@ namespace ScorchDroidSetup
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 		if (!g_options) return;
-		for (int i = 0; kExposed[i]; i++)
+		for (int i = 0; kExposed[i].name; i++)
 		{
-			OptionEntry *chosen = findEntry(*g_options, kExposed[i]);
-			OptionEntry *target = findEntry(options.getMainOptions(), kExposed[i]);
+			OptionEntry *chosen = findEntry(*g_options, kExposed[i].name);
+			OptionEntry *target = findEntry(options.getMainOptions(), kExposed[i].name);
 			if (!chosen || !target) continue;
 			target->setValueFromString(chosen->getValueAsString());
 		}

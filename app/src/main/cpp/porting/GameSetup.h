@@ -48,6 +48,11 @@ namespace ScorchDroidSetup
 	struct Option
 	{
 		std::string name;         // upstream's option name, the key for set()
+		// M18: which tab of the setup screen this belongs on. Decided here
+		// rather than in the UI so the curated list and its grouping stay
+		// one thing - adding an option below without saying where it goes
+		// would otherwise put it silently on a default tab.
+		std::string group;
 		std::string description;  // upstream's own one-line description
 		Kind kind = eInt;
 		std::string value;        // current value, as a string
@@ -124,6 +129,35 @@ namespace ScorchDroidSetup
 	// below exists for.
 	std::string mod();
 	bool setMod(const std::string &name);
+
+	// M18: one bot AI a mod provides, with upstream's own description of it.
+	// In the base game those descriptions are the difficulty ladder - "a
+	// very good computer controlled player" down to "a very stupid" one -
+	// which is the only place upstream states how hard a bot is.
+	struct Bot
+	{
+		std::string name;
+		std::string description;
+	};
+
+	// Every bot [mod] defines, with its description, in the file's own order.
+	std::vector<Bot> botsFor(const std::string &dataRoot, const std::string &mod);
+
+	// The bots the *chosen* mod offers as opponents: botsFor() led by
+	// upstream's own "Random", which is not an AI but an instruction to pick
+	// one (see ServerStateEnoughPlayers), and without its inert practice
+	// dummies, which never fire back.
+	std::vector<Bot> bots(const std::string &dataRoot);
+
+	// Which AI fills the slots that are not the player's. Upstream gives
+	// every one of its twenty-four player slots its own PlayerType, and a
+	// desktop dialog to fill them in; this port sets them together, which is
+	// what its own single-player presets do too (singleeasy is two Morons,
+	// singlehard three Sharks and three Randoms).
+	//
+	// Slot one is left as "Human" - that is the player.
+	std::string botType();
+	bool setBotType(const std::string &name);
 
 	// The bot AIs a mod actually provides.
 	//

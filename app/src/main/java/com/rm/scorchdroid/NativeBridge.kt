@@ -302,6 +302,18 @@ object NativeBridge {
      */
     external fun getPresets(): Array<String>
 
+    /**
+     * M18: the bots the chosen mod offers, as "name|description" rows.
+     * Upstream has no difficulty dial - which AI fills the slots *is* the
+     * difficulty, and its own descriptions say how good each one is.
+     */
+    external fun getBots(): Array<String>
+
+    /** M18: which AI fills the slots that are not the player's. */
+    external fun getBotType(): String
+
+    external fun setBotType(name: String): Boolean
+
     external fun getAvailableMods(): Array<String>
 
     external fun getSelectedMod(): String
@@ -511,6 +523,8 @@ fun parseChatLines(rows: Array<String>): List<ChatLine> = rows.mapNotNull { row 
  */
 data class SetupOption(
     val name: String,
+    /** M18: which tab of the setup screen this belongs on, decided natively. */
+    val group: String,
     val kind: SetupKind,
     val value: String,
     val minValue: Int,
@@ -547,11 +561,11 @@ private fun humanise(identifier: String): String =
     identifier.replace(Regex("(?<=[a-z0-9])(?=[A-Z])"), " ").trim()
 
 fun parseSetupOptions(rows: Array<String>): List<SetupOption> = rows.mapNotNull { row ->
-    // Eight fields, description last so it may contain anything - including
+    // Nine fields, description last so it may contain anything - including
     // the pipes and commas the earlier fields use as separators.
-    val parts = row.split("|", limit = 8)
-    if (parts.size != 8) return@mapNotNull null
-    val kind = when (parts[1].toIntOrNull()) {
+    val parts = row.split("|", limit = 9)
+    if (parts.size != 9) return@mapNotNull null
+    val kind = when (parts[2].toIntOrNull()) {
         0 -> SetupKind.BOUNDED_INT
         1 -> SetupKind.INT
         2 -> SetupKind.BOOL
@@ -560,17 +574,18 @@ fun parseSetupOptions(rows: Array<String>): List<SetupOption> = rows.mapNotNull 
     }
     SetupOption(
         name = parts[0],
+        group = parts[1],
         kind = kind,
-        value = parts[2],
-        minValue = parts[3].toIntOrNull() ?: 0,
-        maxValue = parts[4].toIntOrNull() ?: 0,
-        stepValue = parts[5].toIntOrNull() ?: 1,
-        choices = parts[6].split(",").filter { it.isNotBlank() }.mapNotNull { choice ->
+        value = parts[3],
+        minValue = parts[4].toIntOrNull() ?: 0,
+        maxValue = parts[5].toIntOrNull() ?: 0,
+        stepValue = parts[6].toIntOrNull() ?: 1,
+        choices = parts[7].split(",").filter { it.isNotBlank() }.mapNotNull { choice ->
             val split = choice.split("=", limit = 2)
             if (split.size != 2) null
             else SetupChoice(split[0].toIntOrNull() ?: return@mapNotNull null, split[1])
         },
-        description = parts[7],
+        description = parts[8],
     )
 }
 
@@ -602,3 +617,12 @@ fun parsePresets(rows: Array<String>): List<GamePreset> = rows.mapNotNull { row 
 /** "none" is upstream's own name for the base game, which reads as an absence. */
 fun modLabel(mod: String): String =
     if (mod == "none") "Scorched3D" else mod.replaceFirstChar { it.uppercase() }
+
+/** M18: one bot the mod offers, as [NativeBridge.getBots] reports it. */
+data class BotOption(val name: String, val description: String)
+
+fun parseBots(rows: Array<String>): List<BotOption> = rows.mapNotNull { row ->
+    val parts = row.split("|", limit = 2)
+    if (parts.size != 2) return@mapNotNull null
+    BotOption(name = parts[0], description = parts[1])
+}
