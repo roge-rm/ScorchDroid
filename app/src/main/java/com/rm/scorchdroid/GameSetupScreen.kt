@@ -80,12 +80,24 @@ fun GameSetupScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 28.dp),
         ) {
-            Text(
-                text = title,
-                color = Color.White,
-                fontSize = 26.sp,
-                fontWeight = FontWeight.Bold,
-            )
+            // Back on the title row, like Settings and About: this page
+            // scrolls for several screens, and someone who opens it and
+            // changes their mind should not have to scroll past every option
+            // to leave. Start stays at the foot - that is the commit action,
+            // and you arrive there having read what you are committing to.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = title,
+                    color = Color.White,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                TextButton(onClick = onBack) { Text("Back", color = SetupAccent) }
+            }
             Spacer(Modifier.height(4.dp))
             Text(
                 text = "These are Scorched3D's own settings, with its own limits.",
@@ -121,9 +133,8 @@ fun GameSetupScreen(
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.End,
             ) {
-                TextButton(onClick = onBack) { Text("Back", color = SetupAccent) }
                 TextButton(onClick = onReset) { Text("Reset to defaults", color = SetupAccent) }
             }
         }
