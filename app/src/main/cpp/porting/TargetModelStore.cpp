@@ -44,4 +44,10 @@ namespace ScorchDroidTargets
 		std::lock_guard<std::mutex> lock(storeMutex);
 		return targets.size();
 	}
+
+	void clear()
+	{
+		std::lock_guard<std::mutex> lock(storeMutex);
+		targets.clear();
+	}
 }

@@ -8,8 +8,15 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <android.opengl.GLSurfaceView
-        android:id="@+id/game_surface"
+    <!-- M9: the GL surface is created in code and added here when a game
+         starts, then removed again on quit-to-menu. A fresh GLSurfaceView per
+         game means a fresh EGL context, which means nativeOnSurfaceCreated
+         runs and the renderer's whole build-once cache (terrain, textures,
+         models, trees) is rebuilt for the new landscape - reusing the reset
+         path the minimise/resume bug already forced us to get right, instead
+         of writing a second one. The menu screens have no GL surface at all. -->
+    <FrameLayout
+        android:id="@+id/game_surface_host"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 

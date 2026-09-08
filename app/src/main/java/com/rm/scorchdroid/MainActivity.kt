@@ -6,6 +6,10 @@ import android.os.Bundle
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -18,12 +22,24 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
     private lateinit var gameSurface: GLSurfaceView
     private lateinit var gameRenderer: GameRenderer
+
+    // M9: the container the GL surface is added to when a game starts and
+    // removed from on quit - see startGame/quitToMenu.
+    private lateinit var surfaceHost: android.widget.FrameLayout
+    // Which top-level screen is showing. The game is one of these now.
+    private var appScreen by mutableStateOf(AppScreen.SPLASH)
+    private var splashStatus by mutableStateOf("Starting...")
+    private var licenseText by mutableStateOf("")
+    // The running game's tick loop, so quit-to-menu can stop it. Non-null
+    // exactly while a game is running.
+    private var gameJob: Job? = null
 
     // M4: the real Compose HUD's mutable state (see GameHud.kt) - written
     // to directly from the tick loop, touch handlers, and dialogs below,
@@ -78,25 +94,51 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         hudState.statusText = NativeBridge.helloFromNative()
 
-        gameSurface = findViewById(R.id.game_surface)
-        gameSurface.setEGLContextClientVersion(3)
-        // Ask to keep the GL context across a minimise/resume. Only a hint -
-        // the driver may drop it anyway under memory pressure, and
-        // nativeOnSurfaceCreated is written to cope when it does - but when
-        // it is honoured the resume is instant instead of rebuilding the
-        // terrain mesh, the ground texture and every model from scratch.
-        gameSurface.preserveEGLContextOnPause = true
-        // M6: the 3D renderer needs a real depth buffer (the M2/M5 flat 2D
-        // view never did) - GLSurfaceView's default config chooser doesn't
-        // reliably request one on every device, so ask explicitly.
-        gameSurface.setEGLConfigChooser(8, 8, 8, 8, 16, 0)
-        gameRenderer = GameRenderer()
-        gameSurface.setRenderer(gameRenderer)
-        gameSurface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-        setUpCameraControls(gameSurface, gameRenderer)
+        surfaceHost = findViewById(R.id.game_surface_host)
 
         findViewById<ComposeView>(R.id.hud_compose_view).setContent {
-            GameHud(
+            // M9: the system back gesture walks the menu back up a level.
+            // Enabled only off the main menu, so back there still leaves the
+            // app as Android expects. In a game it does nothing: quitting is
+            // a confirmed action behind the overflow menu, and a stray back
+            // swipe mid-round should never throw the game away.
+            BackHandler(enabled = appScreen != AppScreen.MENU) {
+                if (appScreen != AppScreen.GAME) appScreen = AppScreen.MENU
+            }
+            when (appScreen) {
+                AppScreen.SPLASH -> SplashScreen(splashStatus, null)
+                AppScreen.MENU -> MainMenuScreen(
+                    onSinglePlayer = { appScreen = AppScreen.SINGLE_PLAYER },
+                    onMultiplayer = { appScreen = AppScreen.MULTIPLAYER },
+                    onSettings = { appScreen = AppScreen.SETTINGS },
+                    onAbout = { appScreen = AppScreen.ABOUT },
+                )
+                AppScreen.SINGLE_PLAYER -> SinglePlayerScreen(
+                    onNewGame = { startGame(GameMode.HOST) },
+                    onTutorial = { },
+                    // M12. Shown but disabled rather than hidden: it is a
+                    // planned part of the game, and a menu that quietly lacks
+                    // it says less than one that says "not yet".
+                    tutorialEnabled = false,
+                    onBack = { appScreen = AppScreen.MENU },
+                )
+                AppScreen.MULTIPLAYER -> MultiplayerScreen(
+                    onHost = { startGame(GameMode.HOST) },
+                    onJoin = { startGame(GameMode.JOIN) },
+                    onBack = { appScreen = AppScreen.MENU },
+                )
+                // M11 builds this screen; until then the button is honest
+                // about it rather than doing nothing when tapped.
+                AppScreen.SETTINGS -> SettingsPlaceholderScreen(
+                    onBack = { appScreen = AppScreen.MENU },
+                )
+                AppScreen.ABOUT -> AboutScreen(
+                    versionName = BuildConfig.VERSION_NAME,
+                    upstreamCommit = BuildConfig.UPSTREAM_COMMIT,
+                    licenseText = licenseText,
+                    onBack = { appScreen = AppScreen.MENU },
+                )
+                AppScreen.GAME -> GameHud(
                 state = hudState,
                 onFindGames = { showFindGames() },
                 onShop = { showWeaponShop() },
@@ -127,43 +169,114 @@ class MainActivity : AppCompatActivity() {
                 onCameraPresets = { showCameraPresets() },
                 onSimulationSpeed = { showSimulationSpeed() },
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
-            )
+                )
+            }
         }
 
+        // First run has real work to do - extracting upstream's ~90MB data/
+        // tree - so the splash stays up until the engine has a data root.
         CoroutineScope(Dispatchers.Main).launch {
-            hudState.statusText = "Extracting game data..."
+            splashStatus = "Extracting game data..."
             val dataRoot = withContext(Dispatchers.IO) {
                 AssetDataExtractor.ensureExtracted(applicationContext)
             }
+            splashStatus = "Starting engine..."
             val initOk = withContext(Dispatchers.Default) {
                 NativeBridge.initEngine(dataRoot.absolutePath)
             }
             if (!initOk) {
-                hudState.statusText = "Failed to initialize engine data root"
+                splashStatus = "Failed to initialize engine data root"
                 return@launch
             }
+            licenseText = withContext(Dispatchers.IO) { readLicenseText() }
+            appScreen = AppScreen.MENU
+        }
+    }
 
-            // M5 Phase 2: let the player pick a role before anything else
-            // starts - startLocalGame()/startJoinGame() are mutually
-            // exclusive in the native engine (see engine_jni.cpp), so this
-            // has to be decided once, up front, rather than defaulting to
-            // host and bolting joining on afterwards.
-            when (chooseGameMode()) {
+    /**
+     * M9: the licence text the About screen shows, staged into the APK from
+     * the repository's own LICENSE (see stageLicense in build.gradle.kts).
+     * Read once, off the main thread - it is ~18KB.
+     */
+    private fun readLicenseText(): String = try {
+        assets.open("licenses/GPL-2.0.txt").bufferedReader().use { it.readText() }
+    } catch (e: Exception) {
+        // The notice above it in the About screen is written out in full and
+        // stands on its own, so a missing asset degrades rather than misleads.
+        "The full GNU General Public License v2 text could not be loaded. " +
+            "It is available at https://www.gnu.org/licenses/old-licenses/gpl-2.0.html " +
+            "and in the LICENSE file of the source repository."
+    }
+
+    /**
+     * M9: starts a game and switches to the game screen, creating the GL
+     * surface as it goes.
+     *
+     * A fresh GLSurfaceView per game is deliberate. It gives a fresh EGL
+     * context, so nativeOnSurfaceCreated runs and the renderer forgets every
+     * build-once cache it holds - terrain, ground texture, models, trees,
+     * water, sky. That reset already exists and is already correct, because
+     * the minimise/resume bug forced it to be; reusing it is much safer than
+     * writing a second "forget everything" path that would need to stay in
+     * step with the first.
+     */
+    private fun startGame(mode: GameMode) {
+        if (gameJob != null) return
+        val surface = GLSurfaceView(this).apply {
+            setEGLContextClientVersion(3)
+            // Only a hint - the driver may drop the context anyway under
+            // memory pressure, and nativeOnSurfaceCreated copes when it does -
+            // but when honoured a resume is instant instead of rebuilding the
+            // terrain mesh, the ground texture and every model from scratch.
+            preserveEGLContextOnPause = true
+            // M6: the 3D renderer needs a real depth buffer (the M2/M5 flat
+            // 2D view never did) and GLSurfaceView's default config chooser
+            // doesn't reliably request one on every device.
+            setEGLConfigChooser(8, 8, 8, 8, 16, 0)
+        }
+        gameRenderer = GameRenderer()
+        surface.setRenderer(gameRenderer)
+        // After setRenderer, never before: GLSurfaceView has no GL thread
+        // until a renderer is attached, and setRenderMode dereferences it.
+        surface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+        setUpCameraControls(surface, gameRenderer)
+        gameSurface = surface
+        surfaceHost.addView(surface)
+
+        appScreen = AppScreen.GAME
+        gameJob = CoroutineScope(Dispatchers.Main).launch {
+            when (mode) {
                 GameMode.HOST -> startAsHost()
                 GameMode.JOIN -> startAsClient()
             }
         }
     }
 
-    private enum class GameMode { HOST, JOIN }
-
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private suspend fun chooseGameMode(): GameMode = kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-        hudState.dialog = HudDialog.GameModeChoice(
-            onHost = { hudState.dialog = HudDialog.None; cont.resume(GameMode.HOST) {} },
-            onJoin = { hudState.dialog = HudDialog.None; cont.resume(GameMode.JOIN) {} },
-        )
+    /**
+     * M9: end the game and go back to the menu.
+     *
+     * Order matters. The tick loop is stopped first so nothing is mid-call
+     * into the engine when it goes away; then the engine is torn down (see
+     * stopGame in engine_jni.cpp, and testServerRestart for the evidence that
+     * a second game really can start afterwards); then the GL surface is
+     * destroyed, which is what makes the next game's context - and so the
+     * renderer's whole cache - genuinely fresh.
+     */
+    private fun quitToMenu() {
+        gameJob?.cancel()
+        gameJob = null
+        NativeBridge.stopGame()
+        if (::gameSurface.isInitialized) {
+            surfaceHost.removeView(gameSurface)
+        }
+        hudState.reset()
+        aimSeeded = false
+        lastChatVersion = 0
+        lastChatLineId = 0
+        appScreen = AppScreen.MENU
     }
+
+    private enum class GameMode { HOST, JOIN }
 
     private suspend fun CoroutineScope.startAsHost() {
         hudState.statusText = "Starting local game..."
@@ -911,6 +1024,20 @@ class MainActivity : AppCompatActivity() {
                     onCancel = { hudState.dialog = HudDialog.None },
                 )
             },
+            // M9: the way out. Confirmed, because it abandons the game
+            // outright - there is no saving or rejoining it afterwards.
+            "Quit to menu..." to {
+                hudState.dialog = HudDialog.ListChoice(
+                    title = "Leave this game?",
+                    items = listOf("Yes, quit to menu"),
+                    cancelLabel = "Cancel",
+                    onSelect = {
+                        hudState.dialog = HudDialog.None
+                        quitToMenu()
+                    },
+                    onCancel = { hudState.dialog = HudDialog.None },
+                )
+            },
         )
 
         hudState.dialog = HudDialog.ListChoice(
@@ -1232,12 +1359,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::gameSurface.isInitialized) gameSurface.onResume()
+        if (appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onResume()
     }
 
     override fun onPause() {
         super.onPause()
-        if (::gameSurface.isInitialized) gameSurface.onPause()
+        if (appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onPause()
     }
 
     override fun onDestroy() {

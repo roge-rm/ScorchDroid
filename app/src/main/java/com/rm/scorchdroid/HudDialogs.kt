@@ -69,11 +69,6 @@ import androidx.compose.ui.unit.dp
 sealed class HudDialog {
     object None : HudDialog()
 
-    data class GameModeChoice(
-        val onHost: () -> Unit,
-        val onJoin: () -> Unit,
-    ) : HudDialog()
-
     data class Message(
         val text: String,
         val onDismiss: () -> Unit,
@@ -337,14 +332,6 @@ private fun ListScrollbar(listState: LazyListState, modifier: Modifier = Modifie
 fun HudDialogHost(dialog: HudDialog) {
     when (dialog) {
         is HudDialog.None -> {}
-
-        is HudDialog.GameModeChoice -> AlertDialog(
-            onDismissRequest = {},
-            title = { Text("ScorchDroid") },
-            text = { Text("Host a new game, or join one already running on your LAN?") },
-            confirmButton = { TextButton(onClick = dialog.onHost) { Text("Host") } },
-            dismissButton = { TextButton(onClick = dialog.onJoin) { Text("Join") } },
-        )
 
         is HudDialog.Message -> AlertDialog(
             onDismissRequest = dialog.onDismiss,

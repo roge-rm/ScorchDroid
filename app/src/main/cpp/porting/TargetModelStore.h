@@ -54,6 +54,11 @@ namespace ScorchDroidTargets
 
 	// Number of targets recorded, for tests.
 	size_t size();
+
+	// Forget everything. Called when a game ends: these are keyed by
+	// playerId, and the next game hands the same ids to entirely different
+	// targets, so a surviving entry would draw the previous game's model.
+	void clear();
 }
 
 #endif  // SCORCHDROID_TARGET_MODEL_STORE_H
