@@ -57,6 +57,7 @@
 #include <lang/LangString.hpp>
 #include <engine/ActionController.hpp>
 #include <common/FixedVector.hpp>
+#include <common/FixedVector4.hpp>
 #include <EngineState.hpp>
 #include <Mat4.hpp>
 #include <LandscapeTextureBuilder.hpp>
@@ -3907,7 +3908,23 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// fall when the ground under them goes), so use it rather than
 			// re-sampling the heightmap the way tanks do.
 			inst.y = pos[2].asFloat();
-			inst.rotationRadians = info.rotationDegrees * (float) M_PI / 180.0f;
+			// The *live* rotation, not the one the definition was created
+			// with. Targets that move - the boid flocks of jets, the ships
+			// on their splines - are turned every step by
+			// setTargetPositionAndRotation() to face the way they are
+			// going, and reading the creation value left them flying along
+			// their path at whatever heading they happened to spawn with,
+			// which for half a circuit looks exactly like flying backwards.
+			//
+			// TargetLife keeps it only as a quaternion (getFloatRotMatrix()
+			// is another of the mirrors it maintains only when
+			// !serverMode_, so it is identity here). The quaternion is
+			// always a yaw about the engine's up axis, laid out
+			// (w, x, y, z), so the angle comes straight back out of the w
+			// and z components.
+			FixedVector4 &quat = target->getLife().getQuaternion();
+			inst.rotationRadians =
+				2.0f * atan2f(quat[3].asFloat(), quat[0].asFloat());
 			inst.scale = info.scale;
 			// Upstream multiplies the model by this grey ("color_", used as
 			// glColor3f(c,c,c)), randomising it when the definition asks by
