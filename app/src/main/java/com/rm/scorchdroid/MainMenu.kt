@@ -99,7 +99,7 @@ fun SplashScreen(status: String, progress: Float?) {
             LinearProgressIndicator(
                 progress = { progress },
                 color = MenuAccent,
-                modifier = Modifier.fillMaxWidth().widthIn(max = 320.dp),
+                modifier = Modifier.widthIn(max = 320.dp).fillMaxWidth(),
             )
         } else {
             CircularProgressIndicator(color = MenuAccent)
@@ -130,9 +130,12 @@ private fun MenuButton(
             disabledContainerColor = Color.White.copy(alpha = 0.06f),
             disabledContentColor = Color.White.copy(alpha = 0.35f),
         ),
+        // widthIn *before* fillMaxWidth: the other order lets fillMaxWidth
+        // take the whole width first, which on a landscape phone made every
+        // button 2340px of purple.
         modifier = Modifier
-            .fillMaxWidth()
             .widthIn(max = 340.dp)
+            .fillMaxWidth()
             .padding(vertical = 6.dp),
         contentPadding = PaddingValues(vertical = 14.dp),
     ) {
@@ -282,7 +285,12 @@ fun AboutScreen(
     ) {
         Column(
             modifier = Modifier
+                // Capped for the same reason as the settings screens: a
+                // full-width line of licence text on a landscape phone is
+                // unreadable.
+                .widthIn(max = 560.dp)
                 .fillMaxSize()
+                .align(Alignment.TopCenter)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 32.dp),
         ) {

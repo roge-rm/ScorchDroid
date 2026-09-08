@@ -25,9 +25,18 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ScorchDroid">
 
+        <!-- M11: rotation must not recreate this Activity.
+             Without configChanges a rotation destroys and rebuilds it, which
+             resets the UI to the menu while the *engine* keeps running in
+             native globals that outlive the Activity - so the game in progress
+             is orphaned and the next one is refused outright with "engine
+             already started". The GLSurfaceView handles the resize itself and
+             Compose re-lays-out on its own, so there is nothing to rebuild
+             anyway. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density"
             android:screenOrientation="unspecified">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

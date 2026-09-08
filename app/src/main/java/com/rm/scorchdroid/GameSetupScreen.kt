@@ -70,7 +70,13 @@ fun GameSetupScreen(
     ) {
         Column(
             modifier = Modifier
+                // M11: capped and centred rather than filling the width. A
+                // landscape phone is 2340px across, and a slider that wide has
+                // absurd travel per step while a line of description becomes
+                // hard to track back to its start.
+                .widthIn(max = 560.dp)
                 .fillMaxSize()
+                .align(Alignment.TopCenter)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 28.dp),
         ) {

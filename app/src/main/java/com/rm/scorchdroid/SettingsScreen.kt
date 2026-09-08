@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
@@ -60,7 +61,13 @@ fun SettingsScreen(settings: GameSettings, onBack: () -> Unit) {
     ) {
         Column(
             modifier = Modifier
+                // M11: capped and centred rather than filling the width. A
+                // landscape phone is 2340px across, and a slider that wide has
+                // absurd travel per step while a line of description becomes
+                // hard to track back to its start.
+                .widthIn(max = 560.dp)
                 .fillMaxSize()
+                .align(Alignment.TopCenter)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 28.dp),
         ) {
