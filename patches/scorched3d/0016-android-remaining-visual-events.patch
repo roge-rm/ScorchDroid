@@ -53,6 +53,13 @@ corner of the map instead of over the target that was hurt. host-tests
 assert the position, not just that the event fired, because "an event was
 raised" was true the whole time this was broken.
 
+The speech bubble's *text* half goes through ServerChannelManager rather
+than ChannelManager::showText(): under S3D_SERVER that call only writes
+the line to the server log, because upstream's server has nobody to show
+it to. Here the player is on this machine, so a bot's taunt reached the
+bubble and never the chat until it was broadcast on the general channel
+like any other message - which is also what an upstream player sees.
+
 diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
 index 3f887050..6cebee92 100644
 --- a/src/common/actions/Explosion.cpp
@@ -103,10 +110,10 @@ index 3f887050..6cebee92 100644
  	// gun leaves when it fires, not something every explosion does - and
  	// does it right here, in the client body below (search addSmoke). Same
 diff --git a/src/common/actions/TankSay.cpp b/src/common/actions/TankSay.cpp
-index 8a34eb94..48561991 100644
+index 8a34eb94..a4a2fa8d 100644
 --- a/src/common/actions/TankSay.cpp
 +++ b/src/common/actions/TankSay.cpp
-@@ -19,6 +19,11 @@
+@@ -19,6 +19,15 @@
  ////////////////////////////////////////////////////////////////////////////////
  
  #include <actions/TankSay.hpp>
@@ -114,18 +121,18 @@ index 8a34eb94..48561991 100644
 +	// Android build: the speech bubble is client-only here - see
 +	// EffectEventQueue.h.
 +	#include <EffectEventQueue.h>
++	// For the text half of a TankSay, which has to be broadcast rather
++	// than merely logged - see below.
++	#include <server/ScorchedServer.hpp>
++	#include <server/ServerChannelManager.hpp>
 +#endif
  #ifndef S3D_SERVER
  	#include <sprites/TalkRenderer.hpp>
  	#include <sprites/ExplosionTextures.hpp>
-@@ -59,6 +64,30 @@ void TankSay::init()
- 				white);
- 			context_->getActionController().addAction(new SpriteAction(talk));
- 
-+			ChannelText text("general", text_);
-+			text.setSrcPlayerId(playerId_);
-+			ChannelManager::showText(*context_, text);
-+		}
+@@ -63,6 +72,48 @@ void TankSay::init()
+ 			text.setSrcPlayerId(playerId_);
+ 			ChannelManager::showText(*context_, text);
+ 		}
 +#else
 +		// Android build: the same speech bubble over the speaking tank,
 +		// raised as an event. The text itself goes out on the general
@@ -146,9 +153,31 @@ index 8a34eb94..48561991 100644
 +			bubble.z = turret[2].asFloat();
 +			ScorchDroidEffects::push(bubble);
 +
- 			ChannelText text("general", text_);
- 			text.setSrcPlayerId(playerId_);
- 			ChannelManager::showText(*context_, text);
++			// The text half. Not ChannelManager::showText(): under
++			// S3D_SERVER that only writes the line to the server log, since
++			// upstream's server has nobody to show it to. Here the player
++			// *is* on this machine (and, in a LAN game, so is everyone
++			// else), so it goes out on the general channel the way any
++			// other chat message does - which is also what puts it in front
++			// of a player upstream, whose client shows it locally. Without
++			// this a bot's taunt reached the bubble and nothing else.
++			ChannelText text("general", text_);
++			text.setSrcPlayerId(playerId_);
++			if (ScorchedServer::serverStarted())
++			{
++				ScorchedServer::instance()->getServerChannelManager().
++					sendText(text, true);
++			}
++			else
++			{
++				// Joined-client mode: no server here, and the host is
++				// broadcasting its own copy already.
++				ChannelManager::showText(*context_, text);
++			}
++		}
+ #endif // #ifndef S3D_SERVER
+ 	}
+ }
 diff --git a/src/common/engine/PhysicsParticleObject.cpp b/src/common/engine/PhysicsParticleObject.cpp
 index 459088e3..e2e09803 100644
 --- a/src/common/engine/PhysicsParticleObject.cpp
