@@ -267,6 +267,27 @@ object NativeBridge {
     external fun setRenderOptions(showTrees: Boolean, showFog: Boolean)
 
     /**
+     * M16: the tank models the selected mod offers, by name, from its own
+     * tanks.xml. Does not include upstream's "Random" entry - that is the
+     * empty choice, not a model.
+     */
+    external fun getTankModels(): Array<String>
+
+    /** M16: upstream's own tank palette, 0xRRGGBB each, in its own order. */
+    external fun getTankColors(): IntArray
+
+    /** M16: the avatars upstream ships, as paths relative to the data root. */
+    external fun getAvatars(): Array<String>
+
+    /**
+     * M16: the tank this player wears. An empty model name, a negative colour
+     * index or an empty avatar path each mean "let the game pick", which is
+     * what it did before there was a choice. Applied when a game starts, so
+     * changing it mid-game affects the next one.
+     */
+    external fun setPlayerIdentity(model: String, colorIndex: Int, avatar: String)
+
+    /**
      * M12: replaces the setup options with those in a preset file - upstream's
      * own data/singletutorial.xml, or one of the difficulty presets
      * [getPresets] lists. False if the file could not be read, in which case
@@ -429,11 +450,15 @@ data class PlayerEntry(
     val ping: Int,
     val colorArgb: Int,
     val isMe: Boolean,
+    /** M16: path to this player's avatar image, relative to the data root. */
+    val avatar: String,
 )
 
 fun parsePlayerList(rows: Array<String>): List<PlayerEntry> = rows.mapNotNull { row ->
-    val parts = row.split("|")
-    if (parts.size != 12) return@mapNotNull null
+    // The avatar is a file name and comes last, so it is the only field that
+    // could hold anything unexpected.
+    val parts = row.split("|", limit = 13)
+    if (parts.size != 13) return@mapNotNull null
     val rgb = parts[10].split(",")
     if (rgb.size != 3) return@mapNotNull null
     PlayerEntry(
@@ -452,6 +477,7 @@ fun parsePlayerList(rows: Array<String>): List<PlayerEntry> = rows.mapNotNull { 
             ((rgb[1].toIntOrNull() ?: 255) shl 8) or
             (rgb[2].toIntOrNull() ?: 255),
         isMe = parts[11] == "1",
+        avatar = parts[12],
     )
 }
 

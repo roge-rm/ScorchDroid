@@ -47,6 +47,44 @@ class GameSettings(context: Context) {
         prefs.edit().putString(KEY_NAME, accepted).apply()
     }
 
+    /**
+     * M16: the tank this player wears. Empty means the game picks, which is
+     * what it did before there was a choice - and stays the default, because
+     * upstream's own new player gets a random tank too.
+     */
+    var tankModel by mutableStateOf(prefs.getString(KEY_MODEL, "") ?: "")
+        private set
+
+    fun updateTankModel(value: String) {
+        tankModel = value
+        prefs.edit().putString(KEY_MODEL, value).apply()
+        applyIdentity()
+    }
+
+    /** Index into [NativeBridge.getTankColors]; -1 for whatever is free. */
+    var tankColorIndex by mutableIntStateOf(prefs.getInt(KEY_COLOR, -1))
+        private set
+
+    fun updateTankColorIndex(value: Int) {
+        tankColorIndex = value
+        prefs.edit().putInt(KEY_COLOR, value).apply()
+        applyIdentity()
+    }
+
+    /** Path relative to the data root; empty for none. */
+    var avatar by mutableStateOf(prefs.getString(KEY_AVATAR, "") ?: "")
+        private set
+
+    fun updateAvatar(value: String) {
+        avatar = value
+        prefs.edit().putString(KEY_AVATAR, value).apply()
+        applyIdentity()
+    }
+
+    private fun applyIdentity() {
+        NativeBridge.setPlayerIdentity(tankModel, tankColorIndex, avatar)
+    }
+
     // --- Sound --------------------------------------------------------------
 
     var soundEnabled by mutableStateOf(prefs.getBoolean(KEY_SOUND, true))
@@ -176,6 +214,7 @@ class GameSettings(context: Context) {
      */
     fun applyAll() {
         NativeBridge.setPlayerName(playerName)
+        applyIdentity()
         SoundPlayer.enabled = soundEnabled
         music?.let { it.volume = musicVolume; it.enabled = musicEnabled }
         NativeBridge.setRenderOptions(showTrees, showFog)
@@ -184,6 +223,9 @@ class GameSettings(context: Context) {
     private companion object {
         const val DEFAULT_NAME = "Player"
         const val KEY_NAME = "player.name"
+        const val KEY_MODEL = "player.tankModel"
+        const val KEY_COLOR = "player.tankColor"
+        const val KEY_AVATAR = "player.avatar"
         const val KEY_SOUND = "sound.enabled"
         const val KEY_MUSIC = "music.enabled"
         const val KEY_MUSIC_VOLUME = "music.volume"

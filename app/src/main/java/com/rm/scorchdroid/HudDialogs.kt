@@ -2,6 +2,7 @@ package com.rm.scorchdroid
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -104,6 +105,8 @@ sealed class HudDialog {
         entries: List<PlayerEntry>,
         roundInfo: String,
         chat: List<ChatLine>,
+        /** M16: where the avatar images live; see [PlayerEntry.avatar]. */
+        val dataRoot: String,
         val onCancel: () -> Unit,
     ) : HudDialog() {
         var entries by mutableStateOf(entries)
@@ -424,6 +427,22 @@ private fun ScoresContent(dialog: HudDialog.Scores) {
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.weight(3f).padding(end = 6.dp),
                     ) {
+                        // M16: the player's avatar, which is where upstream
+                        // shows one too. Every bot has the computer face and
+                        // a human has whichever they chose, so the column is
+                        // either full or - if a player picked none - has a
+                        // gap the colour dot beside it still fills.
+                        val avatar = rememberAvatarBitmap(dialog.dataRoot, entry.avatar)
+                        if (avatar != null) {
+                            Image(
+                                bitmap = avatar,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(18.dp)
+                                    .clip(RoundedCornerShape(3.dp)),
+                            )
+                            Spacer(Modifier.width(5.dp))
+                        }
                         // The tank's own engine colour, so a row can be
                         // matched to a tank on the battlefield at a glance -
                         // the name plates use the same one.
