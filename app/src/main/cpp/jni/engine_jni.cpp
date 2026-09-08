@@ -55,6 +55,7 @@ std::mutex g_engineMutex;
 #include <common/ChannelText.hpp>
 #include <coms/ComsChannelTextMessage.hpp>
 #include <ChatStore.h>
+#include <ScoreboardState.h>
 #include <weapons/AccessoryStore.hpp>
 #include <weapons/AccessoryPart.hpp>
 #include <coms/ComsBuyAccessoryMessage.hpp>
@@ -1605,6 +1606,16 @@ Java_com_rm_scorchdroid_NativeBridge_getPlayerList(JNIEnv *env, jobject /* this 
 // The round/turn counters the score dialog heads itself with, as
 // "round|totalRounds|turn|totalTurns". Upstream reads exactly these four off
 // OptionsTransient and OptionsGame (see ScoreDialog.cpp).
+// The end-of-round scoreboard upstream raises by itself (ShowScoreAction,
+// patch 0017). 0 = not showing, 1 = showing the round score, 2 = showing
+// the final score of the match. The UI polls this on its existing tick.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getScoreboardState(JNIEnv *env, jobject /* this */) {
+    ScorchDroidScoreboard::State state = ScorchDroidScoreboard::get();
+    if (!state.showing) return 0;
+    return state.finalScore ? 2 : 1;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_rm_scorchdroid_NativeBridge_getRoundInfo(JNIEnv *env, jobject /* this */) {
     std::ostringstream out;

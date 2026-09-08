@@ -215,6 +215,14 @@ object NativeBridge {
     external fun getRoundInfo(): String
 
     /**
+     * Whether the engine has the end-of-round scoreboard up: 0 no, 1 the
+     * round score, 2 the final score of the match. Upstream raises this by
+     * itself at the end of every round and holds play there while it shows
+     * (RoundScoreTime / ScoreTime); see patch 0017.
+     */
+    external fun getScoreboardState(): Int
+
+    /**
      * Sends a chat message on a channel ("general" or "team"). Hosting, this
      * goes straight into the server's channel manager; joined, it is a
      * ComsChannelTextMessage to the host. False if there is no tank to speak
