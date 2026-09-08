@@ -3,6 +3,7 @@
 #include <common/OptionsGame.hpp>
 #include <common/OptionsScorched.hpp>
 #include <common/OptionEntry.hpp>
+#include <XML/XMLFile.hpp>
 
 #include <mutex>
 #include <algorithm>
@@ -216,6 +217,48 @@ namespace ScorchDroidSetup
 		// Stable order, so the list does not reshuffle between visits just
 		// because the filesystem returned entries differently.
 		std::sort(found.begin() + 1, found.end());
+		return found;
+	}
+
+	std::vector<Preset> presets(const std::string &dataRoot, const std::string &mod)
+	{
+		std::vector<Preset> found;
+		const std::string modDir = dataRoot + "/data/globalmods/" + mod;
+
+		// A real parse this time, not the scan botNames() uses. There the
+		// point was to see the file exactly as upstream's parser does,
+		// commented-out entries included - here the same is true for the
+		// opposite reason: a <game> inside a comment is one upstream does not
+		// offer, and XMLFile is what decides that.
+		XMLFile file;
+		if (!file.readFile(modDir + "/data/modinfo.xml")) return found;
+		if (!file.getRootNode()) return found;
+
+		XMLNode *gameNode = nullptr;
+		while (file.getRootNode()->getNamedChild("game", gameNode, false))
+		{
+			Preset preset;
+			preset.mod = mod;
+			std::string gamefile;
+			if (!gameNode->getNamedChild("description", preset.description, false)) continue;
+			if (!gameNode->getNamedChild("gamefile", gamefile, false)) continue;
+			// Upstream's own fallback: an entry with no short description is
+			// listed under its long one.
+			if (!gameNode->getNamedChild("shortdescription", preset.name, false))
+			{
+				preset.name = preset.description;
+			}
+
+			// The path is mod-relative, as every path in a mod's files is -
+			// upstream resolves it with getModFile(), which this port cannot
+			// use here because that reads the *currently loaded* mod and the
+			// point is to list a mod that has not been loaded.
+			preset.gamefile = modDir + "/" + gamefile;
+			std::ifstream probe(preset.gamefile.c_str());
+			if (!probe.is_open()) continue;
+
+			found.push_back(preset);
+		}
 		return found;
 	}
 

@@ -268,10 +268,18 @@ object NativeBridge {
 
     /**
      * M12: replaces the setup options with those in a preset file - upstream's
-     * own data/singletutorial.xml, in the only case that uses it. False if the
-     * file could not be read, in which case nothing changed.
+     * own data/singletutorial.xml, or one of the difficulty presets
+     * [getPresets] lists. False if the file could not be read, in which case
+     * nothing changed.
      */
     external fun loadSetupPreset(path: String): Boolean
+
+    /**
+     * M14: the ready-made games the installed mods offer, as rows for
+     * [parsePresets]. Read from each mod's own modinfo.xml, so this is
+     * upstream's difficulty menu rather than a copy of it.
+     */
+    external fun getPresets(): Array<String>
 
     external fun getAvailableMods(): Array<String>
 
@@ -532,3 +540,32 @@ fun parseSetupOptions(rows: Array<String>): List<SetupOption> = rows.mapNotNull 
         description = parts[7],
     )
 }
+
+/**
+ * M14: one ready-made game, as a mod's own modinfo.xml describes it.
+ *
+ * Upstream's difficulty menu is not code anywhere - each mod names a few
+ * options files and the words to show beside them - so this port lists what
+ * the mods say rather than a copy of what upstream's happen to say today.
+ */
+data class GamePreset(
+    val mod: String,
+    val name: String,
+    /** Path to the options file, ready for [NativeBridge.loadSetupPreset]. */
+    val gameFile: String,
+    val description: String,
+) {
+    /** Upstream writes these over several lines; a menu row wants one. */
+    val summary: String get() = description.replace(Regex("\\s*\\n\\s*"), " ").trim()
+}
+
+fun parsePresets(rows: Array<String>): List<GamePreset> = rows.mapNotNull { row ->
+    // Four fields, description last so it may contain anything.
+    val parts = row.split("|", limit = 4)
+    if (parts.size != 4) return@mapNotNull null
+    GamePreset(mod = parts[0], name = parts[1], gameFile = parts[2], description = parts[3])
+}
+
+/** "none" is upstream's own name for the base game, which reads as an absence. */
+fun modLabel(mod: String): String =
+    if (mod == "none") "Scorched3D" else mod.replaceFirstChar { it.uppercase() }

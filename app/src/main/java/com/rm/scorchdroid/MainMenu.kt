@@ -38,7 +38,9 @@ import androidx.compose.ui.unit.sp
  * change M9 is really about: until now the app *was* the game, the host/join
  * choice happened once at launch, and the only way out was to kill it.
  */
-enum class AppScreen { SPLASH, MENU, SINGLE_PLAYER, MULTIPLAYER, SETUP, JOINING, SETTINGS, ABOUT, GAME }
+enum class AppScreen {
+    SPLASH, MENU, SINGLE_PLAYER, QUICK_GAME, MULTIPLAYER, SETUP, JOINING, SETTINGS, ABOUT, GAME
+}
 
 /** The palette the menu screens share, so they read as one thing. */
 private val MenuTop = Color(0xFF16213A)
@@ -58,7 +60,14 @@ private fun MenuBackdrop(content: @Composable () -> Unit) {
             verticalArrangement = Arrangement.Center,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 32.dp),
+                // Scrolls only when it has to: a column shorter than the
+                // screen still measures to its content, so the Box above keeps
+                // centring it and the short menus look exactly as they did.
+                // The quick-game list is the one that can outgrow a landscape
+                // phone, and did as soon as a second mod's games appeared in
+                // it.
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 32.dp, vertical = 24.dp),
         ) {
             content()
         }
@@ -138,15 +147,20 @@ private fun MenuButton(
             .widthIn(max = 340.dp)
             .fillMaxWidth()
             .padding(vertical = 6.dp),
-        contentPadding = PaddingValues(vertical = 14.dp),
+        // Horizontal padding matters as soon as a subtitle is long enough to
+        // wrap - the quick-game list carries upstream's own two-sentence
+        // descriptions, and without this they ran to the button's edge and
+        // were clipped a character in on both sides.
+        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 14.dp),
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(label, style = MaterialTheme.typography.titleMedium)
+            Text(label, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
             if (subtitle != null) {
                 Text(
                     subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = Color.White.copy(alpha = 0.6f),
+                    textAlign = TextAlign.Center,
                 )
             }
         }
@@ -172,6 +186,8 @@ fun MainMenuScreen(
 
 @Composable
 fun SinglePlayerScreen(
+    onQuickGame: () -> Unit,
+    quickGameEnabled: Boolean,
     onNewGame: () -> Unit,
     onTutorial: () -> Unit,
     tutorialEnabled: Boolean,
@@ -180,13 +196,62 @@ fun SinglePlayerScreen(
     MenuBackdrop {
         Title("Single Player")
         Spacer(Modifier.height(36.dp))
-        MenuButton("New Game", "Against bots on this device", onClick = onNewGame)
+        // M14: first, and first for a reason - it is the shortest path from
+        // here to playing. New Game is the one that asks questions.
+        MenuButton(
+            "Quick Game",
+            if (quickGameEnabled) "Pick a difficulty and play" else "No games found",
+            enabled = quickGameEnabled,
+            onClick = onQuickGame,
+        )
+        MenuButton("New Game", "Choose the settings yourself", onClick = onNewGame)
         MenuButton(
             "Tutorial",
             if (tutorialEnabled) "Learn the controls" else "Not built yet",
             enabled = tutorialEnabled,
             onClick = onTutorial,
         )
+        Spacer(Modifier.height(12.dp))
+        TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
+    }
+}
+
+/**
+ * M14: the difficulty presets, which are upstream's own single-player menu.
+ *
+ * Nothing here is written by this port. Each mod's modinfo.xml names its
+ * games, gives the words to describe them, and points at an options file; this
+ * screen lists what the mods say. The base game contributes Target practice,
+ * Easy, Normal and Hard; a mod contributes its own, which is why entries are
+ * shown under the mod they came from rather than merged into one list - the
+ * Apocalypse ones play a different game entirely.
+ */
+@Composable
+fun QuickGameScreen(
+    presets: List<GamePreset>,
+    onPick: (GamePreset) -> Unit,
+    onBack: () -> Unit,
+) {
+    MenuBackdrop {
+        Title("Quick Game")
+        Spacer(Modifier.height(24.dp))
+        // Grouped only when there is more than one mod to distinguish: with
+        // just the base game installed a heading over the only list is noise.
+        val byMod = presets.groupBy { it.mod }
+        byMod.forEach { (mod, entries) ->
+            if (byMod.size > 1) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    modLabel(mod),
+                    color = MenuAccent,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            entries.forEach { preset ->
+                MenuButton(preset.name, preset.summary) { onPick(preset) }
+            }
+        }
         Spacer(Modifier.height(12.dp))
         TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
     }

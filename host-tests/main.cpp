@@ -2317,6 +2317,68 @@ static void testGameSetup()
 		ScorchDroidSetup::reset();
 	}
 
+	// M14: the difficulty presets, which are not code anywhere - upstream's
+	// menu is each mod's modinfo.xml naming a few options files. Worth pinning
+	// because the whole feature is "read what the mod says", so a parse that
+	// quietly returned nothing would show as a menu with no games in it.
+	{
+		std::vector<ScorchDroidSetup::Preset> base = ScorchDroidSetup::presets(".", "none");
+		check(base.size() == 4, "the base game offers four ready-made games");
+
+		bool sawEasy = false, sawTarget = false, allDescribed = true, allTagged = true;
+		std::string easyFile;
+		for (size_t i = 0; i < base.size(); i++)
+		{
+			if (base[i].name.empty() || base[i].description.empty()) allDescribed = false;
+			if (base[i].mod != "none") allTagged = false;
+			if (base[i].name == "Easy Game") { sawEasy = true; easyFile = base[i].gamefile; }
+			if (base[i].name == "Target practice") sawTarget = true;
+		}
+		check(allDescribed, "...each with a name and upstream's own description to show");
+		check(allTagged, "...each tagged with the mod it came from");
+		check(sawEasy && sawTarget, "including the easy game and target practice");
+
+		// The point of the gamefile: it has to be loadable as it stands.
+		check(!easyFile.empty() && ScorchDroidSetup::loadPreset(easyFile),
+			"a preset's own gamefile loads");
+		std::vector<ScorchDroidSetup::Option> easy = ScorchDroidSetup::options();
+		std::string money;
+		for (size_t i = 0; i < easy.size(); i++)
+		{
+			if (easy[i].name == "MoneyStarting") money = easy[i].value;
+		}
+		check(money == "50000", "...and brings its own settings with it");
+		check(ScorchDroidSetup::mod() == "none",
+			"...leaving the base game selected, as its file says nothing about mods");
+
+		// A mod's own presets, which is the reason this reads modinfo.xml
+		// rather than naming four files: Apocalypse ships four of its own,
+		// and its files select the mod themselves.
+		std::vector<ScorchDroidSetup::Preset> apoc = ScorchDroidSetup::presets(".", "apoc");
+		check(apoc.size() == 4, "the Apocalypse mod offers four of its own");
+		std::string apocFile;
+		for (size_t i = 0; i < apoc.size(); i++)
+		{
+			if (apoc[i].name == "Apocalypse Easy Game") apocFile = apoc[i].gamefile;
+		}
+		check(!apocFile.empty(), "...under its own names");
+		check(!apocFile.empty() && ScorchDroidSetup::loadPreset(apocFile),
+			"...which load too");
+		check(ScorchDroidSetup::mod() == "apoc",
+			"...and select the mod themselves, so no separate mod choice is needed");
+		// Its easy game names bots ("Shocker") the base game does not, which
+		// is fine here and would not be if the mod had not come with it - the
+		// substitution below is what makes that safe either way.
+		ScorchDroidSetup::ensureBotsValidForMod(".");
+		std::vector<std::string> apocBots = ScorchDroidSetup::botNames(".", "apoc");
+		check(!apocBots.empty(), "...with the mod's own bot list readable");
+
+		check(ScorchDroidSetup::presets(".", "no-such-mod").empty(),
+			"a mod that isn't there offers nothing rather than failing");
+		ScorchDroidSetup::setMod("none");
+		ScorchDroidSetup::reset();
+	}
+
 	// Every option has to survive the session file, not just the ones a test
 	// happens to name. The server now starts from that file rather than from
 	// the shipped config, so an option whose string form does not round-trip
