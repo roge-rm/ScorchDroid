@@ -14,3 +14,9 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Release signing material. The keystore and the credentials in
+# local.properties must never be committed - a signing key in a public
+# repository is the key compromised.
+*.jks
+*.keystore
