@@ -17,13 +17,17 @@
     <name>NumberOfPlayers</name>
     <value>8</value>
   </option>
-  <!-- Bots are kicked once this many humans are in the game, which with 2
-       means a friend joining a practice game removes the bot entirely -
-       observed in the two-device join test, where the host logged
-       "(Bot) Fred ... Auto-kick" the moment the client arrived. That is fine
-       while a game has one bot, but if a "number of bots" setting is ever
-       added this will silently undo it as soon as someone joins. Revisit it
-       then rather than now. -->
+  <!-- Despite the name, this is a *target total player count*, not a
+       threshold for kicking bots: ServerStateEnoughPlayers::ballanceBots()
+       counts humans and AIs together and adds or removes bots until the game
+       holds exactly this many (0 disables balancing altogether). So 2 is what
+       creates the practice bot - one human plus one added bot - and is also
+       why a second human joining drops it again, which the two-device join
+       test showed as "(Bot) Fred ... Auto-kick". That is correct, not a bug:
+       the bot is standing in for the missing player.
+       Raising this would *add* bots rather than preserve them, and it is how
+       a "number of players" setting should eventually be built - upstream's
+       own settings dialog drives this exact entry. -->
   <option>
     <name>RemoveBotsAtPlayers</name>
     <value>2</value>
