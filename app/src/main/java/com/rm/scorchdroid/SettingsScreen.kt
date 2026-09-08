@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -27,9 +28,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -66,8 +69,28 @@ private val SettingsAccent = Color(0xFFB39DFF)
  * port actually has, and anything that changes the *game* rather than the
  * device belongs in the pre-game setup screen instead.
  */
+/**
+ * The settings screen's tabs.
+ *
+ * One page of a dozen rows was too much to take in, and M16's tank, colour
+ * and avatar pickers made it worse - the page ran for four screens and the
+ * controls at the bottom were effectively hidden. Splitting it also groups
+ * the settings by what a player is actually trying to change: who they are,
+ * what they hear, what they see, how they play.
+ */
+private enum class SettingsTab(val label: String) {
+    PLAYER("Player"),
+    AUDIO("Audio"),
+    DISPLAY("Display"),
+    CONTROLS("Controls"),
+}
+
 @Composable
 fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit) {
+    // Remembered across tab switches only, not across visits: coming back to
+    // Settings should start where the screen starts.
+    var tab by remember { mutableStateOf(SettingsTab.PLAYER) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -82,12 +105,12 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                 .widthIn(max = 560.dp)
                 .fillMaxSize()
                 .align(Alignment.TopCenter)
-                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 28.dp),
         ) {
-            // Back sits on the title row, not at the foot of the page: these
-            // screens scroll for several times their own height, and a button
-            // that far down means scrolling back to leave.
+            // Back sits on the title row, not at the foot of the page: a page
+            // that scrolls for several times its own height means scrolling
+            // back down to leave. The row and the tabs stay put while only
+            // the settings under them scroll.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -96,96 +119,140 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                 Text("Settings", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 TextButton(onClick = onBack) { Text("Back", color = SettingsAccent) }
             }
-            Spacer(Modifier.height(12.dp))
 
-            Group("Player")
-            NameRow(settings)
-            // M16: the rest of upstream's PlayerDialog. Read from the shipped
-            // data - the mod's tanks.xml, upstream's colour palette, the
-            // avatars it ships - so a mod's own tanks appear here by itself.
-            TankModelRow(settings)
-            TankColorRow(settings)
-            AvatarRow(settings, dataRoot)
-
-            Group("Sound")
-            SwitchRow(
-                "Sound effects",
-                "Explosions, weapon fire and impacts",
-                settings.soundEnabled,
-            ) { settings.updateSoundEnabled(it) }
-            SwitchRow(
-                "Music",
-                "Scorched3D's own loops, changing with the state of the game",
-                settings.musicEnabled,
-            ) { settings.updateMusicEnabled(it) }
-            SliderRow(
-                "Music volume",
-                "${(settings.musicVolume * 100).roundToInt()}%",
-                settings.musicVolume,
-                0f..1f,
-            ) { settings.updateMusicVolume(it) }
-
-            Group("Graphics")
-            SwitchRow(
-                "Trees",
-                "A landscape scatters up to two thousand; turning them off is the " +
-                    "single biggest saving on a slow device",
-                settings.showTrees,
+            // Scrollable rather than fixed: four tabs fit a portrait phone,
+            // but not a small one in landscape with a large font.
+            ScrollableTabRow(
+                selectedTabIndex = tab.ordinal,
+                containerColor = Color.Transparent,
+                contentColor = SettingsAccent,
+                edgePadding = 0.dp,
+                divider = {
+                    HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+                },
             ) {
-                settings.updateShowTrees(it)
-                settings.applyAll()
-            }
-            SwitchRow(
-                "Distance fog",
-                "Fades the landscape towards the horizon",
-                settings.showFog,
-            ) {
-                settings.updateShowFog(it)
-                settings.applyAll()
+                SettingsTab.entries.forEach { candidate ->
+                    Tab(
+                        selected = candidate == tab,
+                        onClick = { tab = candidate },
+                        selectedContentColor = SettingsAccent,
+                        unselectedContentColor = Color.White.copy(alpha = 0.55f),
+                        text = {
+                            Text(candidate.label, style = MaterialTheme.typography.titleSmall)
+                        },
+                    )
+                }
             }
 
-            Group("HUD")
-            SwitchRow(
-                "Name plates",
-                "Each tank's name above it",
-                settings.showNamePlates,
-            ) { settings.updateShowNamePlates(it) }
-            SwitchRow(
-                "Health bars",
-                "The green bar under each name",
-                settings.showHealthBars,
-            ) { settings.updateShowHealthBars(it) }
-            SliderRow(
-                "Chat message time",
-                "${settings.chatToastSeconds}s",
-                settings.chatToastSeconds.toFloat(),
-                2f..15f,
-            ) { settings.updateChatToastSeconds(it.roundToInt()) }
+            // Keyed on the tab, so each one starts at its own top rather
+            // than inheriting how far the last was scrolled.
+            val scroll = remember(tab) { ScrollState(0) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(scroll)
+                    .padding(top = 8.dp),
+            ) {
+                when (tab) {
+                    SettingsTab.PLAYER -> {
+                        NameRow(settings)
+                        // M16: the rest of upstream's PlayerDialog. Read from
+                        // the shipped data - the mod's tanks.xml, upstream's
+                        // colour palette, the avatars it ships - so a mod's
+                        // own tanks appear here by itself.
+                        TankModelRow(settings)
+                        TankColorRow(settings)
+                        AvatarRow(settings, dataRoot)
+                    }
 
-            Group("Controls")
-            SwitchRow(
-                "Tap to aim",
-                "Tap the ground to aim there; the sliders always work either way",
-                settings.tapToAim,
-            ) { settings.updateTapToAim(it) }
-            SwitchRow(
-                "Invert drag",
-                "Reverses the up/down direction when swinging the camera",
-                settings.invertDrag,
-            ) { settings.updateInvertDrag(it) }
-            SwitchRow(
-                "Left-hand mode",
-                "Mirrors the controls for left-handed play",
-                settings.leftHandMode,
-            ) { settings.updateLeftHandMode(it) }
-            SliderRow(
-                "Control opacity",
-                "${(settings.controlOpacity * 100).roundToInt()}%",
-                settings.controlOpacity,
-                0.3f..1.0f,
-            ) { settings.updateControlOpacity(it) }
+                    SettingsTab.AUDIO -> {
+                        SwitchRow(
+                            "Sound effects",
+                            "Explosions, weapon fire and impacts",
+                            settings.soundEnabled,
+                        ) { settings.updateSoundEnabled(it) }
+                        SwitchRow(
+                            "Music",
+                            "Scorched3D's own loops, changing with the state of the game",
+                            settings.musicEnabled,
+                        ) { settings.updateMusicEnabled(it) }
+                        SliderRow(
+                            "Music volume",
+                            "${(settings.musicVolume * 100).roundToInt()}%",
+                            settings.musicVolume,
+                            0f..1f,
+                        ) { settings.updateMusicVolume(it) }
+                    }
 
-            Spacer(Modifier.height(24.dp))
+                    SettingsTab.DISPLAY -> {
+                        // Two groups under one tab: both are "what is on the
+                        // screen", and neither is long enough to be a tab of
+                        // its own.
+                        Group("Landscape")
+                        SwitchRow(
+                            "Trees",
+                            "A landscape scatters up to two thousand; turning them off is the " +
+                                "single biggest saving on a slow device",
+                            settings.showTrees,
+                        ) {
+                            settings.updateShowTrees(it)
+                            settings.applyAll()
+                        }
+                        SwitchRow(
+                            "Distance fog",
+                            "Fades the landscape towards the horizon",
+                            settings.showFog,
+                        ) {
+                            settings.updateShowFog(it)
+                            settings.applyAll()
+                        }
+
+                        Group("HUD")
+                        SwitchRow(
+                            "Name plates",
+                            "Each tank's name above it",
+                            settings.showNamePlates,
+                        ) { settings.updateShowNamePlates(it) }
+                        SwitchRow(
+                            "Health bars",
+                            "The green bar under each name",
+                            settings.showHealthBars,
+                        ) { settings.updateShowHealthBars(it) }
+                        SliderRow(
+                            "Chat message time",
+                            "${settings.chatToastSeconds}s",
+                            settings.chatToastSeconds.toFloat(),
+                            2f..15f,
+                        ) { settings.updateChatToastSeconds(it.roundToInt()) }
+                    }
+
+                    SettingsTab.CONTROLS -> {
+                        SwitchRow(
+                            "Tap to aim",
+                            "Tap the ground to aim there; the sliders always work either way",
+                            settings.tapToAim,
+                        ) { settings.updateTapToAim(it) }
+                        SwitchRow(
+                            "Invert drag",
+                            "Reverses the up/down direction when swinging the camera",
+                            settings.invertDrag,
+                        ) { settings.updateInvertDrag(it) }
+                        SwitchRow(
+                            "Left-hand mode",
+                            "Mirrors the controls for left-handed play",
+                            settings.leftHandMode,
+                        ) { settings.updateLeftHandMode(it) }
+                        SliderRow(
+                            "Control opacity",
+                            "${(settings.controlOpacity * 100).roundToInt()}%",
+                            settings.controlOpacity,
+                            0.3f..1.0f,
+                        ) { settings.updateControlOpacity(it) }
+                    }
+                }
+
+                Spacer(Modifier.height(24.dp))
+            }
         }
     }
 }
