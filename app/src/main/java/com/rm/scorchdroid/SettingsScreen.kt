@@ -28,11 +28,11 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -120,13 +120,15 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                 TextButton(onClick = onBack) { Text("Back", color = SettingsAccent) }
             }
 
-            // Scrollable rather than fixed: four tabs fit a portrait phone,
-            // but not a small one in landscape with a large font.
-            ScrollableTabRow(
+            // Fixed rather than scrollable: a scrolling row sizes each tab
+            // to its label and packs them from the left, which left the four
+            // of them bunched against one edge with the slack at the other.
+            // These four share the width evenly instead, each label centred
+            // in its own share of it.
+            TabRow(
                 selectedTabIndex = tab.ordinal,
                 containerColor = Color.Transparent,
                 contentColor = SettingsAccent,
-                edgePadding = 0.dp,
                 divider = {
                     HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
                 },
