@@ -39,19 +39,20 @@ index e8293770..fb361a9a 100644
  
  	remove = true;
 diff --git a/src/common/actions/Teleport.cpp b/src/common/actions/Teleport.cpp
-index d1861d92..dcaad978 100644
+index d1861d92..a56026ac 100644
 --- a/src/common/actions/Teleport.cpp
 +++ b/src/common/actions/Teleport.cpp
-@@ -37,6 +37,8 @@
+@@ -37,6 +37,9 @@
  #ifndef S3D_SERVER
  	#include <sound/SoundUtils.hpp>
  	#include <sprites/TeleportRenderer.hpp>
 +#else
 +	#include <EffectEventQueue.h>
++	#include <SoundEventQueue.h>
  #endif
  
  Teleport::Teleport(FixedVector position, WeaponFireContext &weaponContext, WeaponTeleport *weapon) :
-@@ -78,6 +80,33 @@ void Teleport::init()
+@@ -78,6 +81,33 @@ void Teleport::init()
  		);
  		context_->getActionController().addAction(pos);
  	}
@@ -84,4 +85,23 @@ index d1861d92..dcaad978 100644
 +	}
  #endif
  }
+ 
+@@ -103,6 +133,18 @@ void Teleport::simulate(fixed frameTime, bool &remove)
+ 				);
+ 			}
+ 		}
++#else
++		// Android build: the weapon's own sound, raised as an event. Same
++		// tank check as upstream, so a teleport by a tank that is not
++		// playing stays silent, as theirs does.
++		{
++			Tank *tank = context_->getTargetContainer().getTankById(weaponContext_.getPlayerId());
++			if (tank && tank->getState().getState() == TankState::sNormal &&
++				weapon_->getSound() && 0 != strcmp("none", weapon_->getSound()))
++			{
++				ScorchDroidAudio::pushSoundEvent(S3D::getModFile(weapon_->getSound()));
++			}
++		}
+ #endif // #ifndef S3D_SERVER
+ 	}
  

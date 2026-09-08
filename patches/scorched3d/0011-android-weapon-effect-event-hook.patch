@@ -1,4 +1,5 @@
 diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
+index f0c46f4e..3d94f5df 100644
 --- a/src/common/actions/Explosion.cpp
 +++ b/src/common/actions/Explosion.cpp
 @@ -39,6 +39,9 @@
@@ -11,7 +12,7 @@ diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
  #endif
  #include <landscapemap/DeformLandscape.hpp>
  #include <landscapemap/LandscapeMaps.hpp>
-@@ -75,6 +78,27 @@
+@@ -75,6 +78,27 @@ Explosion::~Explosion()
  
  void Explosion::init()
  {
@@ -95,10 +96,10 @@ index 7f2d9380..125bba1e 100644
  
  	remove = (totalTime_ > laserTime_);
 diff --git a/src/common/actions/Lightning.cpp b/src/common/actions/Lightning.cpp
-index 508ee67d..f2830b4e 100644
+index 508ee67d..224c8e1b 100644
 --- a/src/common/actions/Lightning.cpp
 +++ b/src/common/actions/Lightning.cpp
-@@ -25,6 +25,10 @@
+@@ -25,6 +25,11 @@
  	#include <sound/SoundUtils.hpp>
  	#include <GLEXT/GLCamera.hpp>
  	#include <sprites/ExplosionTextures.hpp>
@@ -106,11 +107,24 @@ index 508ee67d..f2830b4e 100644
 +	// Android build: see EffectEventQueue.h - Lightning::draw() is
 +	// client-only.
 +	#include <EffectEventQueue.h>
++	#include <SoundEventQueue.h>
  #endif
  #include <target/TargetContainer.hpp>
  #include <target/TargetDamageCalc.hpp>
-@@ -122,6 +126,33 @@ void Lightning::simulate(fixed frameTime, bool &remove)
+@@ -120,8 +125,45 @@ void Lightning::simulate(fixed frameTime, bool &remove)
+ 			}
+ 		}
  	}
++#else
++	// Android build: the weapon's own sound, once, as an event.
++	if (firstTime_)
++	{
++		firstTime_ = false;
++		if (weapon_->getSound() && 0 != strcmp("none", weapon_->getSound()))
++		{
++			ScorchDroidAudio::pushSoundEvent(S3D::getModFile(weapon_->getSound()));
++		}
++	}
  #endif // #ifndef S3D_SERVER
  
 +#ifdef S3D_SERVER
@@ -194,10 +208,21 @@ index 002724d9..7ce1e546 100644
  	// Add napalm for the period of the time interval
  	// once the time interval has expired then start taking it away
 diff --git a/src/common/actions/ShieldHit.cpp b/src/common/actions/ShieldHit.cpp
-index 9c26f0a8..34bc51d9 100644
+index 9c26f0a8..3cc828b6 100644
 --- a/src/common/actions/ShieldHit.cpp
 +++ b/src/common/actions/ShieldHit.cpp
-@@ -30,6 +30,10 @@
+@@ -19,6 +19,10 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #include <actions/ShieldHit.hpp>
++#ifdef S3D_SERVER
++	// Android build: sound is raised as an event - see SoundEventQueue.h.
++	#include <SoundEventQueue.h>
++#endif
+ #include <common/Defines.hpp>
+ #include <engine/ScorchedContext.hpp>
+ #include <weapons/Accessory.hpp>
+@@ -30,6 +34,10 @@
  #ifndef S3D_SERVER
  	#include <sound/SoundUtils.hpp>
  	#include <GLEXT/GLLenseFlare.hpp>
@@ -208,11 +233,19 @@ index 9c26f0a8..34bc51d9 100644
  #endif
  
  ShieldHit::ShieldHit(unsigned int playerId, FixedVector &position, fixed hitPercentage) :
-@@ -81,6 +85,22 @@ void ShieldHit::simulate(fixed frameTime, bool &remove)
+@@ -81,6 +89,30 @@ void ShieldHit::simulate(fixed frameTime, bool &remove)
  				}
  #endif // #ifndef S3D_SERVER
  
 +#ifdef S3D_SERVER
++				// Android build: the shield's own collision sound, raised as an
++				// event alongside the flash below.
++				if (shield->getCollisionSound() &&
++					0 != strcmp("none", shield->getCollisionSound()))
++				{
++					ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
++						S3D::formatStringBuffer("data/wav/%s", shield->getCollisionSound())));
++				}
 +				{
 +					// Size the flash to the shield itself, so a big shield
 +					// flashes big - the client equivalent draws on the

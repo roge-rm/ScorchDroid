@@ -1576,6 +1576,22 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
         std::lock_guard<std::mutex> lock(g_engineMutex);
         events = ScorchDroidAudio::drainSoundEvents();
     }
+    // M13: one line per batch, naming the files, so "is that sound wired"
+    // can be answered from logcat rather than by listening. Quiet when there
+    // is nothing to play, which is almost every tick.
+    if (!events.empty()) {
+        std::ostringstream names;
+        for (size_t i = 0; i < events.size(); i++) {
+            const std::string &path = events[i];
+            // Directory kept: upstream reuses basenames across categories
+            // (shoot/small.wav and explosions/small.wav), and the difference
+            // is exactly what this line exists to show.
+            size_t slash = path.find_last_of('/');
+            if (slash != std::string::npos && slash > 0) slash = path.find_last_of('/', slash - 1);
+            names << (i ? ", " : "") << (slash == std::string::npos ? path : path.substr(slash + 1));
+        }
+        LOGI("Sound events: %s", names.str().c_str());
+    }
 
     jobjectArray result = env->NewObjectArray((jsize) events.size(), env->FindClass("java/lang/String"), nullptr);
     for (size_t i = 0; i < events.size(); i++) {
