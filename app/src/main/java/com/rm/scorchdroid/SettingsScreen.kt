@@ -71,8 +71,18 @@ fun SettingsScreen(settings: GameSettings, onBack: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 28.dp),
         ) {
-            Text("Settings", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(20.dp))
+            // Back sits on the title row, not at the foot of the page: these
+            // screens scroll for several times their own height, and a button
+            // that far down means scrolling back to leave.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Settings", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onBack) { Text("Back", color = SettingsAccent) }
+            }
+            Spacer(Modifier.height(12.dp))
 
             Group("Player")
             NameRow(settings)
@@ -156,7 +166,6 @@ fun SettingsScreen(settings: GameSettings, onBack: () -> Unit) {
             ) { settings.updateControlOpacity(it) }
 
             Spacer(Modifier.height(24.dp))
-            TextButton(onClick = onBack) { Text("Back", color = SettingsAccent) }
         }
     }
 }

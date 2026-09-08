@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -294,13 +295,22 @@ fun AboutScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 32.dp),
         ) {
-            Text(
-                "ScorchDroid $versionName",
-                color = Color.White,
-                fontSize = 26.sp,
-                fontWeight = FontWeight.Bold,
-            )
-            Spacer(Modifier.height(16.dp))
+            // Back on the title row rather than after the whole GPL text,
+            // which is several screens of scrolling away.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "ScorchDroid $versionName",
+                    color = Color.White,
+                    fontSize = 26.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
+            }
+            Spacer(Modifier.height(10.dp))
             AboutParagraph(
                 "An Android port of Scorched3D, the 3D artillery game based on the " +
                     "classic Scorched Earth. The simulation - weapons, physics, terrain " +
@@ -345,7 +355,6 @@ fun AboutScreen(
                 modifier = Modifier.padding(top = 8.dp),
             )
             Spacer(Modifier.height(24.dp))
-            TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
         }
     }
 }
