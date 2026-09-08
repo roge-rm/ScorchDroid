@@ -83,6 +83,17 @@ fun SettingsScreen(settings: GameSettings, onBack: () -> Unit) {
                 "Explosions, weapon fire and impacts",
                 settings.soundEnabled,
             ) { settings.updateSoundEnabled(it) }
+            SwitchRow(
+                "Music",
+                "Scorched3D's own loops, changing with the state of the game",
+                settings.musicEnabled,
+            ) { settings.updateMusicEnabled(it) }
+            SliderRow(
+                "Music volume",
+                "${(settings.musicVolume * 100).roundToInt()}%",
+                settings.musicVolume,
+                0f..1f,
+            ) { settings.updateMusicVolume(it) }
 
             Group("Graphics")
             SwitchRow(

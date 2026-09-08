@@ -58,6 +58,29 @@ class GameSettings(context: Context) {
         prefs.edit().putBoolean(KEY_SOUND, value).apply()
     }
 
+    /** M15: upstream's music, keyed to game state by its music.xml. */
+    var musicEnabled by mutableStateOf(prefs.getBoolean(KEY_MUSIC, true))
+        private set
+
+    fun updateMusicEnabled(value: Boolean) {
+        musicEnabled = value
+        music?.enabled = value
+        prefs.edit().putBoolean(KEY_MUSIC, value).apply()
+    }
+
+    /** 0..1. Separate from effects, as upstream's SoundDialog has it. */
+    var musicVolume by mutableFloatStateOf(prefs.getFloat(KEY_MUSIC_VOLUME, 0.6f))
+        private set
+
+    fun updateMusicVolume(value: Float) {
+        musicVolume = value.coerceIn(0f, 1f)
+        music?.volume = musicVolume
+        prefs.edit().putFloat(KEY_MUSIC_VOLUME, musicVolume).apply()
+    }
+
+    /** The music player, once the Activity has one; applyAll() pushes to it. */
+    var music: MusicPlayer? = null
+
     // --- HUD ----------------------------------------------------------------
 
     var showNamePlates by mutableStateOf(prefs.getBoolean(KEY_PLATES, true))
@@ -154,6 +177,7 @@ class GameSettings(context: Context) {
     fun applyAll() {
         NativeBridge.setPlayerName(playerName)
         SoundPlayer.enabled = soundEnabled
+        music?.let { it.volume = musicVolume; it.enabled = musicEnabled }
         NativeBridge.setRenderOptions(showTrees, showFog)
     }
 
@@ -161,6 +185,8 @@ class GameSettings(context: Context) {
         const val DEFAULT_NAME = "Player"
         const val KEY_NAME = "player.name"
         const val KEY_SOUND = "sound.enabled"
+        const val KEY_MUSIC = "music.enabled"
+        const val KEY_MUSIC_VOLUME = "music.volume"
         const val KEY_PLATES = "hud.namePlates"
         const val KEY_HEALTH = "hud.healthBars"
         const val KEY_TOAST = "hud.chatToastSeconds"

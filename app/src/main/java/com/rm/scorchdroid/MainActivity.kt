@@ -41,6 +41,8 @@ class MainActivity : AppCompatActivity() {
     // M11: the player's own preferences, as opposed to a game's rules - see
     // GameSettings. Created in onCreate, before anything reads a setting.
     private lateinit var settings: GameSettings
+    // M15: created once the data root exists; state-driven from the tick.
+    private var music: MusicPlayer? = null
     // The running game's tick loop, so quit-to-menu can stop it. Non-null
     // exactly while a game is running.
     private var gameJob: Job? = null
@@ -233,7 +235,13 @@ class MainActivity : AppCompatActivity() {
             }
             // Only now: applyAll() crosses into the engine, which has just
             // been given its data root.
+            music = MusicPlayer(dataRoot).also {
+                it.load(NativeBridge.getSelectedMod())
+                settings.music = it
+            }
             settings.applyAll()
+            // Upstream's menu music is its "wait" loop.
+            music?.setState(MusicPlayer.State.WAIT)
             licenseText = withContext(Dispatchers.IO) { readLicenseText() }
             appScreen = AppScreen.MENU
         }
@@ -326,6 +334,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun startGame() {
         if (gameJob != null) return
+        music?.load(NativeBridge.getSelectedMod())
         applySettingsToHud()
         attachGameSurface()
         appScreen = AppScreen.GAME
@@ -389,6 +398,7 @@ class MainActivity : AppCompatActivity() {
 
     /** Abandons a join that hasn't connected yet and returns to the menu. */
     private fun cancelJoinFlow() {
+        music?.setState(MusicPlayer.State.WAIT)
         gameJob?.cancel()
         gameJob = null
         hudState.dialog = HudDialog.None
@@ -458,6 +468,7 @@ class MainActivity : AppCompatActivity() {
         }
         hudState.reset()
         tutorial = null
+        music?.setState(MusicPlayer.State.WAIT)
         aimSeeded = false
         lastChatVersion = 0
         lastChatLineId = 0
@@ -593,6 +604,17 @@ class MainActivity : AppCompatActivity() {
             // exists during the buying phase, which is the one time it
             // does anything (see ServerPlayedMoveHandler's eFinishedBuy).
             hudState.buyingPhase = label.startsWith("Buying")
+            // M15: upstream's music follows its client state - buying,
+            // playing, a shot in flight, the score screen - and these are the
+            // same signals the status line is already built from.
+            music?.setState(
+                when {
+                    scoreboard != 0 -> MusicPlayer.State.SCORE
+                    hudState.buyingPhase -> MusicPlayer.State.BUYING
+                    hudState.shotLocked -> MusicPlayer.State.SHOT
+                    else -> MusicPlayer.State.PLAYING
+                }
+            )
             // M4: keep the weapon-select button's label in sync with
             // the current weapon, in case it changed via the shop
             // dialog or a fresh round's default selection.
@@ -1534,14 +1556,18 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onResume()
+        music?.resume()
     }
 
     override fun onPause() {
         super.onPause()
         if (appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onPause()
+        music?.pause()
     }
 
     override fun onDestroy() {
+        music?.release()
+        music = null
         super.onDestroy()
         LanDiscovery.stopRegistration()
         LanDiscovery.stopDiscovery()
