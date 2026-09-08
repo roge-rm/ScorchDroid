@@ -223,6 +223,13 @@ object NativeBridge {
     external fun getScoreboardState(): Int
 
     /**
+     * M9: ends the current game and returns the engine to the state
+     * [startLocalGame] and [startJoinGame] will accept. Idempotent, so the
+     * menu can call it without tracking whether a game is running.
+     */
+    external fun stopGame()
+
+    /**
      * Sends a chat message on a channel ("general" or "team"). Hosting, this
      * goes straight into the server's channel manager; joined, it is a
      * ComsChannelTextMessage to the host. False if there is no tank to speak

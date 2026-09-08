@@ -17,6 +17,16 @@ val stageScorchedData = tasks.register<Sync>("stageScorchedData") {
     into(layout.buildDirectory.dir("generated/assets-staging/data"))
 }
 
+// The GPLv2 text itself, shipped inside the APK for the About screen. Staged
+// from the repo's own LICENSE rather than committed a second time under
+// assets/, so the licence the app displays and the licence the repository
+// carries can never drift apart.
+val stageLicense = tasks.register<Copy>("stageLicense") {
+    from(layout.projectDirectory.file("../LICENSE"))
+    into(layout.buildDirectory.dir("generated/assets-staging/licenses"))
+    rename { "GPL-2.0.txt" }
+}
+
 android {
     namespace = "com.rm.scorchdroid"
     compileSdk {
@@ -27,6 +37,24 @@ android {
         applicationId = "com.rm.scorchdroid"
         minSdk = 26
         targetSdk = 37
+        // M9: the exact upstream commit this build's engine came from, shown
+        // on the About screen as part of the corresponding-source offer. Read
+        // from the submodule rather than typed in, because a stale value here
+        // would point people at source that is not what they are running.
+        buildConfigField(
+            "String",
+            "UPSTREAM_COMMIT",
+            "\"" + providers.exec {
+                // Absolute: providers.exec inherits the daemon's working
+                // directory, not the project's, so a relative -C path fails
+                // with an unhelpful "exit value 128" at configuration time.
+                commandLine(
+                    "git", "-C",
+                    rootProject.layout.projectDirectory.dir("third_party/scorched3d").asFile.absolutePath,
+                    "rev-parse", "--short=10", "HEAD",
+                )
+            }.standardOutput.asText.get().trim() + "\"",
+        )
         versionCode = 3
         versionName = "0.1.2"
 
@@ -101,7 +129,7 @@ android {
             // Declaring the producer once here wires every consumer.
             assets.srcDir(
                 files(layout.buildDirectory.dir("generated/assets-staging"))
-                    .builtBy(stageScorchedData)
+                    .builtBy(stageScorchedData, stageLicense)
             )
         }
     }

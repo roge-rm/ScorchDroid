@@ -228,6 +228,37 @@ class GameHudState {
     // 1x - upstream does the same (SpeedChange::draw prints "8.0X" only when
     // speed != 1.0), because a permanent "1x" would be noise.
     var speedLabel by mutableStateOf("")
+
+    /**
+     * M9: back to a fresh game's state, for quit-to-menu.
+     *
+     * The HUD state outlives a single game (it belongs to the Activity, not
+     * the game), so without this the next game opens showing the last one's
+     * status line, name plates, chat toasts and wind - which reads as the new
+     * game being broken rather than the old one lingering.
+     */
+    fun reset() {
+        statusText = ""
+        hostingLabel = ""
+        weaponLabel = "Weapon"
+        elevationDegrees = 45f
+        angleDegrees = 0f
+        powerFraction = DEFAULT_POWER_FRACTION
+        cameraFollow = false
+        buyingPhase = false
+        shotLocked = false
+        tankOverlays = emptyList()
+        floatingLabels = emptyList()
+        windLabel = ""
+        positionSelectWeapon = ""
+        perfLabel = ""
+        dialog = HudDialog.None
+        chatToasts = emptyList()
+        chatComposing = false
+        chatChannel = "general"
+        hudHidden = false
+        speedLabel = ""
+    }
 }
 
 /** A chat line currently on screen, with the moment it arrived. */

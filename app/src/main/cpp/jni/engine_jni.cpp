@@ -44,6 +44,10 @@ std::mutex g_engineMutex;
 #include <weapons/AccessoryStore.hpp>
 #include <target/TargetState.hpp>
 #include <MovementStore.h>
+#include <TracerStore.h>
+#include <TargetModelStore.h>
+#include <DeformEventQueue.h>
+#include <EffectEventQueue.h>
 #include <landscapemap/GroundMaps.hpp>
 #include <landscapemap/HeightMap.hpp>
 #include <simactions/TankAddSimAction.hpp>
@@ -1606,6 +1610,72 @@ Java_com_rm_scorchdroid_NativeBridge_getPlayerList(JNIEnv *env, jobject /* this 
 // The round/turn counters the score dialog heads itself with, as
 // "round|totalRounds|turn|totalTurns". Upstream reads exactly these four off
 // OptionsTransient and OptionsGame (see ScoreDialog.cpp).
+// M9: end the current game and put the engine back where startLocalGame()
+// and startJoinGame() will accept a new one.
+//
+// Until the main menu there was no such thing: the mode was chosen once at
+// launch and the only way out was to kill the app, so both start functions
+// simply refused a second call and nothing ever cleared g_mode. A menu makes
+// "quit, start something else" ordinary, so this is the other half of that.
+//
+// host-tests' testServerRestart() is the evidence this is safe at all: it
+// proves a second startServer() in the same process comes up with a genuinely
+// live game, and - the part that actually decides it - that a real listening
+// socket from the previous game is released, so hosting twice on one port
+// works. It also pins the rule this function has to respect:
+// ScorchedServer::instance() is null between the two, so nothing may hold a
+// pointer across the gap.
+//
+// Everything below is state that outlives a round but must not outlive a
+// *game*. The stores are the easy ones to forget: several are keyed by
+// playerId, and the next game hands the same ids to entirely different tanks
+// and targets, so a survivor doesn't look like stale data - it looks like the
+// wrong model in the wrong place.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_stopGame(JNIEnv *env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    if (g_mode == EngineMode::kNone) return;   // idempotent: the menu may ask twice
+
+    LOGI("stopGame: tearing down (mode=%d)", (int) g_mode);
+
+    if (g_clientContext) {
+        delete g_clientContext;
+        g_clientContext = nullptr;
+    }
+    if (ScorchedServer::serverStarted()) {
+        // Close the listening socket before dropping the server: stopServer()
+        // deletes the NetInterface along with everything else, and a socket
+        // freed only by its destructor is exactly the kind of thing that
+        // leaves the next host unable to bind.
+        ScorchedServer::instance()->getContext().getNetInterface().stop();
+        ScorchedServer::stopServer();
+    }
+
+    g_mode = EngineMode::kNone;
+    g_humanPromoted = false;
+    g_humanLoadPending = false;
+    g_hostingListening = false;
+    g_hostingPort = 0;
+    g_lastServerState = -1;
+    g_lastMoveId = 0;
+    g_phaseElapsed = fixed(0);
+    g_lastChatMessageId = 0;
+
+    ScorchDroidChat::clear();
+    ScorchDroidTracer::clearAll();
+    ScorchDroidMovement::clear();
+    ScorchDroidTargets::clear();
+    ScorchDroidScoreboard::hide();
+    // Drained rather than cleared: these are queues with no clear() of their
+    // own, and draining is exactly as complete.
+    ScorchDroidEffects::drain();
+    ScorchDroidAudio::drainSoundEvents();
+    int a = 0, b = 0, c = 0, d = 0;
+    ScorchDroidLandscape::takeDirtyRegion(a, b, c, d);
+
+    LOGI("stopGame: engine is idle, ready for a new game");
+}
+
 // The end-of-round scoreboard upstream raises by itself (ShowScoreAction,
 // patch 0017). 0 = not showing, 1 = showing the round score, 2 = showing
 // the final score of the match. The UI polls this on its existing tick.
