@@ -65,6 +65,8 @@
 #include <actions/ShowScoreAction.hpp>
 #include <ScoreboardState.h>
 #include <GameSetup.h>
+#include <tankai/TankAIStore.hpp>
+#include <tankai/TankAI.hpp>
 #include <common/FixedVector4.hpp>
 #include <target/TargetDamage.hpp>
 #include <target/TargetState.hpp>
@@ -2197,6 +2199,49 @@ static void testGameSetup()
 	}
 	ScorchDroidSetup::setMod("none");
 	unlink(sessionPath);
+
+	// The bundled Apocalypse mod does not work with the version of Scorched3D
+	// this port pins, and the failure is upstream's, in upstream's own data.
+	//
+	// apoc's data/tankais.xml defines twelve AIs, but only the first seven
+	// load. The eighth, "Shark", declares its weapons in the old inline form
+	// (a <weaponset> full of <weapon> nodes) while this version's parser wants
+	// a named set (<weapons><weaponset>WeaponSetSniper</weaponset></weapons>)
+	// and returns false without one - see TankAICurrent::parseConfig. Worse,
+	// TankAIStore::loadAIs abandons the *whole list* at the first rejection,
+	// so everything after Shark is missing too, including "Moron", which the
+	// shipped server config names as the bot to play against. The result on a
+	// device is a game that loads its landscape, logs "Failed to find a tank
+	// ai called Moron" every tick with the bot slot unfilled, and never
+	// starts.
+	//
+	// Pinned here rather than worked around: this is what makes the mod
+	// picker unsafe to offer, and if a future upstream bump fixes the data
+	// this test fails and tells us the picker can be turned on.
+	{
+		ScorchDroidSetup::setMod("apoc");
+		const char *probePath = "/tmp/scorchdroid-host-tests-apoc.xml";
+		ScorchDroidSetup::writeSessionFile(probePath);
+		ScorchedServerSettingsOptions apocSettings(probePath, false, false);
+		bool apocUp = ScorchedServer::startServer(apocSettings, true, nullptr);
+		check(apocUp, "a server starts with the Apocalypse mod selected");
+		if (apocUp)
+		{
+			check(std::string(ScorchedServer::instance()->getOptionsGame().getMod()) == "apoc",
+				"...and really is running that mod, so the session config route works");
+
+			TankAIStore &ais = ScorchedServer::instance()->getTankAIs();
+			check(ais.getAIByName("Cyborg") != nullptr,
+				"the AIs before the broken entry load");
+			check(ais.getAIByName("Shark") == nullptr,
+				"\"Shark\" does not, because its weapons are in a format this version dropped");
+			check(ais.getAIByName("Moron") == nullptr,
+				"and nor does \"Moron\", which the file defines *after* Shark - "
+				"one bad entry costs every entry below it");
+		}
+		ScorchDroidSetup::setMod("none");
+		unlink(probePath);
+	}
 
 	ScorchDroidSetup::reset();
 	std::string afterReset;
