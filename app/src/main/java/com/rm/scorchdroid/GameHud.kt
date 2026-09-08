@@ -249,6 +249,7 @@ fun GameHud(
     onDoneBuying: () -> Unit,
     onScores: () -> Unit,
     onCameraPresets: () -> Unit,
+    onSimulationSpeed: () -> Unit,
     onSendChat: (String) -> Unit,
 ) {
     // M6 parity: upstream's HUD_ITEMS toggle. Everything goes except one
@@ -441,7 +442,12 @@ fun GameHud(
             // behind the overflow.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 HudIconButton(Icons.Filled.Undo, "Revert to last angles", onUndo)
-                HudIconButton(Icons.Filled.SkipNext, "Skip turn", onSkip)
+                HudIconButton(
+                    icon = Icons.Filled.SkipNext,
+                    description = "Skip turn (hold for game speed)",
+                    onClick = onSkip,
+                    onLongClick = onSimulationSpeed,
+                )
                 Spacer(Modifier.width(10.dp))
                 HudIconButton(Icons.Filled.Shield, "Defenses", onDefenses)
                 HudIconButton(Icons.Filled.ShoppingCart, "Shop", onShop)
