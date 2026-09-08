@@ -10,8 +10,13 @@ object NativeBridge {
     /** Points the native engine's cwd/$HOME at the extracted data root (see AssetDataExtractor). */
     external fun initEngine(dataRoot: String): Boolean
 
-    /** M2 vertical slice: boots a real local game via ScorchedServer::startServer. */
-    external fun startLocalGame(): Boolean
+    /**
+     * M2 vertical slice: boots a real local game via
+     * ScorchedServer::startServer. [debugBuild] makes the engine start players rich
+     * (100000 rather than the config's 10000) so testing need not grind for
+     * a nuke or a shield; pass BuildConfig.DEBUG so release is untouched.
+     */
+    external fun startLocalGame(debugBuild: Boolean): Boolean
 
     /** Advances the real game simulation by one step (see ServerSimulator). */
     external fun tickEngine()

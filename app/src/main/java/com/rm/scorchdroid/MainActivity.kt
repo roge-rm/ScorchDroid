@@ -167,7 +167,7 @@ class MainActivity : AppCompatActivity() {
 
     private suspend fun CoroutineScope.startAsHost() {
         hudState.statusText = "Starting local game..."
-        val gameOk = withContext(Dispatchers.Default) { NativeBridge.startLocalGame() }
+        val gameOk = withContext(Dispatchers.Default) { NativeBridge.startLocalGame(BuildConfig.DEBUG) }
         if (!gameOk) {
             hudState.statusText = "Failed to start local game (see logcat)"
             return
