@@ -275,6 +275,23 @@ class MainActivity : AppCompatActivity() {
             hudState.tankOverlays = parseTankOverlays(gameRenderer.nativeGetTankOverlays())
             hudState.floatingLabels = parseFloatingLabels(gameRenderer.nativeGetFloatingLabels())
 
+            // M6 parity: the scoreboard between rounds. Upstream puts it up
+            // by itself and holds the game there for RoundScoreTime (5s), or
+            // ScoreTime (15s) after the last round; before this the port
+            // sat through that pause showing the empty battlefield, and the
+            // player had to know to open the table by hand. Opened only
+            // over an idle HUD - a dialog the player opened themselves is
+            // never yanked away - and closed again only if this is the one
+            // that opened it.
+            val scoreboard = withContext(Dispatchers.Default) { NativeBridge.getScoreboardState() }
+            if (scoreboard != 0 && autoScoreDialog == null &&
+                hudState.dialog is HudDialog.None) {
+                autoScoreDialog = showScores()
+            } else if (scoreboard == 0 && autoScoreDialog != null) {
+                if (hudState.dialog === autoScoreDialog) hudState.dialog = HudDialog.None
+                autoScoreDialog = null
+            }
+
             val moveId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
             if (moveId != 0) hudState.shotLocked = false
 
@@ -769,7 +786,7 @@ class MainActivity : AppCompatActivity() {
     // TankScore, which this build already keeps - nothing here is simulated
     // or estimated. Refreshed while open so it tracks the round rather than
     // freezing at the moment it was opened.
-    private fun showScores() {
+    private fun showScores(): HudDialog.Scores {
         val dialog = HudDialog.Scores(
             entries = emptyList(),
             roundInfo = "",
@@ -795,7 +812,13 @@ class MainActivity : AppCompatActivity() {
                 delay(1000)
             }
         }
+        return dialog
     }
+
+    // Set while the between-rounds scoreboard is on screen because the
+    // engine asked for it, so the tick below knows to take it down again -
+    // and knows not to touch a score dialog the player opened themselves.
+    private var autoScoreDialog: HudDialog.Scores? = null
 
     // M6 parity: simulation speed (upstream's SIMULATION_SPEED_* keys).
     // The seven upstream offers, no more: this is upstream's own

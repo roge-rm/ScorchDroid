@@ -62,6 +62,8 @@
 #include <EffectEventQueue.h>
 #include <actions/ShieldHit.hpp>
 #include <actions/TankSay.hpp>
+#include <actions/ShowScoreAction.hpp>
+#include <ScoreboardState.h>
 #include <target/TargetDamage.hpp>
 #include <target/TargetState.hpp>
 #include <weapons/Weapon.hpp>
@@ -675,7 +677,40 @@ namespace
 					if ((*sentItor).message.find("Take that!") != std::string::npos)
 						sawInChannel = true;
 				}
-				check(sawInChannel, "the spoken line is broadcast on the general channel, not just logged");
+				check(sawInChannel, "the spoken line is broadcast on the general channel, not just logged");			}
+
+			// The between-rounds scoreboard. Upstream raises its score
+			// screen from the client half of ShowScoreAction, which is
+			// compiled out here, so the port sat through the pause
+			// (RoundScoreTime, 5s) showing an empty battlefield.
+			{
+				check(!ScorchDroidScoreboard::get().showing,
+					"the scoreboard starts down");
+
+				ShowScoreAction roundScore(fixed(5), false);
+				roundScore.setScorchedContext(&server->getContext());
+				roundScore.init();
+				check(ScorchDroidScoreboard::get().showing,
+					"the end-of-round action raises the scoreboard");
+				check(!ScorchDroidScoreboard::get().finalScore,
+					"a round score is not flagged as the final score");
+
+				ScorchDroidScoreboard::hide();
+				ShowScoreAction finalScore(fixed(15), true);
+				finalScore.setScorchedContext(&server->getContext());
+				finalScore.init();
+				check(ScorchDroidScoreboard::get().showing &&
+					  ScorchDroidScoreboard::get().finalScore,
+					"the end-of-match action raises it flagged as the final score");
+
+				// The action's own simulate() is deliberately not driven
+				// here: past its timer it calls ServerState::scoreFinished(),
+				// which stimulates the round state machine the rest of this
+				// suite is running inside. The falling edge is one line next
+				// to that call; this leaves the state clean instead.
+				ScorchDroidScoreboard::hide();
+				check(!ScorchDroidScoreboard::get().showing,
+					"taking the scoreboard down leaves it down");
 
 			}
 		}

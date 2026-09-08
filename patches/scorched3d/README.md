@@ -119,3 +119,16 @@ work in a new file under `porting/` rather than in the submodule.
   flash (WeaponMuzzle only), a napalm fire (rate-limited, skipped on
   `<nosmoke>`), and a tank driving (tanks only, and only when the tank
   model sets `<movementsmoke>`).
+- `0016-android-remaining-visual-events.patch` - the last five effects
+  upstream draws and this port did not: the mushroom cloud, thrown debris,
+  the arena wall flash, the speech bubble over a tank that speaks, and the
+  floating damage number over a target that is hurt. Two traps documented
+  in the patch itself and worth knowing before writing another hook:
+  upstream's `!getServerMode()` guards exist to stop a *hosting client*
+  doing presentation twice and switch it off entirely on this port, and
+  `TargetLife::getFloatPosition()` is a mirror only maintained when
+  `!serverMode_`, so it reads (0,0,0) here.
+- `0017-android-between-rounds-scoreboard.patch` - `ShowScoreAction` holds
+  the game at the end of every round (`RoundScoreTime`) and of the match
+  (`ScoreTime`); upstream's client half of it raises the score table, so
+  without this the port sat through the pause showing nothing.

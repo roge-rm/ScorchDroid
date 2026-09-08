@@ -65,7 +65,7 @@ runs in seconds, which is why it, rather than an emulator, is where behaviour is
 
 - `third_party/scorched3d/` — upstream, as a submodule pinned to an exact commit. **Never edited
   directly.**
-- `patches/scorched3d/` — the fifteen patches applied to that checkout on every build, and the
+- `patches/scorched3d/` — the seventeen patches applied to that checkout on every build, and the
   tracked record of every change made to upstream. Most are *hooks*: upstream guards its
   presentation work behind `#ifndef S3D_SERVER`, and this build is one that *is* `S3D_SERVER` but
   still has a renderer and a speaker, so each patch adds the smallest possible `#else` beside an
