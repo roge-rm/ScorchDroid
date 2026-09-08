@@ -37,7 +37,7 @@ import androidx.compose.ui.unit.sp
  * change M9 is really about: until now the app *was* the game, the host/join
  * choice happened once at launch, and the only way out was to kill it.
  */
-enum class AppScreen { SPLASH, MENU, SINGLE_PLAYER, MULTIPLAYER, SETTINGS, ABOUT, GAME }
+enum class AppScreen { SPLASH, MENU, SINGLE_PLAYER, MULTIPLAYER, SETUP, SETTINGS, ABOUT, GAME }
 
 /** The palette the menu screens share, so they read as one thing. */
 private val MenuTop = Color(0xFF16213A)
