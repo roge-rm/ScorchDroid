@@ -118,6 +118,7 @@ class MainActivity : AppCompatActivity() {
                 onSkip = { submitMoveAsync(MoveType.SKIP) },
                 onDoneBuying = { submitMoveAsync(MoveType.FINISHED_BUY) },
                 onScores = { showScores() },
+                onCameraPresets = { showCameraPresets() },
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
             )
         }
@@ -852,12 +853,9 @@ class MainActivity : AppCompatActivity() {
         // Resigning ends your round, so it keeps a confirmation step rather
         // than firing off a single tap.
         val entries = listOf<Pair<String, () -> Unit>>(
-            "Scores and chat" to {
-                showScores()
-            },
-            "Camera view..." to {
-                showCameraPresets()
-            },
+            // Scores/chat and the camera views used to be here; they now
+            // hang off a long press on the message and camera buttons, which
+            // is where they belong - each extends the icon it sits on.
             "Game speed..." to {
                 showSimulationSpeed()
             },

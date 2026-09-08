@@ -49,6 +49,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Spacer
@@ -245,6 +248,7 @@ fun GameHud(
     onSkip: () -> Unit,
     onDoneBuying: () -> Unit,
     onScores: () -> Unit,
+    onCameraPresets: () -> Unit,
     onSendChat: (String) -> Unit,
 ) {
     // M6 parity: upstream's HUD_ITEMS toggle. Everything goes except one
@@ -318,13 +322,26 @@ fun GameHud(
             // than keeping a stale one on screen.
             HudIconButton(
                 icon = Icons.AutoMirrored.Filled.Chat,
-                description = "Send a message",
-                onClick = { state.chatComposing = true },
+                description = if (state.chatComposing) {
+                    "Close the message box (hold for scores and chat history)"
+                } else {
+                    "Send a message (hold for scores and chat history)"
+                },
+                // A toggle, not a one-way open: the button is the obvious
+                // thing to press to get rid of the box again, and the
+                // keyboard covers the Close link when it is up.
+                onClick = { state.chatComposing = !state.chatComposing },
+                onLongClick = onScores,
             )
             HudIconButton(
                 icon = if (state.cameraFollow) Icons.Filled.CenterFocusStrong else Icons.Filled.Public,
-                description = if (state.cameraFollow) "Camera: following your tank" else "Camera: free-fly",
+                description = if (state.cameraFollow) {
+                    "Camera: following your tank (hold for more views)"
+                } else {
+                    "Camera: free-fly (hold for more views)"
+                },
                 onClick = onToggleCamera,
+                onLongClick = onCameraPresets,
             )
         }
 
@@ -813,12 +830,40 @@ private fun HudIconButton(
     icon: ImageVector,
     description: String,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
-    FilledTonalIconButton(
-        onClick = onClick,
-        modifier = Modifier.padding(horizontal = 2.dp).size(44.dp),
+    // A long press opens the fuller version of whatever the button does -
+    // the message button's chat history, the camera button's preset list.
+    // Those belong on the icon they extend rather than buried in the
+    // overflow menu, and a long press costs the tap nothing.
+    if (onLongClick == null) {
+        FilledTonalIconButton(
+            onClick = onClick,
+            modifier = Modifier.padding(horizontal = 2.dp).size(44.dp),
+        ) {
+            Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
+        }
+        return
+    }
+
+    // FilledTonalIconButton takes only an onClick, so the long-press variant
+    // is the same surface with a combinedClickable of its own.
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        shape = CircleShape,
+        modifier = Modifier
+            .padding(horizontal = 2.dp)
+            .size(44.dp)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick,
+                role = Role.Button,
+            ),
     ) {
-        Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
+        }
     }
 }
 

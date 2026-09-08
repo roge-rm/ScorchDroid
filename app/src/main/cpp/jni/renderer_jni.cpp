@@ -331,6 +331,10 @@ namespace
 	int    surroundVertexCount = 0;
 	bool   surroundBuilt = false, surroundVisible = false;
 
+	// One-shot confirmations for the two effects that are hard to catch on
+	// screen - see where each is set. Cleared with the landscape.
+	bool loggedShieldHit = false, loggedParachute = false;
+
 	constexpr int kTerrainFloatsPerVertex = 8;  // pos(3) + normal(3) + uv(2)
 	std::vector<float> terrainHeights;          // kTerrainVerts1D^2, row-major by gz
 	std::vector<float> terrainWorldX, terrainWorldZ;
@@ -1068,6 +1072,8 @@ namespace
 			surroundVertexCount = 0;
 			surroundBuilt = false;
 			surroundVisible = false;
+			loggedShieldHit = false;
+			loggedParachute = false;
 			roofBuilt = false;
 			roofVisible = false;
 			skyBuilt = false;
@@ -2530,6 +2536,18 @@ namespace
 				break;
 			}
 			case ScorchDroidEffects::eShieldHit: {
+				// Logged once per landscape. This effect is the hardest one
+				// here to see on purpose - upstream exempts your own shots
+				// from your own shield (PhysicsParticleObject::
+				// shieldCollision returns false when the shot's owner is the
+				// target), so it needs someone else to hit a shield you have
+				// up - and "did that ever actually fire?" is otherwise
+				// unanswerable from a screenshot.
+				if (!loggedShieldHit) {
+					loggedShieldHit = true;
+					LOGI("Shield hit effect raised at (%.1f, %.1f, %.1f) radius %.1f",
+						 event.x, event.y, event.z, event.size);
+				}
 				// A ring of sparks on the shield surface, facing outward.
 				const float radius = std::max(event.size, 1.0f);
 				for (int p = 0; p < 18; p++) {
@@ -3639,6 +3657,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		bool parachuteOpen = false;
 		if (TargetFalling *falling = tank->getTargetState().getFalling()) {
 			parachuteOpen = (falling->getParachute() != nullptr);
+			// Same reasoning as the shield-hit log above: a parachute is
+			// only drawn while a tank is actually falling with one bought,
+			// which is a second or two per round at most.
+			if (parachuteOpen && !loggedParachute) {
+				loggedParachute = true;
+				LOGI("Parachute drawn for a falling tank");
+			}
 		}
 
 		tankInstances.push_back({
