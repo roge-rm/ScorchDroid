@@ -3331,8 +3331,54 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	beams.clear();
 	lastFrameSeconds = 0.0;
 
+	// Everything built once and cached must be forgotten here, because this
+	// function runs again whenever the EGL context is recreated - which
+	// happens every time the app is minimised and resumed, not only at
+	// startup. Every VAO, VBO and texture named below belonged to the
+	// context that has just gone away.
+	//
+	// This was a real bug: only terrain, the ground texture and the model
+	// cache were reset, so the procedural tree geometry (guarded by
+	// `treeVertexCount > 0`) kept its stale handles and drew garbage
+	// polygons across the battlefield after every resume - light grey on a
+	// snow map, dark green on a tropical one, which is what identified them
+	// as the trees. They survived a new round too, because nothing but a
+	// context recreate rebuilds them.
+	//
+	// The handles are *zeroed, never deleted*. A fresh context reissues
+	// names from 1, so calling glDeleteBuffers on a stale name here would
+	// destroy an unrelated object that happens to have been given the same
+	// number - a far nastier bug than the one being fixed.
 	terrainBuilt = false;
+	terrainVao = terrainVbo = terrainIbo = 0;
 	groundTextureBuilt = false;
+	groundTexture = 0;
+	groundLightBaked = false;
+	movementOverlayPainted = false;
+	paintedMovementVersion = 0;
+
+	treeVertexCount = 0;
+	treeVao = treeVbo = 0;
+
+	waterBuilt = false;
+	waterVisible = false;
+	waterVao = waterVbo = waterGridVao = waterGridVbo = waterShoreTexture = 0;
+
+	skyBuilt = false;
+	skyVao = skyVbo = 0;
+
+	cloudsBuilt = false;
+	cloudsVisible = false;
+	cloudVao = cloudVbo = cloudTexture = starTexture = sunTexture = 0;
+
+	roofBuilt = false;
+	roofVisible = false;
+	roofVao = roofVbo = roofIbo = roofTexture = roofSkirtVao = roofSkirtVbo = 0;
+
+	surroundBuilt = false;
+	surroundVisible = false;
+	surroundVao = surroundVbo = surroundTexture = 0;
+
 	g_modelCache.clear();
 	// Same reason as the model cache above: these name GL objects belonging
 	// to the context that has just gone away.
