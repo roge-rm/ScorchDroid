@@ -112,6 +112,7 @@ add_library(scorched_common STATIC
     ${ANDROID_PORTING_DIR}/ChatStore.cpp
     ${ANDROID_PORTING_DIR}/ScoreboardState.cpp
     ${ANDROID_PORTING_DIR}/GameSetup.cpp
+    ${ANDROID_PORTING_DIR}/PlayerProfile.cpp
     ${ANDROID_PORTING_DIR}/InstanceBuffer.cpp
     ${ANDROID_PORTING_DIR}/TreeGeometry.cpp
     ${ANDROID_PORTING_DIR}/SkyDescription.cpp

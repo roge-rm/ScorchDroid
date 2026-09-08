@@ -37,6 +37,10 @@ class MainActivity : AppCompatActivity() {
     private var appScreen by mutableStateOf(AppScreen.SPLASH)
     private var splashStatus by mutableStateOf("Starting...")
     private var licenseText by mutableStateOf("")
+
+    // M11: the player's own preferences, as opposed to a game's rules - see
+    // GameSettings. Created in onCreate, before anything reads a setting.
+    private lateinit var settings: GameSettings
     // The running game's tick loop, so quit-to-menu can stop it. Non-null
     // exactly while a game is running.
     private var gameJob: Job? = null
@@ -103,6 +107,7 @@ class MainActivity : AppCompatActivity() {
         hudState.statusText = NativeBridge.helloFromNative()
 
         surfaceHost = findViewById(R.id.game_surface_host)
+        settings = GameSettings(this)
 
         findViewById<ComposeView>(R.id.hud_compose_view).setContent {
             // M9: the system back gesture walks the menu back up a level.
@@ -160,7 +165,8 @@ class MainActivity : AppCompatActivity() {
                     dialog = hudState.dialog,
                     onBack = { cancelJoinFlow() },
                 )
-                AppScreen.SETTINGS -> SettingsPlaceholderScreen(
+                AppScreen.SETTINGS -> SettingsScreen(
+                    settings = settings,
                     onBack = { appScreen = AppScreen.MENU },
                 )
                 AppScreen.ABOUT -> AboutScreen(
@@ -220,6 +226,9 @@ class MainActivity : AppCompatActivity() {
                 splashStatus = "Failed to initialize engine data root"
                 return@launch
             }
+            // Only now: applyAll() crosses into the engine, which has just
+            // been given its data root.
+            settings.applyAll()
             licenseText = withContext(Dispatchers.IO) { readLicenseText() }
             appScreen = AppScreen.MENU
         }
@@ -285,6 +294,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun startGame() {
         if (gameJob != null) return
+        applySettingsToHud()
         attachGameSurface()
         appScreen = AppScreen.GAME
         gameJob = CoroutineScope(Dispatchers.Main).launch { startAsHost() }
@@ -322,10 +332,27 @@ class MainActivity : AppCompatActivity() {
             }
 
             // Connected, so there is now a game to draw.
+            applySettingsToHud()
             attachGameSurface()
             appScreen = AppScreen.GAME
             awaitJoinAndPlay()
         }
+    }
+
+    /**
+     * M11: copies the display-side settings into the HUD's own state.
+     *
+     * Copied rather than read through, so a composition never touches
+     * preferences: the HUD reads one object, and this is the single place the
+     * two are joined. Called when a game starts, which is the only time they
+     * can have changed - the settings screen is not reachable mid-game.
+     */
+    private fun applySettingsToHud() {
+        hudState.showNamePlates = settings.showNamePlates
+        hudState.showHealthBars = settings.showHealthBars
+        hudState.chatToastMillis = settings.chatToastSeconds * 1000L
+        hudState.leftHandMode = settings.leftHandMode
+        hudState.controlOpacity = settings.controlOpacity
     }
 
     /** Abandons a join that hasn't connected yet and returns to the menu. */
@@ -775,7 +802,11 @@ class MainActivity : AppCompatActivity() {
                 MotionEvent.ACTION_MOVE -> {
                     if (dragging && event.pointerCount == 1 && !scaleDetector.isInProgress) {
                         val dx = event.x - lastX
-                        val dy = event.y - lastY
+                        // M11: upstream's InvertMouse, for the one axis where
+                        // people genuinely disagree - dragging down to look up
+                        // is the flight-sim convention and feels wrong to
+                        // everyone else, and vice versa.
+                        val dy = (event.y - lastY) * (if (settings.invertDrag) -1f else 1f)
                         renderer.nativeCameraDrag(dx, dy)
                     }
                     if (panning && event.pointerCount >= 2) {
@@ -918,6 +949,11 @@ class MainActivity : AppCompatActivity() {
      * than in each, so a tap can't ray-cast twice.
      */
     private fun handleBattlefieldTap(screenX: Float, screenY: Float) {
+        // M11: with tap-to-aim off, a tap on the battlefield does nothing and
+        // the sliders are the only way to aim. Position-selecting weapons are
+        // the exception - Fuel and Teleport have no other way to choose a
+        // square, so turning aiming off must not take them with it.
+        if (!settings.tapToAim && hudState.positionSelectWeapon.isEmpty()) return
         CoroutineScope(Dispatchers.Main).launch {
             val hit = withContext(Dispatchers.Default) {
                 gameRenderer.nativePickTerrain(screenX, screenY)
