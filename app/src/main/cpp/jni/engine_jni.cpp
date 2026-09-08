@@ -60,6 +60,7 @@ std::mutex g_engineMutex;
 #include <coms/ComsChannelTextMessage.hpp>
 #include <ChatStore.h>
 #include <ScoreboardState.h>
+#include <GameSetup.h>
 #include <weapons/AccessoryStore.hpp>
 #include <weapons/AccessoryPart.hpp>
 #include <coms/ComsBuyAccessoryMessage.hpp>
@@ -324,6 +325,13 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
     LOGI("ScorchedServer::startServer -> %d", started);
     if (!started) return JNI_FALSE;
 
+    OptionsScorched &options = ScorchedServer::instance()->getOptionsGame();
+
+    // M10: the player's own choices from the setup screen - rounds, turns,
+    // wall type, money.
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    ScorchDroidSetup::applyTo(options);
+
     // Debug builds start rich, purely so testing does not have to play
     // several rounds to afford the thing being tested - a nuke to see the
     // mushroom cloud, a shield to see a shield hit. Gated on BuildConfig.DEBUG
@@ -333,21 +341,28 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
     // gameplay number, and it must never reach a release.
     if (debugBuild) {
         const int kDebugStartMoney = 100000;
-        OptionsScorched &options = ScorchedServer::instance()->getOptionsGame();
         const bool ok = options.getMainOptions().getStartMoneyEntry()
             .setValue(kDebugStartMoney);
-        // updateChangeSet() re-takes the snapshot that OptionsScorched keeps
-        // of the main options. Without it this write is undone the moment the
-        // first round starts: ServerStateNewGame calls commitChanges(), which
-        // copies that snapshot *back* over the main options, and the snapshot
-        // was taken inside startServer() - before this ran - so it still holds
-        // the file's 10000. The tank is then given 10000 by TankScore::
-        // newMatch() and the shop shows it, with the option looking innocently
-        // "changed" all the while.
-        options.updateChangeSet();
-        LOGI("Debug build: starting money set to %d (accepted=%d, reads back as %d)",
-             kDebugStartMoney, ok ? 1 : 0, options.getStartMoney());
+        LOGI("Debug build: starting money set to %d (accepted=%d)",
+             kDebugStartMoney, ok ? 1 : 0);
     }
+
+    // Once, after every write above, and outside the debug branch it used to
+    // live inside - a release build applies the setup screen's choices too,
+    // and having this inside `if (debugBuild)` would have reverted every one
+    // of them in exactly the builds players use.
+    //
+    // updateChangeSet() re-takes the snapshot OptionsScorched keeps of the
+    // main options. Without it these writes are undone the moment the first
+    // round starts: ServerStateNewGame calls commitChanges(), which copies
+    // that snapshot *back* over the main options, and the snapshot was taken
+    // inside startServer() - before any of this ran. The entries then still
+    // report themselves as "changed" while holding the file's values, which
+    // is as confusing as it sounds. testGameSetup fails without this line.
+    options.updateChangeSet();
+    LOGI("Game options applied: rounds=%d turns=%d money=%d",
+         options.getNoRounds(), options.getNoTurns(),
+         options.getStartMoney());
 
     int port = ScorchedServer::instance()->getOptionsGame().getPortNo();
     g_hostingPort = port;
@@ -1674,6 +1689,63 @@ Java_com_rm_scorchdroid_NativeBridge_stopGame(JNIEnv *env, jobject /* this */) {
     ScorchDroidLandscape::takeDirtyRegion(a, b, c, d);
 
     LOGI("stopGame: engine is idle, ready for a new game");
+}
+
+// M10: the game setup screen's options.
+//
+// Rows are "name|kind|value|min|max|step|choices|description", where choices is
+// a comma-separated list of "value=label" pairs for an enum and empty
+// otherwise, and description is last so it may contain anything. The labels are
+// upstream's own identifiers ("WallConcrete"); making them presentable is the
+// UI's job, not this layer's.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getSetupOptions(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    std::vector<ScorchDroidSetup::Option> options = ScorchDroidSetup::options();
+
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray((jsize) options.size(), stringClass, nullptr);
+    for (size_t i = 0; i < options.size(); i++) {
+        const ScorchDroidSetup::Option &option = options[i];
+        std::ostringstream choices;
+        for (size_t c = 0; c < option.choices.size(); c++) {
+            if (c > 0) choices << ",";
+            choices << option.choices[c].value << "=" << option.choices[c].label;
+        }
+        std::ostringstream row;
+        row << option.name << "|" << (int) option.kind << "|" << option.value << "|"
+            << option.minValue << "|" << option.maxValue << "|" << option.stepValue << "|"
+            << choices.str() << "|" << option.description;
+        jstring value = env->NewStringUTF(row.str().c_str());
+        env->SetObjectArrayElement(result, (jsize) i, value);
+        env->DeleteLocalRef(value);
+    }
+    return result;
+}
+
+// False when the option isn't one the setup screen offers, or when upstream's
+// own validation rejects the value - a bounded int outside its range, an enum
+// value that isn't one of its choices. The UI should treat that as "upstream
+// says no" rather than retrying.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setSetupOption(
+        JNIEnv *env, jobject /* this */, jstring jName, jstring jValue) {
+    const char *nameChars = env->GetStringUTFChars(jName, nullptr);
+    const char *valueChars = env->GetStringUTFChars(jValue, nullptr);
+    std::string name(nameChars ? nameChars : "");
+    std::string value(valueChars ? valueChars : "");
+    if (nameChars) env->ReleaseStringUTFChars(jName, nameChars);
+    if (valueChars) env->ReleaseStringUTFChars(jValue, valueChars);
+
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return ScorchDroidSetup::set(name, value) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Back to what the shipped config says.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_resetSetupOptions(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    ScorchDroidSetup::reset();
 }
 
 // The end-of-round scoreboard upstream raises by itself (ShowScoreAction,

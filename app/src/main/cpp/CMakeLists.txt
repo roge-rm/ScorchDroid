@@ -143,6 +143,7 @@ add_library(scorched_common STATIC
     porting/TargetModelStore.cpp
     porting/ChatStore.cpp
     porting/ScoreboardState.cpp
+    porting/GameSetup.cpp
     porting/InstanceBuffer.cpp
     porting/TreeGeometry.cpp
     porting/SkyDescription.cpp

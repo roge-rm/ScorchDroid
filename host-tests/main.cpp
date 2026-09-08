@@ -64,6 +64,7 @@
 #include <actions/TankSay.hpp>
 #include <actions/ShowScoreAction.hpp>
 #include <ScoreboardState.h>
+#include <GameSetup.h>
 #include <common/FixedVector4.hpp>
 #include <target/TargetDamage.hpp>
 #include <target/TargetState.hpp>
@@ -2070,6 +2071,109 @@ static void testServerRestart()
 	}
 }
 
+// M10: the game setup a player chooses before starting - rounds, turns, wall
+// type, money - and, more importantly, whether it survives contact with the
+// round that follows.
+//
+// The reading half is not where this breaks. The writing half is: an
+// OptionsGame value set after startServer() is silently undone at the first
+// round, because OptionsScorched snapshots the main options during startup and
+// ServerStateNewGame calls commitChanges(), which copies that snapshot back
+// over them. The entry then still reports itself as "changed" while holding
+// the file's value. That cost an afternoon on the debug money flag, so the
+// check below runs commitChanges() by hand - exactly what ServerStateNewGame
+// does - rather than asserting the value right after it was written, which
+// would pass whether or not the bug were present.
+static void testGameSetup()
+{
+	printf("game setup (M10: choosing rounds, wall type and the rest):\n");
+
+	ScorchDroidSetup::ensureLoaded("data/server.xml");
+	std::vector<ScorchDroidSetup::Option> options = ScorchDroidSetup::options();
+	check(!options.empty(), "the setup surface exposes some options");
+
+	bool sawRounds = false, sawWall = false;
+	for (size_t i = 0; i < options.size(); i++)
+	{
+		if (options[i].name == "NumberOfRounds")
+		{
+			sawRounds = true;
+			check(options[i].kind == ScorchDroidSetup::eBoundedInt,
+				"NumberOfRounds comes through as a bounded int, so the UI can draw a slider");
+			check(options[i].maxValue > options[i].minValue,
+				"...with a real range read from upstream, not invented here");
+			check(!options[i].description.empty(),
+				"...and upstream's own description, so the UI need not write its own");
+		}
+		if (options[i].name == "WallType")
+		{
+			sawWall = true;
+			check(options[i].kind == ScorchDroidSetup::eEnum,
+				"WallType comes through as an enum");
+			// Upstream terminates these arrays with an empty description; a
+			// mistake there would show up as a trailing blank choice.
+			bool sawConcrete = false, sawBlank = false;
+			for (size_t c = 0; c < options[i].choices.size(); c++)
+			{
+				if (options[i].choices[c].label == "WallConcrete") sawConcrete = true;
+				if (options[i].choices[c].label.empty()) sawBlank = true;
+			}
+			check(sawConcrete, "...carrying upstream's own choices");
+			check(!sawBlank, "...and stopping at the terminator rather than past it");
+		}
+	}
+	check(sawRounds && sawWall, "both a bounded int and an enum are exposed");
+
+	// Chosen relative to whatever the config file says rather than hardcoded,
+	// so the test still distinguishes "applied" from "unchanged" if the
+	// shipped default ever becomes the value being set.
+	std::string originalRounds;
+	int chosenRounds = 0;
+	for (size_t i = 0; i < options.size(); i++)
+	{
+		if (options[i].name != "NumberOfRounds") continue;
+		originalRounds = options[i].value;
+		chosenRounds = atoi(originalRounds.c_str()) + 1;
+		if (chosenRounds > options[i].maxValue) chosenRounds = options[i].minValue;
+	}
+	check(!originalRounds.empty() && chosenRounds != atoi(originalRounds.c_str()),
+		"picked a round count that differs from the shipped default");
+
+	// Validation is upstream's, inherited rather than reimplemented.
+	check(ScorchDroidSetup::set("NumberOfRounds", S3D::formatStringBuffer("%i", chosenRounds)),
+		"a value inside the range is accepted");
+	check(!ScorchDroidSetup::set("NumberOfRounds", "9999"),
+		"a value outside upstream's own range is refused");
+	check(!ScorchDroidSetup::set("NotAnOption", "1"),
+		"an option that isn't exposed is refused");
+	check(!ScorchDroidSetup::set("PortNo", "1234"),
+		"an option that exists but isn't exposed is refused - the curated list is the contract");
+
+	ScorchedServerSettingsOptions settings("data/server.xml", false, false);
+	bool setupServerStarted = ScorchedServer::startServer(settings, true, nullptr);
+	check(setupServerStarted, "a server starts to apply the setup to");
+	if (!setupServerStarted) return;
+
+	OptionsScorched &serverOptions = ScorchedServer::instance()->getOptionsGame();
+	ScorchDroidSetup::applyTo(serverOptions);
+	check(serverOptions.getNoRounds() == chosenRounds, "the chosen value reaches the server");
+
+	serverOptions.updateChangeSet();
+	// What ServerStateNewGame does at the start of every round.
+	serverOptions.commitChanges();
+	check(serverOptions.getNoRounds() == chosenRounds,
+		"and survives the first round rather than being reverted by commitChanges()");
+
+	ScorchDroidSetup::reset();
+	std::string afterReset;
+	std::vector<ScorchDroidSetup::Option> reloaded = ScorchDroidSetup::options();
+	for (size_t i = 0; i < reloaded.size(); i++)
+	{
+		if (reloaded[i].name == "NumberOfRounds") afterReset = reloaded[i].value;
+	}
+	check(afterReset == originalRounds, "reset() goes back to what the config file says");
+}
+
 int main(int argc, char **argv)
 {
 	// Upstream's own generic main() bootstrap (common/main.hpp) does this
@@ -2119,6 +2223,7 @@ int main(int argc, char **argv)
 	testRealTcpHostAndConnect();
 	testClientJoin();
 	testServerRestart();
+	testGameSetup();
 
 	printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
 		failures, failures == 1 ? "" : "s");

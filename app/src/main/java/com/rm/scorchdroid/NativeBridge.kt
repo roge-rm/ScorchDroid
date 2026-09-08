@@ -230,6 +230,24 @@ object NativeBridge {
     external fun stopGame()
 
     /**
+     * M10: the options the game setup screen offers, as rows of
+     * "name|kind|value|min|max|step|choices|description" - see
+     * [parseSetupOptions]. These are upstream's own OptionsGame entries, with
+     * upstream's own ranges and descriptions; nothing here invents a rule.
+     */
+    external fun getSetupOptions(): Array<String>
+
+    /**
+     * Chooses a value for one of them. False when the option isn't offered, or
+     * when upstream's own validation rejects the value (out of range, or not
+     * one of an enum's choices) - which the UI should report rather than retry.
+     */
+    external fun setSetupOption(name: String, value: String): Boolean
+
+    /** Back to the values the shipped config file specifies. */
+    external fun resetSetupOptions()
+
+    /**
      * Sends a chat message on a channel ("general" or "team"). Hosting, this
      * goes straight into the server's channel manager; joined, it is a
      * ComsChannelTextMessage to the host. False if there is no tank to speak
@@ -414,5 +432,66 @@ fun parseChatLines(rows: Array<String>): List<ChatLine> = rows.mapNotNull { row 
         channel = parts[1],
         who = parts[2],
         text = parts[3],
+    )
+}
+
+/**
+ * M10: one game-setup option, as [NativeBridge.getSetupOptions] reports it.
+ *
+ * [label] is upstream's identifier made presentable - "NumberOfRounds" becomes
+ * "Number Of Rounds", "WallConcrete" becomes "Concrete". Upstream writes these
+ * for a config file and a desktop options dialog; a phone screen wants them
+ * spaced out and without their type prefix.
+ */
+data class SetupOption(
+    val name: String,
+    val kind: SetupKind,
+    val value: String,
+    val minValue: Int,
+    val maxValue: Int,
+    val stepValue: Int,
+    val choices: List<SetupChoice>,
+    val description: String,
+) {
+    val label: String get() = humanise(name)
+}
+
+data class SetupChoice(val value: Int, val rawLabel: String) {
+    /** "WallConcrete" -> "Concrete", "TurnSequentialRandom" -> "Sequential Random". */
+    val label: String get() = humanise(rawLabel.removePrefix("Wall").removePrefix("Turn").removePrefix("Wind"))
+        .ifEmpty { humanise(rawLabel) }
+}
+
+enum class SetupKind { BOUNDED_INT, INT, BOOL, ENUM }
+
+/** Splits an upstream identifier into words: "NumberOfRounds" -> "Number Of Rounds". */
+private fun humanise(identifier: String): String =
+    identifier.replace(Regex("(?<=[a-z0-9])(?=[A-Z])"), " ").trim()
+
+fun parseSetupOptions(rows: Array<String>): List<SetupOption> = rows.mapNotNull { row ->
+    // Eight fields, description last so it may contain anything - including
+    // the pipes and commas the earlier fields use as separators.
+    val parts = row.split("|", limit = 8)
+    if (parts.size != 8) return@mapNotNull null
+    val kind = when (parts[1].toIntOrNull()) {
+        0 -> SetupKind.BOUNDED_INT
+        1 -> SetupKind.INT
+        2 -> SetupKind.BOOL
+        3 -> SetupKind.ENUM
+        else -> return@mapNotNull null
+    }
+    SetupOption(
+        name = parts[0],
+        kind = kind,
+        value = parts[2],
+        minValue = parts[3].toIntOrNull() ?: 0,
+        maxValue = parts[4].toIntOrNull() ?: 0,
+        stepValue = parts[5].toIntOrNull() ?: 1,
+        choices = parts[6].split(",").filter { it.isNotBlank() }.mapNotNull { choice ->
+            val split = choice.split("=", limit = 2)
+            if (split.size != 2) null
+            else SetupChoice(split[0].toIntOrNull() ?: return@mapNotNull null, split[1])
+        },
+        description = parts[7],
     )
 }
