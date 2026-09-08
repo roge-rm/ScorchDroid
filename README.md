@@ -1,16 +1,12 @@
 # ScorchDroid
 
 ScorchDroid is an Android port of [Scorched3D](https://www.scorched3d.co.uk/), the 3D
-artillery game, based on the classic Scorched Earth. It is built on
-[bberberov/scorched3d](https://github.com/bberberov/scorched3d), a maintained fork of the original
-source.
+artillery game, based on the classic Scorched Earth. 
+It is built on [bberberov/scorched3d](https://github.com/bberberov/scorched3d), a maintained fork of the original source.
 
-This port uses Scorched3D's ballistics, weapons, terrain deformation, economy, AI, and network protocol 
-code along with the original rules. The interface is fresh, made with Jetpack Compose and OpenGLES3
-designed for a touch phone screen instead of a PC with mouse and keyboard. 
+This port uses Scorched3D's ballistics, weapons, terrain deformation, economy, AI, and network protocol code along with the original rules. The interface is fresh, made with Jetpack Compose and OpenGLES3 designed for a touch phone screen instead of a PC with mouse and keyboard. 
 
-It is in a playable state now with most of the graphics and gameplay implemented but will be iterated upon
-until it meets parity (or as close as we can get) with the original game.
+It is in a playable state now with most of the graphics and gameplay implemented but will be iterated upon until it meets parity (or as close as we can get) with the original game.
 
 Cheers, enjoy! rm
 
