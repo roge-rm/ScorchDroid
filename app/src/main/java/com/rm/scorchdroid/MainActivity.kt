@@ -62,6 +62,11 @@ class MainActivity : AppCompatActivity() {
     // starting turret rotation yet (see the tick loop). One-shot, so it
     // never fights the player's own adjustments afterwards.
     private var aimSeeded = false
+    // M6 parity: chat polling state. The version is the cheap "did anything
+    // arrive" check; the line id is how far the HUD has already been told
+    // about, so a message it is already timing is never restarted.
+    private var lastChatVersion = 0
+    private var lastChatLineId = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -112,6 +117,8 @@ class MainActivity : AppCompatActivity() {
                 onUndo = { revertToLastAim() },
                 onSkip = { submitMoveAsync(MoveType.SKIP) },
                 onDoneBuying = { submitMoveAsync(MoveType.FINISHED_BUY) },
+                onScores = { showScores() },
+                onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
             )
         }
 
@@ -308,6 +315,23 @@ class MainActivity : AppCompatActivity() {
             if (!aimSeeded) {
                 val aim = withContext(Dispatchers.Default) { NativeBridge.getMyAim() }
                 if (seedAimFromEngine(aim)) aimSeeded = true
+            }
+            // M6 parity: new chat. The version check keeps this to one cheap
+            // int most ticks - the strings are only crossed over the JNI
+            // boundary when something was actually said.
+            val chatVersion = withContext(Dispatchers.Default) { NativeBridge.getChatVersion() }
+            if (chatVersion != lastChatVersion) {
+                lastChatVersion = chatVersion
+                val fresh = withContext(Dispatchers.Default) {
+                    parseChatLines(NativeBridge.getChatLines(lastChatLineId))
+                }
+                if (fresh.isNotEmpty()) {
+                    lastChatLineId = fresh.last().id
+                    // Each gets its own arrival stamp here, which is what
+                    // lets the HUD expire them independently.
+                    val now = System.currentTimeMillis()
+                    hudState.chatToasts = hudState.chatToasts + fresh.map { ChatToast(it, now) }
+                }
             }
             kotlinx.coroutines.delay(100)
         }
@@ -712,10 +736,57 @@ class MainActivity : AppCompatActivity() {
     // are genuinely rare. Everything a player reaches for regularly (fire,
     // undo, skip, done-buying, defenses, shop, weapon) is a direct button
     // on the HUD instead, so common actions never cost an extra tap.
+    // M6 parity: the score / player list (upstream's SHOW_SCORE_DIALOG),
+    // with the chat history under it. Every number is read straight off
+    // TankScore, which this build already keeps - nothing here is simulated
+    // or estimated. Refreshed while open so it tracks the round rather than
+    // freezing at the moment it was opened.
+    private fun showScores() {
+        val dialog = HudDialog.Scores(
+            entries = emptyList(),
+            roundInfo = "",
+            chat = emptyList(),
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+        hudState.dialog = dialog
+
+        CoroutineScope(Dispatchers.Main).launch {
+            while (hudState.dialog === dialog) {
+                val players = withContext(Dispatchers.Default) {
+                    parsePlayerList(NativeBridge.getPlayerList())
+                }
+                val info = withContext(Dispatchers.Default) { NativeBridge.getRoundInfo() }
+                // afterId 0 = the whole log the native store still holds
+                // (bounded at 100 lines, see ChatStore.cpp).
+                val chat = withContext(Dispatchers.Default) {
+                    parseChatLines(NativeBridge.getChatLines(0))
+                }
+                dialog.entries = players
+                dialog.roundInfo = info
+                dialog.chat = chat
+                delay(1000)
+            }
+        }
+    }
+
+    // Chat send. Off the main thread because it takes the engine mutex, which
+    // the simulation tick holds for the duration of a step.
+    private fun sendChatAsync(channel: String, text: String) {
+        CoroutineScope(Dispatchers.Main).launch {
+            val sent = withContext(Dispatchers.Default) { NativeBridge.sendChat(channel, text) }
+            if (!sent) {
+                hudState.statusText = "Could not send that message"
+            }
+        }
+    }
+
     private fun showActionsMenu() {
         // Resigning ends your round, so it keeps a confirmation step rather
         // than firing off a single tap.
         val entries = listOf<Pair<String, () -> Unit>>(
+            "Scores and chat" to {
+                showScores()
+            },
             "Resign round..." to {
                 hudState.dialog = HudDialog.ListChoice(
                     title = "Resign this round?",

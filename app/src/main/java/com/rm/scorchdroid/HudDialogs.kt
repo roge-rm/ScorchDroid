@@ -28,6 +28,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -89,6 +95,25 @@ sealed class HudDialog {
     ) : HudDialog() {
         var title by mutableStateOf(title)
         var items by mutableStateOf(items)
+    }
+
+    /**
+     * M6 parity: the score / player list (upstream's SHOW_SCORE_DIALOG).
+     * Its own dialog rather than a [ListChoice] because it is a table, not
+     * a list of choices - nothing here is tappable, and squeezing six
+     * numbers per player into one padded string was unreadable at phone
+     * width. [entries] is Compose state so an open dialog keeps up with the
+     * round rather than freezing at the moment it was opened.
+     */
+    class Scores(
+        entries: List<PlayerEntry>,
+        roundInfo: String,
+        chat: List<ChatLine>,
+        val onCancel: () -> Unit,
+    ) : HudDialog() {
+        var entries by mutableStateOf(entries)
+        var roundInfo by mutableStateOf(roundInfo)
+        var chat by mutableStateOf(chat)
     }
 
     data class ManualAddress(
@@ -355,6 +380,14 @@ fun HudDialogHost(dialog: HudDialog) {
             dismissButton = { TextButton(onClick = dialog.onCancel) { Text("Close") } },
         )
 
+        is HudDialog.Scores -> AlertDialog(
+            onDismissRequest = dialog.onCancel,
+            title = { Text(scoresTitle(dialog.roundInfo)) },
+            text = { ScoresContent(dialog) },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = dialog.onCancel) { Text("Close") } },
+        )
+
         is HudDialog.ManualAddress -> {
             var text by remember { mutableStateOf("") }
             AlertDialog(
@@ -373,4 +406,105 @@ fun HudDialogHost(dialog: HudDialog) {
             )
         }
     }
+}
+
+/** "Round 2 of 5 - turn 3 of 10", from getRoundInfo()'s four numbers. */
+private fun scoresTitle(roundInfo: String): String {
+    val parts = roundInfo.split("|")
+    if (parts.size != 4) return "Scores"
+    val (round, rounds, turn, turns) = parts
+    return "Round $round/$rounds · turn $turn/$turns"
+}
+
+@Composable
+private fun ScoresContent(dialog: HudDialog.Scores) {
+    Column(modifier = Modifier.heightIn(max = 460.dp)) {
+        Row(modifier = Modifier.padding(bottom = 4.dp)) {
+            ScoreCell("Player", weight = 3f, header = true)
+            ScoreCell("Score", weight = 1.2f, header = true)
+            ScoreCell("Kills", weight = 1f, header = true)
+            ScoreCell("Wins", weight = 1f, header = true)
+            ScoreCell("Money", weight = 1.5f, header = true)
+        }
+        HorizontalDivider()
+        LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
+            items(dialog.entries, key = { it.playerId }) { entry ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(vertical = 3.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(3f).padding(end = 6.dp),
+                    ) {
+                        // The tank's own engine colour, so a row can be
+                        // matched to a tank on the battlefield at a glance -
+                        // the name plates use the same one.
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .background(Color(entry.colorArgb), CircleShape),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            // No "(bot)" suffix: the engine already
+                            // prefixes an AI's name with "(Bot) ", so adding
+                            // one produced "(Bot) Fred (bot)".
+                            text = entry.name,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = if (entry.isMe) FontWeight.Bold else FontWeight.Normal,
+                            // A dead player is still in the round and still
+                            // scores, so they are dimmed rather than hidden.
+                            color = if (entry.alive) {
+                                MaterialTheme.colorScheme.onSurface
+                            } else {
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    ScoreCell(entry.score.toString(), weight = 1.2f)
+                    ScoreCell(entry.kills.toString(), weight = 1f)
+                    ScoreCell(entry.wins.toString(), weight = 1f)
+                    ScoreCell("$${entry.money}", weight = 1.5f)
+                }
+            }
+        }
+
+        // The chat history lives here rather than in a dialog of its own:
+        // the HUD stack is transient by design, so this is the only place to
+        // catch up on what was said, and it is the same "how is the game
+        // going" question the scores answer.
+        if (dialog.chat.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            HorizontalDivider()
+            Text(
+                text = "Chat",
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
+            )
+            LazyColumn(modifier = Modifier.heightIn(max = 140.dp)) {
+                items(dialog.chat, key = { it.id }) { line ->
+                    Text(
+                        text = if (line.who.isEmpty()) line.text else "${line.who}: ${line.text}",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.padding(vertical = 1.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.ScoreCell(text: String, weight: Float, header: Boolean = false) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        fontWeight = if (header) FontWeight.Bold else FontWeight.Normal,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(weight),
+    )
 }
