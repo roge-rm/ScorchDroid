@@ -1,4 +1,5 @@
 #include <ClientContext.hpp>
+#include <PlayerProfile.h>
 
 #include <cstring>
 #include <net/NetServerTCP3.hpp>
@@ -228,7 +229,10 @@ bool ClientContext::processMessage(NetMessage &message, const char *messageType,
 		// (see ServerConnectAuthHandler::processMessageInternal, already
 		// investigated for engine_jni.cpp's addHumanTank()).
 		ComsConnectAuthMessage reply;
-		reply.setUserName("ScorchDroid");
+		// The player's own name, not a constant: the host names the joining
+		// tank from this, so "ScorchDroid" is what everyone in the game used
+		// to be called.
+		reply.setUserName(ScorchDroidProfile::name().c_str());
 		reply.setPassword("");
 		reply.setUniqueId("");
 		reply.setSUI("");

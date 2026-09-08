@@ -229,6 +229,14 @@ class GameHudState {
     // speed != 1.0), because a permanent "1x" would be noise.
     var speedLabel by mutableStateOf("")
 
+    // M11 settings, mirrored here so the HUD reads one object rather than
+    // reaching for preferences mid-composition. Set from GameSettings.
+    var showNamePlates by mutableStateOf(true)
+    var showHealthBars by mutableStateOf(true)
+    var chatToastMillis by mutableStateOf(CHAT_TOAST_MILLIS)
+    var leftHandMode by mutableStateOf(false)
+    var controlOpacity by mutableFloatStateOf(1.0f)
+
     /**
      * M9: back to a fresh game's state, for quit-to-menu.
      *
@@ -412,6 +420,10 @@ fun GameHud(
                 // edge still belongs to the system, so buttons sitting in
                 // that band would fight it.
                 .windowInsetsPadding(WindowInsets.navigationBars)
+                // M11: the whole bottom control strip fades together, so a
+                // player who wants more battlefield gets it without losing
+                // any control.
+                .alpha(state.controlOpacity)
                 .padding(bottom = 10.dp),
         ) {
             // Row 1: aim + fire. The weapon button keeps its text because,
@@ -510,7 +522,14 @@ fun GameHud(
         // the entire visible track is the live touch/drag area.
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.align(Alignment.CenterStart).padding(start = 4.dp),
+            // M11: left-hand mode swaps which edge each slider sits on.
+            // Elevation is the one adjusted most while aiming, so it belongs
+            // under the thumb doing the work; power is the coarser control.
+            modifier = if (state.leftHandMode) {
+                Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)
+            } else {
+                Modifier.align(Alignment.CenterStart).padding(start = 4.dp)
+            }.alpha(state.controlOpacity),
         ) {
             FadingReadout("${state.elevationDegrees.toInt()}°", state.elevationDegrees)
             // Up increases, down decreases - the buttons bracket a vertical
@@ -530,7 +549,11 @@ fun GameHud(
         // Power - mirrors the elevation slider on the opposite edge.
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.align(Alignment.CenterEnd).padding(end = 4.dp),
+            modifier = if (state.leftHandMode) {
+                Modifier.align(Alignment.CenterStart).padding(start = 4.dp)
+            } else {
+                Modifier.align(Alignment.CenterEnd).padding(end = 4.dp)
+            }.alpha(state.controlOpacity),
         ) {
             FadingReadout("${(state.powerFraction * 100).toInt()}%", state.powerFraction)
             // A step here is one percentage point, so the button matches
@@ -579,7 +602,7 @@ fun GameHud(
 
         // Name plates and health bars, positioned from the renderer's own
         // projection. Drawn before the dialog host so a modal covers them.
-        TankPlates(state.tankOverlays)
+        TankPlates(state.tankOverlays, state.showNamePlates, state.showHealthBars)
         FloatingLabels(state.floatingLabels)
 
         HudDialogHost(state.dialog)
@@ -626,8 +649,8 @@ private fun wrapDegrees(degrees: Float): Float = ((degrees % 360f) + 360f) % 360
  * life bar, so that is what this does.
  */
 @Composable
-private fun TankPlates(overlays: List<TankOverlay>) {
-    if (overlays.isEmpty()) return
+private fun TankPlates(overlays: List<TankOverlay>, showNames: Boolean, showHealth: Boolean) {
+    if (overlays.isEmpty() || (!showNames && !showHealth)) return
     val density = LocalDensity.current
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -643,20 +666,23 @@ private fun TankPlates(overlays: List<TankOverlay>) {
                     .offset(x = xDp - 60.dp, y = yDp - 28.dp)
                     .width(120.dp),
             ) {
-                Text(
-                    text = overlay.name,
-                    // Full colour either way: the only non-sNormal tank that
-                    // reaches here is one still buying, and upstream draws
-                    // its name in the player's own colour like any other.
-                    color = overlay.color,
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (showNames) {
+                    Text(
+                        text = overlay.name,
+                        // Full colour either way: the only non-sNormal tank
+                        // that reaches here is one still buying, and upstream
+                        // draws its name in the player's own colour like any
+                        // other.
+                        color = overlay.color,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 // Bars only while alive - a destroyed tank has no health to
                 // report, and upstream likewise draws life only for a
                 // playing tank.
-                if (overlay.alive) {
+                if (overlay.alive && showHealth) {
                     Spacer(Modifier.height(2.dp))
                     StatBar(overlay.life, Color(0xFF4CAF50))
                     // Second bar only when a shield is actually up, matching
@@ -944,7 +970,7 @@ private fun ChatOverlay(
             delay(250)
             val now = System.currentTimeMillis()
             state.chatToasts = state.chatToasts.filter {
-                now - it.shownAtMillis < CHAT_TOAST_MILLIS
+                now - it.shownAtMillis < state.chatToastMillis
             }
         }
     }
@@ -956,7 +982,7 @@ private fun ChatOverlay(
     ) {
         // Newest first, so the eye lands on the latest without hunting.
         state.chatToasts.sortedByDescending { it.line.id }.forEach { toast ->
-            ChatToastRow(toast)
+            ChatToastRow(toast, state.chatToastMillis)
         }
 
         if (state.chatComposing) {
@@ -974,13 +1000,13 @@ private fun ChatOverlay(
 }
 
 @Composable
-private fun ChatToastRow(toast: ChatToast) {
+private fun ChatToastRow(toast: ChatToast, toastMillis: Long) {
     // Fade the last second rather than vanishing, so a message leaving does
     // not read as a glitch.
     var visible by remember(toast.line.id) { mutableStateOf(true) }
     val alpha by animateFloatAsState(if (visible) 1f else 0f, label = "chatFade")
     LaunchedEffect(toast.line.id) {
-        delay(CHAT_TOAST_MILLIS - 800)
+        delay(toastMillis - 800)
         visible = false
     }
 

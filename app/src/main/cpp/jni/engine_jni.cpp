@@ -61,6 +61,7 @@ std::mutex g_engineMutex;
 #include <ChatStore.h>
 #include <ScoreboardState.h>
 #include <GameSetup.h>
+#include <PlayerProfile.h>
 #include <weapons/AccessoryStore.hpp>
 #include <weapons/AccessoryPart.hpp>
 #include <coms/ComsBuyAccessoryMessage.hpp>
@@ -242,7 +243,7 @@ static void addHumanTank() {
     TankAddSimAction *simAction = new TankAddSimAction(
         tankId, kHumanDestinationId,
         "", "", "", 0,
-        LANG_STRING("Player"), "");
+        LANG_STRING(ScorchDroidProfile::name()), "");
     server->getServerSimulator().addSimulatorAction(simAction);
     LOGI("addHumanTank: queued player id=%u", tankId);
 }
@@ -1810,6 +1811,18 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_resetSetupOptions(JNIEnv *env, jobject /* this */) {
     ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
     ScorchDroidSetup::reset();
+}
+
+// M11: the name this player's tank carries, both when hosting and when
+// joining someone else's game. Returns the name actually in force, which is
+// the previous one if the given name was empty.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setPlayerName(
+        JNIEnv *env, jobject /* this */, jstring jName) {
+    const char *nameChars = env->GetStringUTFChars(jName, nullptr);
+    std::string name(nameChars ? nameChars : "");
+    if (nameChars) env->ReleaseStringUTFChars(jName, nameChars);
+    return env->NewStringUTF(ScorchDroidProfile::setName(name).c_str());
 }
 
 // The end-of-round scoreboard upstream raises by itself (ShowScoreAction,

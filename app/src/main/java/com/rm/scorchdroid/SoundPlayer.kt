@@ -18,7 +18,16 @@ object SoundPlayer {
         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
         .build()
 
+    /**
+     * M11: the sound setting. Checked here rather than at every call site,
+     * because the caller is the tick loop draining a queue and has no business
+     * knowing about preferences.
+     */
+    @Volatile
+    var enabled: Boolean = true
+
     fun play(filePath: String) {
+        if (!enabled) return
         val file = File(filePath)
         if (!file.exists()) return
 

@@ -27,6 +27,7 @@
 #include <android/log.h>
 #include <vector>
 #include <sstream>
+#include <atomic>
 #include <mutex>
 #include <algorithm>
 #include <cmath>
@@ -412,6 +413,12 @@ namespace
 	};
 	std::vector<FloatingLabel> floatingLabels;
 	std::vector<FloatingLabel> g_labelOverlays;   // published snapshot
+
+	// M11: renderer options from the settings screen. Atomic because the UI
+	// thread writes them while the GL thread reads them every frame; plain
+	// bools would be a data race for no gain.
+	std::atomic<bool> g_showTrees{true};
+	std::atomic<bool> g_showFog{true};
 	std::mutex g_labelMutex;
 	// Bounded: a multi-target blast raises one number per target hurt, and
 	// nothing downstream depends on seeing every one.
@@ -4542,7 +4549,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	float fogColor[3];
 	currentFogColor(fogColor);
 	glUniform3f(terrainFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-	glUniform1f(terrainFogDensityLoc, skyDescription.fogDensity);
+	glUniform1f(terrainFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 	if (groundTexture != 0) {
 		glActiveTexture(GL_TEXTURE0);
 		glBindTexture(GL_TEXTURE_2D, groundTexture);
@@ -4792,7 +4799,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float waterFog[3];
 		currentFogColor(waterFog);
 		glUniform3f(waterFogColorLoc, waterFog[0], waterFog[1], waterFog[2]);
-		glUniform1f(waterFogDensityLoc, skyDescription.fogDensity);
+		glUniform1f(waterFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 		glUniform2f(waterMapSizeLoc, mapWidthUnits, mapHeightUnits);
 		if (waterShoreTexture != 0) {
 			glActiveTexture(GL_TEXTURE0);
@@ -4840,7 +4847,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	glUseProgram(meshProgram);
 	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
 	glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-	glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
+	glUniform1f(meshFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 
 	// Landscape targets first: they are scenery, so they should be behind
 	// everything that matters, and drawing them before the tanks keeps the
@@ -4909,7 +4916,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glUniformMatrix4fv(instancedViewProjLoc, 1, GL_FALSE, mvp.m);
 			glUniform3f(instancedLightDirLoc, 0.4f, 0.82f, 0.35f);
 			glUniform3f(instancedFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-			glUniform1f(instancedFogDensityLoc, skyDescription.fogDensity);
+			glUniform1f(instancedFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 
 			for (auto &entry : buckets) {
 				const GLuint sourceVbo = entry.first;
@@ -4965,12 +4972,18 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 		// M6: the trees, in their own textured alpha-cut pass - one draw per
 		// species present, which is a handful.
-		if (!treeBuckets.empty() && treeProgram != 0) {
+		//
+		// M11: skipping the pass is the whole of "trees off". The geometry
+		// stays built, so turning them back on costs nothing and does not
+		// wait for a new round - and a landscape scatters up to two thousand
+		// of them, so this is the setting most likely to buy a weak device
+		// its frame rate back.
+		if (g_showTrees && !treeBuckets.empty() && treeProgram != 0) {
 			glUseProgram(treeProgram);
 			glUniformMatrix4fv(treeViewProjLoc, 1, GL_FALSE, mvp.m);
 			glUniform3f(treeLightDirLoc, 0.4f, 0.82f, 0.35f);
 			glUniform3f(treeFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-			glUniform1f(treeFogDensityLoc, skyDescription.fogDensity);
+			glUniform1f(treeFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 			glUniform1i(treeAtlasLoc, 0);
 			glActiveTexture(GL_TEXTURE0);
 			// Foliage is a one-sided shell built from fans; seen from the
@@ -5648,6 +5661,15 @@ Java_com_rm_scorchdroid_GameRenderer_nativeSetCameraPreset(JNIEnv *, jobject, ji
 // speech bubbles. Rows are "screenX|screenY|onScreen|fade|r|g|b|text"; text
 // is last so it may contain pipes. Drawn in Compose because this renderer
 // has no font, exactly as the tank name plates are.
+// M11: renderer options from the settings screen. Takes effect on the next
+// frame - nothing here is baked into a buffer.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setRenderOptions(
+        JNIEnv *env, jobject, jboolean showTrees, jboolean showFog) {
+    g_showTrees = (showTrees == JNI_TRUE);
+    g_showFog = (showFog == JNI_TRUE);
+}
+
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeGetFloatingLabels(JNIEnv *env, jobject) {
     std::vector<FloatingLabel> snapshot;

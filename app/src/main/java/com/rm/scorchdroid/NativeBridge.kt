@@ -253,6 +253,19 @@ object NativeBridge {
      * passed to [setSelectedMod] - the engine does not validate them, and a
      * name with no directory behind it fails at load time.
      */
+    /**
+     * M11: the name this player's tank carries, hosting or joining. Returns
+     * the name actually in force - the engine refuses an empty one and keeps
+     * the previous name, so the caller should store what comes back.
+     */
+    external fun setPlayerName(name: String): String
+
+    /**
+     * M11: renderer options that cost frame rate. Applied on the next frame;
+     * no game restart needed.
+     */
+    external fun setRenderOptions(showTrees: Boolean, showFog: Boolean)
+
     external fun getAvailableMods(): Array<String>
 
     external fun getSelectedMod(): String
