@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -24,10 +25,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -58,11 +65,21 @@ fun GameSetupScreen(
     mods: List<String>,
     selectedMod: String,
     onModChange: (String) -> Unit,
+    bots: List<BotOption>,
+    selectedBot: String,
+    onBotChange: (String) -> Unit,
     onChange: (SetupOption, String) -> Unit,
     onReset: () -> Unit,
     onStart: () -> Unit,
     onBack: () -> Unit,
 ) {
+    // M18: the tabs come from the options themselves - each one says which
+    // group it belongs to (see GameSetup.cpp's exposed list), in the order
+    // they are declared. So adding an option there puts it on a tab here
+    // with nothing to change in this file.
+    val groups = options.map { it.group }.distinct()
+    var tab by remember(groups) { mutableStateOf(groups.firstOrNull() ?: "") }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -77,13 +94,10 @@ fun GameSetupScreen(
                 .widthIn(max = 560.dp)
                 .fillMaxSize()
                 .align(Alignment.TopCenter)
-                .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 28.dp),
         ) {
-            // Back on the title row, like Settings and About: this page
-            // scrolls for several screens, and someone who opens it and
-            // changes their mind should not have to scroll past every option
-            // to leave.
+            // Back on the title row, like Settings and About: a page that
+            // scrolls for several screens means scrolling back down to leave.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -97,20 +111,12 @@ fun GameSetupScreen(
                 )
                 TextButton(onClick = onBack) { Text("Back", color = SetupAccent) }
             }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "These are Scorched3D's own settings, with its own limits.",
-                color = SetupAccent,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(10.dp))
 
             // Start sits at the top, not at the foot. The defaults are a
             // playable game, so the common case is opening this screen and
-            // wanting to play - and making that person scroll past every
-            // option to reach the button taxes them for a choice they did not
-            // want to make. Anyone who does want to change something scrolls
-            // down, changes it, and presses Start on the way back up.
+            // wanting to play - and making that person hunt for the button
+            // taxes them for a choice they did not want to make.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -128,27 +134,120 @@ fun GameSetupScreen(
                 }
                 TextButton(onClick = onReset) { Text("Reset to defaults", color = SetupAccent) }
             }
+            Spacer(Modifier.height(6.dp))
 
-            HorizontalDivider(
-                color = Color.White.copy(alpha = 0.12f),
-                modifier = Modifier.padding(top = 16.dp, bottom = 14.dp),
-            )
+            TabRow(
+                selectedTabIndex = groups.indexOf(tab).coerceAtLeast(0),
+                containerColor = Color.Transparent,
+                contentColor = SetupAccent,
+                divider = { HorizontalDivider(color = Color.White.copy(alpha = 0.12f)) },
+            ) {
+                groups.forEach { group ->
+                    Tab(
+                        selected = group == tab,
+                        onClick = { tab = group },
+                        selectedContentColor = SetupAccent,
+                        unselectedContentColor = Color.White.copy(alpha = 0.55f),
+                        // A shade smaller than the settings tabs, and never
+                        // wrapped: four equal shares of a phone's width is
+                        // not quite enough for "Weapons" at title size, and a
+                        // tab label broken across two lines looks like a
+                        // mistake.
+                        text = {
+                            Text(
+                                group,
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                            )
+                        },
+                    )
+                }
+            }
 
-            options.forEach { option ->
-                SetupRow(option, onChange)
-                HorizontalDivider(
-                    color = Color.White.copy(alpha = 0.08f),
-                    modifier = Modifier.padding(vertical = 10.dp),
+            // Keyed on the tab so each starts at its own top.
+            val scroll = remember(tab) { ScrollState(0) }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(scroll)
+                    .padding(top = 10.dp),
+            ) {
+                Text(
+                    text = "These are Scorched3D's own settings, with its own limits.",
+                    color = SetupAccent,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(14.dp))
+
+                // The mod decides what every other option means - which
+                // weapons, tanks, landscapes and bots exist - so it leads the
+                // first tab. Only when there is a choice to make: with just
+                // upstream's base game installed a one-item picker is noise.
+                if (tab == groups.firstOrNull() && mods.size > 1) {
+                    ModRow(mods, selectedMod, onModChange)
+                }
+
+                options.filter { it.group == tab }.forEach { option ->
+                    SetupRow(option, onChange)
+                    HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.08f),
+                        modifier = Modifier.padding(vertical = 10.dp),
+                    )
+                }
+
+                // M18: who fills the other slots. Beside the player count,
+                // because the two are one question - how many opponents, and
+                // how good.
+                if (tab == "Players" && bots.isNotEmpty()) {
+                    BotRow(bots, selectedBot, onBotChange)
+                }
+
+                Spacer(Modifier.height(24.dp))
+            }
+        }
+    }
+}
+
+/**
+ * M18: which AI fills the slots that are not the player's.
+ *
+ * Upstream has no difficulty setting. It gives each of its twenty-four player
+ * slots a PlayerType naming an AI, and the AIs themselves are the difficulty:
+ * the base game ships Moron ("a very stupid computer controlled player") up
+ * through Shooter, Tosser, Chooser and Shark to Cyborg ("a deadly computer
+ * controlled player. Ouch!!"). Those descriptions are upstream's own and are
+ * the only place it says how hard a bot is, so they are what this shows.
+ *
+ * Every slot gets the same choice here, which is what upstream's own
+ * single-player files do - singleeasy is two Morons, singlenormal three
+ * Choosers and a Random.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BotRow(bots: List<BotOption>, selected: String, onChange: (String) -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text("Bots", color = Color.White, style = MaterialTheme.typography.titleSmall)
+        Text(
+            text = bots.firstOrNull { it.name == selected }?.description
+                ?: "Which computer player fills the other places",
+            color = Color.White.copy(alpha = 0.55f),
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Spacer(Modifier.height(6.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            bots.forEach { bot ->
+                FilterChip(
+                    selected = bot.name == selected,
+                    onClick = { onChange(bot.name) },
+                    label = { Text(bot.name, style = MaterialTheme.typography.bodySmall) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = Color.White.copy(alpha = 0.06f),
+                        labelColor = Color.White.copy(alpha = 0.75f),
+                        selectedContainerColor = SetupAccent.copy(alpha = 0.3f),
+                        selectedLabelColor = Color.White,
+                    ),
                 )
             }
-
-            // Last, and only when there is a choice to make: with just
-            // upstream's base game installed a one-item picker is noise.
-            if (mods.size > 1) {
-                ModRow(mods, selectedMod, onModChange)
-            }
-
-            Spacer(Modifier.height(24.dp))
         }
     }
 }

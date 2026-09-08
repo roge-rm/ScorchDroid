@@ -53,6 +53,10 @@ class MainActivity : AppCompatActivity() {
     private var setupOptions by mutableStateOf<List<SetupOption>>(emptyList())
     private var setupTitle by mutableStateOf("New Game")
     private var availableMods by mutableStateOf<List<String>>(emptyList())
+    // M18: the bots the chosen mod offers, and which one fills the slots.
+    // Re-read whenever the mod changes - a mod brings its own AIs.
+    private var availableBots by mutableStateOf<List<BotOption>>(emptyList())
+    private var selectedBot by mutableStateOf("")
     // M12: non-null exactly while a tutorial game is running.
     private var tutorial by mutableStateOf<TutorialState?>(null)
     private var selectedMod by mutableStateOf("none")
@@ -171,12 +175,23 @@ class MainActivity : AppCompatActivity() {
                     onModChange = {
                         NativeBridge.setSelectedMod(it)
                         selectedMod = NativeBridge.getSelectedMod()
+                        // The new mod's bots, which are rarely the same ones.
+                        availableBots = parseBots(NativeBridge.getBots())
+                        selectedBot = NativeBridge.getBotType()
+                    },
+                    bots = availableBots,
+                    selectedBot = selectedBot,
+                    onBotChange = {
+                        NativeBridge.setBotType(it)
+                        selectedBot = NativeBridge.getBotType()
                     },
                     onChange = { option, value -> changeSetupOption(option, value) },
                     onReset = {
                         NativeBridge.resetSetupOptions()
                         setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
                         selectedMod = NativeBridge.getSelectedMod()
+                        availableBots = parseBots(NativeBridge.getBots())
+                        selectedBot = NativeBridge.getBotType()
                     },
                     onStart = { startGame() },
                     onBack = { appScreen = AppScreen.MENU },
@@ -342,6 +357,8 @@ class MainActivity : AppCompatActivity() {
         // startServer() is far too late for it.
         availableMods = NativeBridge.getAvailableMods().toList()
         selectedMod = NativeBridge.getSelectedMod()
+        availableBots = parseBots(NativeBridge.getBots())
+        selectedBot = NativeBridge.getBotType()
         appScreen = AppScreen.SETUP
     }
 

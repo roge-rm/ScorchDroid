@@ -1777,7 +1777,8 @@ Java_com_rm_scorchdroid_NativeBridge_getSetupOptions(JNIEnv *env, jobject /* thi
             choices << option.choices[c].value << "=" << option.choices[c].label;
         }
         std::ostringstream row;
-        row << option.name << "|" << (int) option.kind << "|" << option.value << "|"
+        row << option.name << "|" << option.group << "|"
+            << (int) option.kind << "|" << option.value << "|"
             << option.minValue << "|" << option.maxValue << "|" << option.stepValue << "|"
             << choices.str() << "|" << option.description;
         jstring value = env->NewStringUTF(row.str().c_str());
@@ -1834,6 +1835,41 @@ Java_com_rm_scorchdroid_NativeBridge_getAvailableMods(JNIEnv *env, jobject /* th
         env->DeleteLocalRef(value);
     }
     return result;
+}
+
+// M18: the bots the chosen mod offers, as "name|description" - upstream's
+// own words, which in the base game are its difficulty ladder. Led by
+// "Random", which is not an AI but an instruction to pick one.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getBots(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    std::vector<ScorchDroidSetup::Bot> bots = ScorchDroidSetup::bots(".");
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray((jsize) bots.size(), stringClass, nullptr);
+    for (size_t i = 0; i < bots.size(); i++) {
+        std::ostringstream row;
+        row << bots[i].name << "|" << bots[i].description;
+        jstring value = env->NewStringUTF(row.str().c_str());
+        env->SetObjectArrayElement(result, (jsize) i, value);
+        env->DeleteLocalRef(value);
+    }
+    return result;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getBotType(JNIEnv *env, jobject /* this */) {
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return env->NewStringUTF(ScorchDroidSetup::botType().c_str());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setBotType(
+        JNIEnv *env, jobject /* this */, jstring jName) {
+    const char *nameChars = env->GetStringUTFChars(jName, nullptr);
+    std::string name(nameChars ? nameChars : "");
+    if (nameChars) env->ReleaseStringUTFChars(jName, nameChars);
+    ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    return ScorchDroidSetup::setBotType(name) ? JNI_TRUE : JNI_FALSE;
 }
 
 // M14: every ready-made game every installed mod offers, in mod order and
