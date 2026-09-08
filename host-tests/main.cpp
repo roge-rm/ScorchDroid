@@ -64,6 +64,7 @@
 #include <actions/TankSay.hpp>
 #include <actions/ShowScoreAction.hpp>
 #include <ScoreboardState.h>
+#include <common/FixedVector4.hpp>
 #include <target/TargetDamage.hpp>
 #include <target/TargetState.hpp>
 #include <weapons/Weapon.hpp>
@@ -711,6 +712,41 @@ namespace
 				ScorchDroidScoreboard::hide();
 				check(!ScorchDroidScoreboard::get().showing,
 					"taking the scoreboard down leaves it down");
+			}
+
+			// The renderer takes a tank's hull bearing, and a moving
+			// target's, out of TargetLife's quaternion, because that is the
+			// only place either is kept on this port: getFloatRotMatrix()
+			// is a mirror maintained solely when !serverMode_. That reading
+			// makes two assumptions worth pinning here rather than in the
+			// renderer, where neither can be checked without a GPU - the
+			// component order (w, x, y, z) and the axis (engine up). Get
+			// either wrong and every tank and jet points somewhere
+			// arbitrary, which is how they came to face backwards once
+			// already.
+			{
+				Tank *turnTank = nullptr;
+				std::map<unsigned int, Tank *> &turnTanks = server->getTargetContainer().getTanks();
+				if (!turnTanks.empty()) turnTank = turnTanks.begin()->second;
+				check(turnTank != nullptr, "found a tank to turn");
+				if (turnTank)
+				{
+					const float degrees[] = { 0.0f, 30.0f, 90.0f, -45.0f, 179.0f };
+					bool allMatched = true;
+					for (int d = 0; d < 5; d++)
+					{
+						turnTank->getLife().setRotation(fixed(true,
+							(int) (degrees[d] * 10000.0f)));
+						FixedVector4 &q = turnTank->getLife().getQuaternion();
+						const float readBack =
+							2.0f * atan2f(q[3].asFloat(), q[0].asFloat());
+						const float expected = degrees[d] * (float) M_PI / 180.0f;
+						if (fabsf(readBack - expected) > 0.01f) allMatched = false;
+					}
+					check(allMatched,
+						"a target's yaw reads back out of its quaternion as the angle it was set to");
+					turnTank->getLife().setRotation(fixed(0));
+				}
 
 			}
 		}
