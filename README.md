@@ -10,14 +10,14 @@ It is in a playable state now with most of the graphics and gameplay implemented
 
 Cheers, enjoy! rm
 
-<img src="docs/shot-gameplay.png" alt="ScorchDroid mid-round: a pine-covered island seen from above and behind the player's red tank, coastline and open water beyond, with the angle and elevation sliders either side and the weapon and Fire buttons below" width="200" /> <img src="docs/shot-shop.png" alt="The shop, showing the Weapons tab with Baby Digger, Baby Missile, Baby Nuke and the rest priced against the player's $10000" width="200" /> <img src="docs/shot-scores.png" alt="The score table for round 1 of 5, turn 9 of 15, listing the player and a bot with their score, kills, wins and money, with the chat history below showing the bot's taunts and the player's reply" width="200" /> <img src="docs/shot-camera.png" alt="The Action camera view, looking down on the whole island from above" width="200" />
+<img src="docs/shot-menu.png" alt="The ScorchDroid main menu: the title over Single Player, Multiplayer, Settings and About" width="200" /> <img src="docs/shot-setup.png" alt="The New Game setup screen, with sliders for the number of rounds and turns and chips for the turn type and wall type, each labelled with Scorched3D's own description" width="200" /> <img src="docs/shot-gameplay.png" alt="ScorchDroid mid-round: a pine-covered island seen from above and behind the player's red tank, the sea reflecting the sky beyond the shoreline, with the angle and elevation sliders either side and the weapon and Fire buttons below" width="200" /> <img src="docs/shot-scores.png" alt="The score table for round 1 of 5, turn 8 of 15, listing the player and a bot with their score, kills, wins and money, with the chat history below showing the bot's taunts and the player's reply" width="200" />
 
 ## Features
 
 - The real Scorched3D simulation, not an approximation: upstream's weapons, accessories, terrain
   destruction, wind, shields, parachutes, tank movement, and bot AI.
 - A 3D landscape rendered from the real heightmap, with the generated ground texture, water with
-  shoreline foam and moving waves, a sky with the landscape's own colour gradient, clouds, sun and
+  shoreline foam, moving waves and a Fresnel-weighted sky reflection, a sky with the landscape's own colour gradient, clouds, sun and
   stars, distance fog, baked sun shadows, trees and scenery, and cavern roofs.
 - Weapon effects driven by the simulation's own events — explosions, napalm, lasers, lightning,
   shield hits, sky flashes, teleports, smoke, mushroom clouds, thrown debris, arena wall flashes,
@@ -31,6 +31,10 @@ Cheers, enjoy! rm
 - A main menu — single player, multiplayer, and an About screen carrying the GPL notice and the
   exact upstream commit the build came from. Games can be left and started again without
   restarting the app.
+- A setup screen before each game: rounds, turns, turn type, wall type, starting money, shot and
+  buying time, and wind — Scorched3D's own options, with its own limits, read from the engine
+  rather than redeclared.
+- Mod support, including the bundled Apocalypse mod with its own weapons, landscapes and models.
 
 ## Requirements
 
@@ -61,7 +65,7 @@ Game logic is verified on the host, not the emulator:
 cd host-tests/build && cmake .. && make && ./host_tests
 ```
 
-That target builds the same `src/common` + `src/server` sources natively and runs ~135 checks
+That target builds the same `src/common` + `src/server` sources natively and runs over 200 checks
 against the real engine — including a full two-process client/host join over real TCP sockets. It
 runs in seconds, which is why it, rather than an emulator, is where behaviour is pinned down.
 
