@@ -1,5 +1,5 @@
 diff --git a/src/common/engine/ActionController.cpp b/src/common/engine/ActionController.cpp
-index 92dfd898..ef08c6a3 100644
+index 92dfd898..b88c0c01 100644
 --- a/src/common/engine/ActionController.cpp
 +++ b/src/common/engine/ActionController.cpp
 @@ -23,6 +23,10 @@
@@ -13,7 +13,7 @@ index 92dfd898..ef08c6a3 100644
  #include <list>
  
  ActionController::ActionController() :
-@@ -195,6 +199,44 @@ void ActionController::draw()
+@@ -195,6 +199,52 @@ void ActionController::draw()
  	}
  }
  
@@ -22,7 +22,7 @@ index 92dfd898..ef08c6a3 100644
 +	std::vector<FixedVector> &explosionPositions,
 +	std::vector<unsigned int> *shotPlayerIds,
 +	std::vector<FixedVector> *shotVelocities,
-+	std::vector<unsigned int> *shotWeaponAccessoryIds)
++	std::vector<WeaponProjectile *> *shotWeapons)
 +{
 +	for (int i = 0; i < actions_.actionCount; i++)
 +	{
@@ -38,15 +38,23 @@ index 92dfd898..ef08c6a3 100644
 +			// ... and its velocity, so the renderer can point the
 +			// projectile mesh along its actual flight path.
 +			if (shotVelocities) shotVelocities->push_back(shot->getPhysics().getVelocity());
-+			// ... and the firing weapon's accessory id. Upstream picks the
++			// ... and the weapon the shot itself holds. Upstream picks the
 +			// projectile mesh from the weapon first and only falls back to
 +			// the tank's own projectilemodel (see Accessory::getWeaponMesh),
-+			// so the renderer needs the weapon to match that precedence.
-+			if (shotWeaponAccessoryIds)
-+			{
-+				Accessory *parent = shot->getWeapon() ? shot->getWeapon()->getParent() : nullptr;
-+				shotWeaponAccessoryIds->push_back(parent ? parent->getAccessoryId() : 0);
-+			}
++			// and the flame and smoke trails come from the same object
++			// (MissileActionRenderer), so the renderer needs it to match
++			// either.
++			//
++			// This is deliberately not the accessory's own action, which is
++			// what an earlier version of this passed back as an id. A
++			// weapon assembled out of other weapons - a WeaponMulti of
++			// missiles, an aimed-over wrapper - has an action that is not a
++			// WeaponProjectile at all, so casting it to one read a
++			// different class's memory as if it were this one. It survived
++			// while only bools were read out of it and aborted the moment
++			// something asked for the projectile scale, which is parsed
++			// from an expression.
++			if (shotWeapons) shotWeapons->push_back(shot->getWeapon());
 +		}
 +		else if (action->getActionType() == "Explosion")
 +		{
@@ -59,10 +67,10 @@ index 92dfd898..ef08c6a3 100644
  {
  	// Ensure any new actions are added
 diff --git a/src/common/engine/ActionController.hpp b/src/common/engine/ActionController.hpp
-index 1b05466b..b6ff5b28 100644
+index 1b05466b..bce9c7ef 100644
 --- a/src/common/engine/ActionController.hpp
 +++ b/src/common/engine/ActionController.hpp
-@@ -22,8 +22,10 @@
+@@ -22,11 +22,15 @@
  #define __INCLUDE_ActionController_hpp_INCLUDE__
  
  #include <map>
@@ -73,7 +81,12 @@ index 1b05466b..b6ff5b28 100644
  
  class ScorchedContext;
  
-@@ -51,6 +53,25 @@ public:
++class WeaponProjectile;
++
+ class ActionController
+ {
+ public:
+@@ -51,6 +55,30 @@ public:
  	void simulate( fixed frameTime, fixed time );
  	void draw();
  
@@ -89,12 +102,17 @@ index 1b05466b..b6ff5b28 100644
 +	// shotPlayerIds, if given, receives the firing tank's player id per
 +	// shot (parallel to shotPositions), so the renderer can draw each shot
 +	// with that tank's own projectile model.
++	// shotWeapons, if given, receives the WeaponProjectile that fired each
++	// shot - the one the shot itself holds, not the accessory it came from.
++	// Those are not the same object for a weapon built out of others (a
++	// WeaponMulti of missiles, say), and only this one carries the
++	// projectile's model, scale and trail settings.
 +	void getShotAndExplosionPositions(
 +		std::vector<FixedVector> &shotPositions,
 +		std::vector<FixedVector> &explosionPositions,
 +		std::vector<unsigned int> *shotPlayerIds = nullptr,
 +		std::vector<FixedVector> *shotVelocities = nullptr,
-+		std::vector<unsigned int> *shotWeaponAccessoryIds = nullptr );
++		std::vector< WeaponProjectile* >* shotWeapons = nullptr );
 +
  protected:
  	class ActionList
