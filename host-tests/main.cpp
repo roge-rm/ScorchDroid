@@ -61,6 +61,11 @@
 #include <landscapedef/LandscapeTex.hpp>
 #include <EffectEventQueue.h>
 #include <actions/ShieldHit.hpp>
+#include <actions/TankSay.hpp>
+#include <target/TargetDamage.hpp>
+#include <target/TargetState.hpp>
+#include <weapons/Weapon.hpp>
+#include <lang/LangResource.hpp>
 #include <landscapedef/LandscapeDefinitions.hpp>
 #include <common/OptionsGame.hpp>
 #include <ClientContext.hpp>
@@ -573,6 +578,89 @@ namespace
 						"the shield-hit effect is sized from the shield, not left at zero");
 				}
 				check(sawShieldHit, "a real ShieldHit action raises an effect event for the renderer");
+			}
+		}
+
+		// The two *text* effects - the floating damage number over a hurt
+		// target and the speech bubble over a tank that just spoke - go
+		// through the same queue but are raised from code upstream gates on
+		// !getServerMode(). That gate is right for upstream, where a client
+		// process runs its own context alongside a local server context and
+		// would otherwise do the work twice. It is wrong here: this port has
+		// no such second context running these, so the gate silently
+		// switched both effects off on the device while every ungated effect
+		// (explosions, debris, wall flashes) worked. Both are checked
+		// against the server context deliberately - that is the context the
+		// app runs them on.
+		{
+			ScorchDroidEffects::drain();
+
+			Tank *hurtTank = nullptr;
+			std::map<unsigned int, Tank *> &damageTanks = server->getTargetContainer().getTanks();
+			if (!damageTanks.empty()) hurtTank = damageTanks.begin()->second;
+			check(hurtTank != nullptr, "found a tank to hurt");
+			Accessory *missile =
+				server->getAccessoryStore().findByPrimaryAccessoryName("Baby Missile");
+			check(missile != nullptr, "found a weapon to attribute the damage to");
+			if (hurtTank && missile)
+			{
+				// The shield raised just above would absorb this and leave
+				// nothing to report.
+				hurtTank->getShield().setCurrentShield(nullptr);
+				hurtTank->getTargetState().setDisplayDamage(true);
+
+				FixedVector velocity;
+				WeaponFireContext fireContext(hurtTank->getPlayerId(), 0, 0, velocity, false, false);
+				TargetDamage::damageTarget(server->getContext(),
+					(Weapon *) missile->getAction(), hurtTank->getPlayerId(),
+					fireContext, fixed(17), false, false, false);
+
+				std::vector<ScorchDroidEffects::EffectEvent> effects = ScorchDroidEffects::drain();
+				bool sawDamage = false;
+				for (size_t i = 0; i < effects.size(); i++)
+				{
+					if (effects[i].type != ScorchDroidEffects::eDamage) continue;
+					sawDamage = true;
+					check(fabsf(effects[i].value - 17.0f) < 0.01f,
+						"the damage event carries the amount, which is the whole point of the number");
+					// The scatter upstream applies is +-2.5 per axis, so
+					// anything further out than that is not this tank. Worth
+					// asserting rather than assuming: upstream reads the
+					// position from getFloatPosition(), a mirror that
+					// TargetLife only maintains when !serverMode_, so on
+					// this port it was a constant (0,0,0) and every number
+					// was drawn in the corner of the map.
+					FixedVector &hurtPos = hurtTank->getLife().getTargetPosition();
+					check(fabsf(effects[i].x - hurtPos[0].asFloat()) <= 2.5f &&
+						  fabsf(effects[i].y - hurtPos[1].asFloat()) <= 2.5f &&
+						  fabsf(effects[i].z - hurtPos[2].asFloat()) <= 2.5f,
+						"the damage number is raised over the tank that was hurt, not at the origin");
+				}
+				check(sawDamage, "damaging a tank raises a floating damage number for the HUD");
+			}
+
+			ScorchDroidEffects::drain();
+			if (hurtTank)
+			{
+				TankSay say(hurtTank->getPlayerId(), LANG_STRING("Take that!"));
+				say.setScorchedContext(&server->getContext());
+				say.init();
+
+				std::vector<ScorchDroidEffects::EffectEvent> effects = ScorchDroidEffects::drain();
+				bool sawTalk = false;
+				for (size_t i = 0; i < effects.size(); i++)
+				{
+					if (effects[i].type != ScorchDroidEffects::eTalk) continue;
+					sawTalk = true;
+					// Same trap as the damage number above: the bubble must
+					// sit over the tank, not at the origin.
+					FixedVector &turret = hurtTank->getLife().getTankTurretPosition();
+					check(fabsf(effects[i].x - turret[0].asFloat()) < 0.01f &&
+						  fabsf(effects[i].y - turret[1].asFloat()) < 0.01f &&
+						  fabsf(effects[i].z - turret[2].asFloat()) < 0.01f,
+						"the speech bubble is raised over the speaking tank's turret");
+				}
+				check(sawTalk, "a tank saying something raises a speech-bubble event for the HUD");
 			}
 		}
 
