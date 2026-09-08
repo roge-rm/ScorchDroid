@@ -316,6 +316,18 @@ class MainActivity : AppCompatActivity() {
                 val aim = withContext(Dispatchers.Default) { NativeBridge.getMyAim() }
                 if (seedAimFromEngine(aim)) aimSeeded = true
             }
+            // M6 parity: the simulation-speed multiplier, shown only when
+            // it is not 1x - upstream's SpeedChange draws it on the same
+            // condition.
+            val speed = withContext(Dispatchers.Default) { NativeBridge.getSimulationSpeed() }
+            val speedParts = speed.split("|")
+            val num = speedParts.getOrNull(0)?.toIntOrNull() ?: 1
+            val den = speedParts.getOrNull(1)?.toIntOrNull() ?: 1
+            hudState.speedLabel = when {
+                num == den -> ""
+                den == 1 -> "Speed: ${num}x"
+                else -> "Speed: 1/${den}x"
+            }
             // M6 parity: new chat. The version check keeps this to one cheap
             // int most ticks - the strings are only crossed over the JNI
             // boundary when something was actually said.
@@ -769,6 +781,40 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // M6 parity: simulation speed (upstream's SIMULATION_SPEED_* keys).
+    // The seven upstream offers, no more: this is upstream's own
+    // Simulator::setFast, so the set of speeds is its set, not a range
+    // invented here.
+    private fun showSimulationSpeed() {
+        val speeds = listOf(
+            "1/8 speed" to (1 to 8),
+            "1/4 speed" to (1 to 4),
+            "1/2 speed" to (1 to 2),
+            "Normal speed" to (1 to 1),
+            "2x speed" to (2 to 1),
+            "4x speed" to (4 to 1),
+            "8x speed" to (8 to 1),
+        )
+        hudState.dialog = HudDialog.ListChoice(
+            title = "Game speed",
+            items = speeds.map { it.first },
+            cancelLabel = "Cancel",
+            onSelect = { index ->
+                val (numerator, denominator) = speeds[index].second
+                CoroutineScope(Dispatchers.Main).launch {
+                    val ok = withContext(Dispatchers.Default) {
+                        NativeBridge.setSimulationSpeed(numerator, denominator)
+                    }
+                    // Joined clients follow the host's pace - say so rather
+                    // than letting the tap look like it did nothing.
+                    if (!ok) hudState.statusText = "Only the host can change the game speed"
+                }
+                hudState.dialog = HudDialog.None
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+    }
+
     // M6 parity: upstream's camera presets (TargetCamera::CamType). The
     // camera *button* stays the quick free/follow toggle - it is the one
     // control reached mid-aim - so the fixed framings live here instead of
@@ -811,6 +857,13 @@ class MainActivity : AppCompatActivity() {
             },
             "Camera view..." to {
                 showCameraPresets()
+            },
+            "Game speed..." to {
+                showSimulationSpeed()
+            },
+            (if (hudState.hudHidden) "Show HUD" else "Hide HUD") to {
+                hudState.hudHidden = !hudState.hudHidden
+                hudState.dialog = HudDialog.None
             },
             "Resign round..." to {
                 hudState.dialog = HudDialog.ListChoice(

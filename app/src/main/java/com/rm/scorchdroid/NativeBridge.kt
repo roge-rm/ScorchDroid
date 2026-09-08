@@ -233,6 +233,17 @@ object NativeBridge {
 
     /** Bumped on every new chat line, so the HUD can poll one int. */
     external fun getChatVersion(): Int
+
+    /**
+     * M6 parity: simulation speed (upstream's SIMULATION_SPEED_* keys).
+     * A fraction rather than a float because the engine's clock is
+     * fixed-point and 1/8 has an exact representation there. Host only -
+     * a joined client follows the host's pace (see the native comment).
+     */
+    external fun setSimulationSpeed(numerator: Int, denominator: Int): Boolean
+
+    /** The current speed as "numerator|denominator". */
+    external fun getSimulationSpeed(): String
 }
 
 /**
