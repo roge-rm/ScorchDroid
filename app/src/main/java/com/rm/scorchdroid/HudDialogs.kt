@@ -406,9 +406,43 @@ private fun scoresTitle(roundInfo: String): String {
     return "Round $round/$rounds · turn $turn/$turns"
 }
 
+/**
+ * M17: upstream's team colours and names, from TankColorGenerator. Teams are
+ * numbered 1-4 by the engine and it gives each a fixed colour; a tank on a
+ * team wears it instead of its own (Tank::getColor), so these are the colours
+ * already on the battlefield.
+ */
+private val TeamNames = listOf("Red", "Blue", "Green", "Yellow")
+private val TeamColors = listOf(
+    Color(0xFFFF0000), Color(0xFF004DFF), Color(0xFF00FF00), Color(0xFFFFFF00),
+)
+
 @Composable
 private fun ScoresContent(dialog: HudDialog.Scores) {
     Column(modifier = Modifier.heightIn(max = 460.dp)) {
+        // M17: the team totals, which are the score that decides a team game
+        // - upstream's own score dialog leads with them for the same reason.
+        // Shown only when there are teams: with Teams at 1 every tank is on
+        // team 0 and this is an empty row.
+        val teamScores = dialog.entries
+            .filter { it.team in 1..TeamNames.size }
+            .groupBy { it.team }
+            .mapValues { (_, players) -> players.sumOf { it.score } }
+        if (teamScores.isNotEmpty()) {
+            Row(modifier = Modifier.padding(bottom = 6.dp)) {
+                teamScores.entries.sortedByDescending { it.value }.forEach { (team, total) ->
+                    Text(
+                        text = "${TeamNames[team - 1]} $total",
+                        color = TeamColors[team - 1],
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(end = 12.dp),
+                    )
+                }
+            }
+            HorizontalDivider()
+            Spacer(Modifier.height(4.dp))
+        }
         Row(modifier = Modifier.padding(bottom = 4.dp)) {
             ScoreCell("Player", weight = 3f, header = true)
             ScoreCell("Score", weight = 1.2f, header = true)

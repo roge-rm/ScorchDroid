@@ -2144,6 +2144,56 @@ static void testGameSetup()
 	}
 	check(sawRounds && sawWall, "both a bounded int and an enum are exposed");
 
+	// M17: the options that were unreachable until now. Named individually
+	// rather than counted, because the failure this guards against is one of
+	// them quietly disappearing - a typo in the exposed list costs an option
+	// with nothing on screen to say so.
+	{
+		const char *expected[] = {
+			"PlayerLives", "Teams", "TeamBallance", "StartArmsLevel", "EndArmsLevel",
+			"WeaponSpeed", "Gravity", "ResignMode", nullptr,
+		};
+		std::string missing;
+		for (int i = 0; expected[i]; i++)
+		{
+			bool found = false;
+			for (size_t o = 0; o < options.size(); o++)
+			{
+				if (options[o].name == expected[i]) found = true;
+			}
+			if (!found) missing += std::string(missing.empty() ? "" : ", ") + expected[i];
+		}
+		check(missing.empty(),
+			missing.empty() ? "every option M17 adds is exposed" :
+				("options missing from the setup screen: " + missing).c_str());
+
+		// Teams is what makes a team game reachable at all, so it gets its
+		// own check that the value actually takes.
+		check(ScorchDroidSetup::set("Teams", "2"), "teams can be turned on");
+		std::string teams;
+		std::vector<ScorchDroidSetup::Option> withTeams = ScorchDroidSetup::options();
+		for (size_t o = 0; o < withTeams.size(); o++)
+		{
+			if (withTeams[o].name == "Teams") teams = withTeams[o].value;
+		}
+		check(teams == "2", "...and the engine holds the choice");
+		check(!ScorchDroidSetup::set("Teams", "9"),
+			"...while upstream's own range refuses a fifth team");
+
+		// Upstream retires options by flagging them, not by deleting them,
+		// so they still read as ordinary bounded ints and enums. Exposing
+		// one would put a control on screen that changes nothing.
+		bool sawDepricated = false;
+		for (size_t o = 0; o < options.size(); o++)
+		{
+			if (options[o].name == "MaxArmsLevel" ||
+				options[o].name == "ScoreType" ||
+				options[o].name == "AutoBallanceTeams") sawDepricated = true;
+		}
+		check(!sawDepricated, "no deprecated option reaches the setup screen");
+		ScorchDroidSetup::reset();
+	}
+
 	// Chosen relative to whatever the config file says rather than hardcoded,
 	// so the test still distinguishes "applied" from "unchanged" if the
 	// shipped default ever becomes the value being set.

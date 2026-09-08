@@ -519,7 +519,13 @@ data class SetupOption(
     val choices: List<SetupChoice>,
     val description: String,
 ) {
-    val label: String get() = humanise(name)
+    val label: String get() = when (name) {
+        // Upstream's own spelling, which is a typo it has carried for
+        // twenty years. The option name has to keep it - that is the key in
+        // every config file ever written - but the label does not.
+        "TeamBallance" -> "Team Balance"
+        else -> humanise(name)
+    }
 }
 
 data class SetupChoice(val value: Int, val rawLabel: String) {
@@ -529,6 +535,7 @@ data class SetupChoice(val value: Int, val rawLabel: String) {
         // "WindChangeSomething", and stripping only "Wind" leaves every one of
         // them starting with a "Change" that the row's own label already says.
         rawLabel.removePrefix("Wall").removePrefix("Turn")
+            .removePrefix("TeamBallance").removePrefix("Resign")
             .removePrefix("WindChange").removePrefix("Wind")
     ).ifEmpty { humanise(rawLabel) }
 }
