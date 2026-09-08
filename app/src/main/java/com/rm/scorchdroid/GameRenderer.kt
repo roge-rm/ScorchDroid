@@ -64,6 +64,13 @@ class GameRenderer : GLSurfaceView.Renderer {
     // tank") - see renderer_jni.cpp. Returns the new mode (true = follow).
     external fun nativeToggleCameraMode(): Boolean
 
+    /**
+     * M6 parity: selects one of upstream's camera presets
+     * (TargetCamera::CamType). See [CameraPreset]. A drag drops back out of
+     * a fixed preset, so this is a framing, not a mode lock.
+     */
+    external fun nativeSetCameraPreset(preset: Int)
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         nativeOnSurfaceCreated()
     }
@@ -75,4 +82,20 @@ class GameRenderer : GLSurfaceView.Renderer {
     override fun onDrawFrame(gl: GL10?) {
         nativeOnDrawFrame()
     }
+}
+
+/**
+ * The camera presets, matching renderer_jni.cpp's OrbitCamera::Preset. FREE
+ * and FOLLOW are this port's own two - the camera button's states - and the
+ * rest are upstream's own fixed framings of the current tank
+ * (TargetCamera::CamType).
+ */
+enum class CameraPreset(val label: String) {
+    FREE("Free look"),
+    FOLLOW("Follow your tank"),
+    TOP("Top down"),
+    BEHIND("Above and behind"),
+    TANK("From the tank"),
+    ACTION("Action"),
+    SHOT("Follow the shot"),
 }
