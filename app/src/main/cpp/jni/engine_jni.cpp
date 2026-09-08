@@ -298,7 +298,8 @@ static void promoteHumanToPlaying(ScorchedServer *server, Tank *tank) {
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_rm_scorchdroid_NativeBridge_startLocalGame(JNIEnv *env, jobject /* this */) {
+Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
+        JNIEnv *env, jobject /* this */, jboolean debugBuild) {
     std::lock_guard<std::mutex> lock(g_engineMutex);
     if (g_mode != EngineMode::kNone) {
         LOGE("startLocalGame: engine already started (mode=%d)", (int) g_mode);
@@ -317,6 +318,31 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(JNIEnv *env, jobject /* this
     bool started = ScorchedServer::startServer(settings, false, nullptr);
     LOGI("ScorchedServer::startServer -> %d", started);
     if (!started) return JNI_FALSE;
+
+    // Debug builds start rich, purely so testing does not have to play
+    // several rounds to afford the thing being tested - a nuke to see the
+    // mushroom cloud, a shield to see a shield hit. Gated on BuildConfig.DEBUG
+    // from the caller and applied *after* the config is read, so the shipped
+    // scorchdroid_server.xml keeps upstream's own starting money and a
+    // release build is unaffected. This is the one place this port touches a
+    // gameplay number, and it must never reach a release.
+    if (debugBuild) {
+        const int kDebugStartMoney = 100000;
+        OptionsScorched &options = ScorchedServer::instance()->getOptionsGame();
+        const bool ok = options.getMainOptions().getStartMoneyEntry()
+            .setValue(kDebugStartMoney);
+        // updateChangeSet() re-takes the snapshot that OptionsScorched keeps
+        // of the main options. Without it this write is undone the moment the
+        // first round starts: ServerStateNewGame calls commitChanges(), which
+        // copies that snapshot *back* over the main options, and the snapshot
+        // was taken inside startServer() - before this ran - so it still holds
+        // the file's 10000. The tank is then given 10000 by TankScore::
+        // newMatch() and the shop shows it, with the option looking innocently
+        // "changed" all the while.
+        options.updateChangeSet();
+        LOGI("Debug build: starting money set to %d (accepted=%d, reads back as %d)",
+             kDebugStartMoney, ok ? 1 : 0, options.getStartMoney());
+    }
 
     int port = ScorchedServer::instance()->getOptionsGame().getPortNo();
     g_hostingPort = port;
