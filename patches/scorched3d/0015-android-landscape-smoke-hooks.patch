@@ -31,6 +31,18 @@ reaches that type through a client-only header.
 No game logic changes; the pushes are all inside #ifdef S3D_SERVER or the
 #else of an existing #ifndef S3D_SERVER.
 
+The tank-driving trail drops upstream's !getServerMode() check for the
+reason patch 0016 explains at length: it guards against a hosting client
+doing the work twice, and this port has no second context to double up,
+so the check only ever switched the trail off. Every gate that carries
+game meaning - tanks only, the model's own <movementsmoke> flag, the same
+rate limiter - is kept.
+
+The trail also reads the tank's position through getTargetPosition()
+rather than upstream's getFloatPosition(): that float mirror is only
+maintained when !serverMode_ (TargetLife.cpp), so here it is a constant
+(0,0,0) - see patch 0016, which was bitten by the same thing.
+
 diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
 index 3d94f5df..3f887050 100644
 --- a/src/common/actions/Explosion.cpp
@@ -86,7 +98,7 @@ index 7ce1e546..d9c9589d 100644
  	}
  #endif
 diff --git a/src/common/actions/TanketMovement.cpp b/src/common/actions/TanketMovement.cpp
-index f2a81c23..6f56bf03 100644
+index f2a81c23..c6fbc579 100644
 --- a/src/common/actions/TanketMovement.cpp
 +++ b/src/common/actions/TanketMovement.cpp
 @@ -37,10 +37,17 @@
@@ -107,7 +119,7 @@ index f2a81c23..6f56bf03 100644
  #include <tanket/TanketAccessories.hpp>
  #include <tank/TankViewPoints.hpp>
  #include <tank/TankModelStore.hpp>
-@@ -263,6 +270,30 @@ void TanketMovement::simulationMove(fixed frameTime)
+@@ -263,6 +270,37 @@ void TanketMovement::simulationMove(fixed frameTime)
  						}
  					}
  				}
@@ -117,8 +129,10 @@ index f2a81c23..6f56bf03 100644
 +				// <movementsmoke> flag, and the same 0.1s rate limiter -
 +				// because a trail that ignored them would smoke for target
 +				// types and tank models upstream deliberately leaves clean.
-+				if (!context_->getServerMode() &&
-+					tanket->getType() == Target::TypeTank)
++				// The one gate not kept is upstream's !getServerMode(),
++				// which exists to stop a hosting client smoking twice and
++				// here only switched the trail off - see TargetDamage.cpp.
++				if (tanket->getType() == Target::TypeTank)
 +				{
 +					Tank *tank = (Tank *) tanket;
 +					TankModel *model = tank->getModelContainer().getTankModel();
@@ -126,11 +140,16 @@ index f2a81c23..6f56bf03 100644
 +					{
 +						if (smokeCounter_.nextDraw(frameTime.asFloat()))
 +						{
++							// getTargetPosition(), not upstream's
++							// getFloatPosition(): that float mirror is only
++							// kept up to date when !serverMode_, so here it
++							// is permanently (0,0,0) - see TargetDamage.cpp.
++							FixedVector &pos = tanket->getLife().getTargetPosition();
 +							ScorchDroidEffects::EffectEvent smoke;
 +							smoke.type = ScorchDroidEffects::eSmoke;
-+							smoke.x = tanket->getLife().getFloatPosition()[0];
-+							smoke.y = tanket->getLife().getFloatPosition()[1];
-+							smoke.z = tanket->getLife().getFloatPosition()[2];
++							smoke.x = pos[0].asFloat();
++							smoke.y = pos[1].asFloat();
++							smoke.z = pos[2].asFloat();
 +							ScorchDroidEffects::push(smoke);
 +						}
 +					}

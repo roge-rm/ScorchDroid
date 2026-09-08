@@ -32,8 +32,26 @@ event and nothing more.
   inside its client-only block, so before this a TankSay produced nothing
   at all here - neither bubble nor message.
 
+One gate of upstream's is deliberately *not* carried over: the
+!getServerMode() check that wraps both the damage number and the speech
+bubble. Upstream is a client process that also runs a local server
+context, and the check stops it doing the work twice. This port has only
+the one context running these, and it is the server one - so keeping the
+check meant neither effect was ever raised, while every ungated effect
+worked, which is exactly the shape of bug that costs an afternoon.
+host-tests pins both. The half of the gate that carries game meaning, the
+target's own displayDamage flag, is kept exactly as upstream has it.
+
 No game logic changes; every push is inside #ifdef S3D_SERVER or the
 #else of an existing split.
+
+Both text effects also read their position through getTargetPosition()
+rather than upstream's getFloatPosition(). That float mirror is only
+maintained when !serverMode_ (see TargetLife.cpp), so on this port it is
+permanently (0,0,0), and every damage number was projected into the
+corner of the map instead of over the target that was hurt. host-tests
+assert the position, not just that the event fired, because "an event was
+raised" was true the whole time this was broken.
 
 diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
 index 3f887050..6cebee92 100644
@@ -85,7 +103,7 @@ index 3f887050..6cebee92 100644
  	// gun leaves when it fires, not something every explosion does - and
  	// does it right here, in the client body below (search addSmoke). Same
 diff --git a/src/common/actions/TankSay.cpp b/src/common/actions/TankSay.cpp
-index 8a34eb94..0bb3b6cf 100644
+index 8a34eb94..48561991 100644
 --- a/src/common/actions/TankSay.cpp
 +++ b/src/common/actions/TankSay.cpp
 @@ -19,6 +19,11 @@
@@ -100,7 +118,7 @@ index 8a34eb94..0bb3b6cf 100644
  #ifndef S3D_SERVER
  	#include <sprites/TalkRenderer.hpp>
  	#include <sprites/ExplosionTextures.hpp>
-@@ -59,6 +64,26 @@ void TankSay::init()
+@@ -59,6 +64,30 @@ void TankSay::init()
  				white);
  			context_->getActionController().addAction(new SpriteAction(talk));
  
@@ -114,7 +132,11 @@ index 8a34eb94..0bb3b6cf 100644
 +		// channel exactly as above - without this branch a TankSay produced
 +		// nothing at all here, neither bubble nor message, since upstream
 +		// does both inside the client-only block.
-+		if (!context_->getServerMode())
++		//
++		// No !getServerMode() check, unlike upstream: there it stops a
++		// client that also hosts from doing this twice, but this port runs
++		// these actions on the server context alone, so the check simply
++		// switched the bubble - and the bot's line in the chat log - off.
 +		{
 +			FixedVector turret = tank->getLife().getTankTurretPosition();
 +			ScorchDroidEffects::EffectEvent bubble;
@@ -173,7 +195,7 @@ index 459088e3..e2e09803 100644
  #endif
  }
 diff --git a/src/common/target/TargetDamage.cpp b/src/common/target/TargetDamage.cpp
-index cbc81867..79d1f651 100644
+index cbc81867..bd05ded2 100644
 --- a/src/common/target/TargetDamage.cpp
 +++ b/src/common/target/TargetDamage.cpp
 @@ -24,6 +24,10 @@
@@ -187,7 +209,7 @@ index cbc81867..79d1f651 100644
  #endif
  #include <common/OptionsScorched.hpp>
  #include <common/Defines.hpp>
-@@ -171,6 +175,25 @@ void TargetDamage::damageTarget(ScorchedContext &context,
+@@ -171,6 +175,38 @@ void TargetDamage::damageTarget(ScorchedContext &context,
  				)
  			);
  		}
@@ -198,15 +220,28 @@ index cbc81867..79d1f651 100644
 +		// gate as upstream (the target's own displayDamage flag) and the
 +		// same scatter, so numbers from a multi-target blast do not stack
 +		// on one spot.
-+		if (!context.getServerMode() &&
-+			damagedTarget->getTargetState().getDisplayDamage())
++		//
++		// Upstream's own gate here is `!getServerMode() && displayDamage`.
++		// The serverMode half is dropped deliberately: upstream is a client
++		// process that also runs a local server context, and the check stops
++		// it drawing the number twice. This port has only the one context
++		// running damage, and it is the server one - so keeping the check
++		// meant the number was never raised at all. The target's own
++		// displayDamage flag, which is the half that carries game meaning,
++		// is kept exactly as upstream has it.
++		if (damagedTarget->getTargetState().getDisplayDamage())
 +		{
-+			Vector position = damagedTarget->getLife().getFloatPosition();
++			// getTargetPosition(), not upstream's getFloatPosition(): the
++			// float mirror is only maintained when !serverMode_ (see
++			// TargetLife.cpp), so on this port - which runs the server
++			// context - it is permanently (0,0,0), and every number
++			// appeared in the corner of the map instead of over its target.
++			FixedVector &position = damagedTarget->getLife().getTargetPosition();
 +			ScorchDroidEffects::EffectEvent number;
 +			number.type = ScorchDroidEffects::eDamage;
-+			number.x = position[0] + RAND * 5.0f - 2.5f;
-+			number.y = position[1] + RAND * 5.0f - 2.5f;
-+			number.z = position[2] + RAND * 5.0f - 2.5f;
++			number.x = position[0].asFloat() + RAND * 5.0f - 2.5f;
++			number.y = position[1].asFloat() + RAND * 5.0f - 2.5f;
++			number.z = position[2].asFloat() + RAND * 5.0f - 2.5f;
 +			number.value = damage.asFloat();
 +			ScorchDroidEffects::push(number);
 +		}
