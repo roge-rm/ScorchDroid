@@ -60,6 +60,7 @@
 #include <landscapedef/LandscapeDefinition.hpp>
 #include <landscapedef/LandscapeTex.hpp>
 #include <EffectEventQueue.h>
+#include <SoundEventQueue.h>
 #include <actions/ShieldHit.hpp>
 #include <actions/TankSay.hpp>
 #include <actions/ShowScoreAction.hpp>
@@ -585,6 +586,18 @@ namespace
 						"the shield-hit effect is sized from the shield, not left at zero");
 				}
 				check(sawShieldHit, "a real ShieldHit action raises an effect event for the renderer");
+
+				// M13: the same action also raises the shield's collision sound.
+				// Upstream plays it from the client-only block this port
+				// compiles out, so until the hook this was one of eight sound
+				// sites that were simply silent.
+				std::vector<std::string> sounds = ScorchDroidAudio::drainSoundEvents();
+				bool sawWav = false;
+				for (size_t i = 0; i < sounds.size(); i++)
+				{
+					if (sounds[i].find("data/wav/") != std::string::npos) sawWav = true;
+				}
+				check(sawWav, "...and the shield's own collision sound as a sound event");
 			}
 		}
 

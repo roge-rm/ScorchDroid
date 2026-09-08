@@ -132,3 +132,10 @@ work in a new file under `porting/` rather than in the submodule.
   the game at the end of every round (`RoundScoreTime`) and of the match
   (`ScoreTime`); upstream's client half of it raises the score table, so
   without this the port sat through the pause showing nothing.
+- `0018-android-remaining-sound-hooks.patch` - the eight sound sites that
+  stayed silent after 0006: the shot being fired (`PlayMovesSimAction`),
+  shield hits, shield/parachute/battery activation (`TankDefenseSimAction`),
+  the tank driving, teleports, lightning and napalm (`WeaponNapalm`). The
+  files 0011/0014/0015 already own carry their hooks there instead. Each
+  mirrors upstream's own gate and reads the same accessory field, so mod
+  sounds come through; the drive is one-shot where upstream loops.

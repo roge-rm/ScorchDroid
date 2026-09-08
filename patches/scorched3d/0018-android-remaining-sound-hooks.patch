@@ -1,0 +1,147 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: the remaining sound hooks
+
+Upstream plays sounds from ten places in src/common, every one inside a
+client-only block this build compiles out. Patch 0006 hooked two of them
+(SoundAction and Explosion) and the other eight stayed silent: the shot
+being fired, shield hits, shield/parachute/battery activation, the tank
+driving, teleports, lightning and napalm. A parity review found them, and
+this patch, together with additions to 0011/0014/0015 for the files those
+already own, raises each as a sound event exactly as 0006 does.
+
+Each hook mirrors upstream's own gate - the same "none" check on the sound
+name, the same tank-state check on a teleport - and takes the file from the
+same accessory field, so a mod's sounds come through too. The one deliberate
+difference is the drive: upstream starts a looping source for the whole
+movement, and the event queue is one-shot, so the drive gets its sound once
+as it sets off.
+
+No !getServerMode() guards, for the reason patches/scorched3d/README.md
+records: this port runs these actions on the server context, and the guard
+would only switch the sound off.
+
+No game logic changes.
+
+diff --git a/src/common/simactions/PlayMovesSimAction.cpp b/src/common/simactions/PlayMovesSimAction.cpp
+index 58e3c6d6..a7ea4f43 100644
+--- a/src/common/simactions/PlayMovesSimAction.cpp
++++ b/src/common/simactions/PlayMovesSimAction.cpp
+@@ -19,6 +19,10 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #include <simactions/PlayMovesSimAction.hpp>
++#ifdef S3D_SERVER
++	// Android build: sound is raised as an event - see SoundEventQueue.h.
++	#include <SoundEventQueue.h>
++#endif
+ #include <engine/ActionController.hpp>
+ #include <weapons/AccessoryStore.hpp>
+ #include <tanket/TanketAccessories.hpp>
+@@ -243,6 +247,17 @@ void PlayMovesSimAction::tankFired(ScorchedContext &context,
+ 				firedSound, tanket->getLife().getTargetPosition().asVector());
+ 		}
+ 	}
++#else
++	// Android build: the weapon's own firing sound, raised as an event. No
++	// !getServerMode() guard - this port runs these actions on the server
++	// context alone, and the guard would only switch the sound off (see
++	// patches/scorched3d/README.md).
++	if (weapon->getParent()->getActivationSound() &&
++		0 != strcmp("none", weapon->getParent()->getActivationSound()))
++	{
++		ScorchDroidAudio::pushSoundEvent(S3D::getModFile(S3D::formatStringBuffer(
++			"data/wav/%s", weapon->getParent()->getActivationSound())));
++	}
+ #endif // #ifndef S3D_SERVER
+ 
+ 	// Get firing context
+diff --git a/src/common/simactions/TankDefenseSimAction.cpp b/src/common/simactions/TankDefenseSimAction.cpp
+index 282c180d..8d056d90 100644
+--- a/src/common/simactions/TankDefenseSimAction.cpp
++++ b/src/common/simactions/TankDefenseSimAction.cpp
+@@ -19,6 +19,10 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #include <simactions/TankDefenseSimAction.hpp>
++#ifdef S3D_SERVER
++	// Android build: sound is raised as an event - see SoundEventQueue.h.
++	#include <SoundEventQueue.h>
++#endif
+ #include <target/TargetContainer.hpp>
+ #include <tanket/Tanket.hpp>
+ #include <tanket/TanketAccessories.hpp>
+@@ -83,6 +87,14 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
+ 							batSound, tanket->getLife().getTargetPosition().asVector());
+ 					}
+ 				}
++#else
++				// Android build: the battery's activation sound, raised as an event.
++				if (battery->getActivationSound() &&
++					0 != strcmp("none", battery->getActivationSound()))
++				{
++					ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
++						S3D::formatStringBuffer("data/wav/%s", battery->getActivationSound())));
++				}
+ #endif
+ 			}
+ 		}
+@@ -112,6 +124,14 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
+ 								activateSound, tanket->getLife().getTargetPosition().asVector());
+ 						}
+ 					}
++#else
++					// Android build: the accessory's activation sound, raised as an event.
++					if (accessory->getActivationSound() &&
++						0 != strcmp("none", accessory->getActivationSound()))
++					{
++						ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
++							S3D::formatStringBuffer("data/wav/%s", accessory->getActivationSound())));
++					}
+ #endif
+ 				}
+ 			}
+@@ -150,6 +170,14 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
+ 								paraSound, tanket->getLife().getTargetPosition().asVector());
+ 						}
+ 					}
++#else
++					// Android build: the parachute's activation sound, raised as an event.
++					if (parachute->getActivationSound() &&
++						0 != strcmp("none", parachute->getActivationSound()))
++					{
++						ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
++							S3D::formatStringBuffer("data/wav/%s", parachute->getActivationSound())));
++					}
+ #endif
+ 				}
+ 			}
+diff --git a/src/common/weapons/WeaponNapalm.cpp b/src/common/weapons/WeaponNapalm.cpp
+index 93945c27..08c1ec69 100644
+--- a/src/common/weapons/WeaponNapalm.cpp
++++ b/src/common/weapons/WeaponNapalm.cpp
+@@ -19,6 +19,10 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #include <weapons/WeaponNapalm.hpp>
++#ifdef S3D_SERVER
++	// Android build: sound is raised as an event - see SoundEventQueue.h.
++	#include <SoundEventQueue.h>
++#endif
+ #include <actions/Napalm.hpp>
+ #include <common/Defines.hpp>
+ #ifndef S3D_SERVER
+@@ -101,6 +105,14 @@ void WeaponNapalm::fireWeapon(ScorchedContext &context,
+ 				expSound, position.asVector());
+ 		}
+ 	}
++#else
++	// Android build: the napalm's own sound, raised as an event.
++	if (napalmSound_.c_str()[0] &&
++		0 != strcmp(napalmSound_.c_str(), "none"))
++	{
++		ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
++			S3D::formatStringBuffer("data/wav/%s", napalmSound_.c_str())));
++	}
+ #endif
+ }
+ 
