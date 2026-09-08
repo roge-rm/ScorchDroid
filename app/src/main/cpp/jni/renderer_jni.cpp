@@ -62,6 +62,8 @@
 #include <TargetModelStore.h>
 #include <SkyDescription.hpp>
 #include <InstanceBuffer.hpp>
+#include <TreeGeometry.hpp>
+#include <3dsparse/TreeModelFactory.hpp>
 #include <DeformEventQueue.h>
 #include <EffectEventQueue.h>
 #include <TracerStore.h>
@@ -101,6 +103,19 @@ namespace
 	GLuint instancedMeshProgram = 0;
 	GLint  instancedViewProjLoc = -1, instancedLightDirLoc = -1;
 	GLint  instancedFogColorLoc = -1, instancedFogDensityLoc = -1;
+	// M6: upstream's trees. One geometry buffer and one atlas per tree
+	// type - see porting/TreeGeometry.hpp.
+	GLuint treeProgram = 0;
+	GLint  treeViewProjLoc = -1, treeLightDirLoc = -1;
+	GLint  treeFogColorLoc = -1, treeFogDensityLoc = -1, treeAtlasLoc = -1;
+	struct TreeKind {
+		GLuint vao = 0, vbo = 0, instanceVbo = 0;
+		int    vertexCount = 0;
+		GLuint atlas = 0;
+		std::vector<float> uploaded;
+	};
+	std::map<int, TreeKind> g_treeKinds;   // keyed by TreeModelFactory::TreeType
+	GLuint g_treeAtlases[ScorchDroidTrees::eAtlasCount] = { 0 };
 	// One entry per distinct mesh drawn instanced, keyed by the source
 	// geometry's VBO. Its own VAO, so adding the instance attributes never
 	// disturbs the non-instanced VAO the same geometry may also be drawn
@@ -158,8 +173,6 @@ namespace
 	bool   cloudsBuilt = false, cloudsVisible = false;
 	float  cloudScrollX = 0.0f, cloudScrollY = 0.0f;
 
-	GLuint treeVao = 0, treeVbo = 0;
-	int    treeVertexCount = 0;
 
 	GLuint shadowProgram = 0, shadowVao = 0, shadowVbo = 0;
 	GLint  shadowMvpLoc = -1, shadowStrengthLoc = -1;
@@ -675,6 +688,75 @@ namespace
 			vec3 n = normalize(vNormal);
 			float diffuse = max(dot(n, uLightDir), 0.0);
 			vec3 lit = vColor * (0.45 + diffuse * 0.75);
+			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
+		}
+	)";
+
+	// M6: upstream's real trees - instanced, textured and alpha-cut.
+	//
+	// Same instancing as the scenery program above, plus a texture
+	// coordinate and an alpha test. The alpha mask is the whole point: it
+	// cuts a ragged needle silhouette out of each branch layer, which is
+	// what stops a tree reading as the smooth cone it is built from.
+	//
+	// A discard rather than blending, deliberately. Blended foliage would
+	// need back-to-front sorting of ~1,000 instances every frame, which
+	// would undo the instancing entirely; alpha *testing* needs no sorting
+	// and writes depth normally.
+	const char *kTreeVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec3 aNormal;
+		layout(location = 2) in vec2 aTexCoord;
+		layout(location = 3) in vec4 aInstancePosScale;
+		layout(location = 4) in vec4 aInstanceRotColor;
+		uniform mat4 uViewProj;
+		out vec3 vNormal;
+		out vec2 vTexCoord;
+		out vec3 vColor;
+		out float vViewDepth;
+		void main() {
+			float rot = aInstanceRotColor.x;
+			float s = sin(rot), c = cos(rot);
+
+			vec3 p = aPosition * aInstancePosScale.w;
+			vec3 rotated = vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
+			vec3 world = rotated + aInstancePosScale.xyz;
+
+			vNormal = vec3(c * aNormal.x + s * aNormal.z,
+						   aNormal.y,
+						   -s * aNormal.x + c * aNormal.z);
+			vTexCoord = aTexCoord;
+			vColor = aInstanceRotColor.yzw;
+
+			gl_Position = uViewProj * vec4(world, 1.0);
+			vViewDepth = gl_Position.w;
+		}
+	)";
+
+	const char *kTreeFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec3 vNormal;
+		in vec2 vTexCoord;
+		in vec3 vColor;
+		in float vViewDepth;
+		out vec4 fragColor;
+		uniform sampler2D uAtlas;
+		uniform vec3 uLightDir;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
+		void main() {
+			vec4 texel = texture(uAtlas, vTexCoord);
+			// Upstream's masks are hard-edged, so the threshold only has to
+			// separate needle from gap.
+			if (texel.a < 0.5) discard;
+
+			// Two-sided: foliage is drawn from both faces, and a leaf lit
+			// from behind should not be black.
+			vec3 n = normalize(vNormal);
+			float diffuse = abs(dot(n, uLightDir));
+			vec3 lit = texel.rgb * vColor * (0.45 + diffuse * 0.75);
+
 			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
 		}
@@ -1302,73 +1384,6 @@ namespace
 		LOGI("Ground texture built: %dx%d", ground.width, ground.height);
 	}
 
-	// One tree, standing on y = 0 and about 4 units tall, which the
-	// definition's own modelscale (1 to 3 for the shipped placements) then
-	// sizes. Position + normal per vertex, so it draws with the ordinary
-	// mesh shader.
-	void buildTreeGeometryIfNeeded()
-	{
-		if (treeVertexCount > 0) return;
-
-		std::vector<float> verts;
-		auto addTriangle = [&](float ax, float ay, float az,
-							   float bx, float by, float bz,
-							   float cx, float cy, float cz) {
-			const float ux = bx - ax, uy = by - ay, uz = bz - az;
-			const float vx = cx - ax, vy = cy - ay, vz = cz - az;
-			float nx = uy * vz - uz * vy;
-			float ny = uz * vx - ux * vz;
-			float nz = ux * vy - uy * vx;
-			const float len = sqrtf(nx * nx + ny * ny + nz * nz);
-			if (len > 1e-6f) { nx /= len; ny /= len; nz /= len; }
-			const float tri[3][3] = { { ax, ay, az }, { bx, by, bz }, { cx, cy, cz } };
-			for (int i = 0; i < 3; i++) {
-				verts.push_back(tri[i][0]); verts.push_back(tri[i][1]); verts.push_back(tri[i][2]);
-				verts.push_back(nx); verts.push_back(ny); verts.push_back(nz);
-			}
-		};
-
-		const int sides = 7;  // odd, so the silhouette differs as it turns
-		// Trunk.
-		const float trunkR = 0.13f, trunkTop = 1.1f;
-		for (int i = 0; i < sides; i++) {
-			const float a0 = (float) i / sides * 6.2831853f;
-			const float a1 = (float) (i + 1) / sides * 6.2831853f;
-			const float x0 = cosf(a0) * trunkR, z0 = sinf(a0) * trunkR;
-			const float x1 = cosf(a1) * trunkR, z1 = sinf(a1) * trunkR;
-			addTriangle(x0, 0.0f, z0, x1, 0.0f, z1, x1, trunkTop, z1);
-			addTriangle(x0, 0.0f, z0, x1, trunkTop, z1, x0, trunkTop, z0);
-		}
-
-		// Canopy: three stacked cones, widest at the bottom - upstream's
-		// drawPineLevel is the same shape, an apex over a ring.
-		const float apex[3] = { 2.6f, 3.4f, 4.2f };
-		const float ring[3] = { 0.8f, 1.7f, 2.5f };
-		const float radius[3] = { 1.15f, 0.9f, 0.6f };
-		for (int level = 0; level < 3; level++) {
-			for (int i = 0; i < sides; i++) {
-				const float a0 = (float) i / sides * 6.2831853f;
-				const float a1 = (float) (i + 1) / sides * 6.2831853f;
-				addTriangle(
-					0.0f, apex[level], 0.0f,
-					cosf(a0) * radius[level], ring[level], sinf(a0) * radius[level],
-					cosf(a1) * radius[level], ring[level], sinf(a1) * radius[level]);
-			}
-		}
-
-		treeVertexCount = (int) (verts.size() / 6);
-		glGenVertexArrays(1, &treeVao);
-		glBindVertexArray(treeVao);
-		glGenBuffers(1, &treeVbo);
-		glBindBuffer(GL_ARRAY_BUFFER, treeVbo);
-		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
-		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
-		glBindVertexArray(0);
-		LOGI("Tree geometry built: %d verts", treeVertexCount);
-	}
 
 	// What distance fades towards. Upstream fogs to the landscape's own
 	// <fog> colour, but the shipped landscapes set a flat grey while their
@@ -1426,6 +1441,66 @@ namespace
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap);
 		glBindTexture(GL_TEXTURE_2D, 0);
 		return texture;
+	}
+
+	// M6: builds (once) the geometry and atlas for one of upstream's tree
+	// types. Replaces the procedural three-cone stand-in that stood here
+	// while the real thing was unavailable - see porting/TreeGeometry.hpp
+	// for why upstream's trees are generated rather than loaded, and what
+	// makes them look like trees.
+	TreeKind *treeKindFor(TreeModelFactory::TreeType type)
+	{
+		std::map<int, TreeKind>::iterator existing = g_treeKinds.find((int) type);
+		if (existing != g_treeKinds.end()) {
+			return existing->second.vertexCount > 0 ? &existing->second : nullptr;
+		}
+
+		TreeKind &kind = g_treeKinds[(int) type];
+
+		std::vector<float> verts;
+		kind.vertexCount = ScorchDroidTrees::build(type, verts);
+		if (kind.vertexCount == 0) return nullptr;
+
+		// One atlas per image, shared by every type that samples it.
+		const ScorchDroidTrees::Atlas atlas = ScorchDroidTrees::atlasFor(type);
+		if (g_treeAtlases[atlas] == 0) {
+			g_treeAtlases[atlas] = loadSkyTexture(
+				ScorchDroidTrees::atlasImage(atlas),
+				ScorchDroidTrees::atlasMask(atlas), false);
+			LOGI("Tree atlas %d: %s + %s -> %s", (int) atlas,
+				 ScorchDroidTrees::atlasImage(atlas),
+				 ScorchDroidTrees::atlasMask(atlas),
+				 g_treeAtlases[atlas] ? "loaded" : "FAILED");
+		}
+		kind.atlas = g_treeAtlases[atlas];
+
+		glGenVertexArrays(1, &kind.vao);
+		glBindVertexArray(kind.vao);
+		glGenBuffers(1, &kind.vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, kind.vbo);
+		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		const GLsizei stride = ScorchDroidTrees::kFloatsPerVertex * sizeof(float);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void *) (3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void *) (6 * sizeof(float)));
+
+		glGenBuffers(1, &kind.instanceVbo);
+		glBindBuffer(GL_ARRAY_BUFFER, kind.instanceVbo);
+		const GLsizei instanceStride = ScorchDroidInstances::kFloatsPerInstance * sizeof(float);
+		glEnableVertexAttribArray(3);
+		glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, instanceStride, (void *) 0);
+		glVertexAttribDivisor(3, 1);
+		glEnableVertexAttribArray(4);
+		glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, instanceStride, (void *) (4 * sizeof(float)));
+		glVertexAttribDivisor(4, 1);
+		glBindVertexArray(0);
+
+		LOGI("Tree type %d built: %d vertices (%d triangles)",
+			 (int) type, kind.vertexCount, kind.vertexCount / 3);
+		return &kind;
 	}
 
 	// M6 sun/moon: upstream draws a 60-unit billboard at the sun's position
@@ -3278,6 +3353,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	meshFogDensityLoc = glGetUniformLocation(meshProgram, "uFogDensity");
 
 	instancedMeshProgram = linkProgram(kInstancedMeshVertexShader, kInstancedMeshFragmentShader);
+	treeProgram = linkProgram(kTreeVertexShader, kTreeFragmentShader);
+	treeViewProjLoc = glGetUniformLocation(treeProgram, "uViewProj");
+	treeLightDirLoc = glGetUniformLocation(treeProgram, "uLightDir");
+	treeFogColorLoc = glGetUniformLocation(treeProgram, "uFogColor");
+	treeFogDensityLoc = glGetUniformLocation(treeProgram, "uFogDensity");
+	treeAtlasLoc = glGetUniformLocation(treeProgram, "uAtlas");
 	instancedViewProjLoc = glGetUniformLocation(instancedMeshProgram, "uViewProj");
 	instancedLightDirLoc = glGetUniformLocation(instancedMeshProgram, "uLightDir");
 	instancedFogColorLoc = glGetUniformLocation(instancedMeshProgram, "uFogColor");
@@ -3338,12 +3419,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	// context that has just gone away.
 	//
 	// This was a real bug: only terrain, the ground texture and the model
-	// cache were reset, so the procedural tree geometry (guarded by
-	// `treeVertexCount > 0`) kept its stale handles and drew garbage
-	// polygons across the battlefield after every resume - light grey on a
-	// snow map, dark green on a tropical one, which is what identified them
-	// as the trees. They survived a new round too, because nothing but a
-	// context recreate rebuilds them.
+	// cache were reset, so the tree geometry kept its stale handles and drew
+	// garbage polygons across the battlefield after every resume - light
+	// grey on a snow map, dark green on a tropical one, which is what
+	// identified them as the trees. They survived a new round too, because
+	// nothing but a context recreate rebuilds them.
 	//
 	// The handles are *zeroed, never deleted*. A fresh context reissues
 	// names from 1, so calling glDeleteBuffers on a stale name here would
@@ -3357,8 +3437,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	movementOverlayPainted = false;
 	paintedMovementVersion = 0;
 
-	treeVertexCount = 0;
-	treeVao = treeVbo = 0;
+	g_treeKinds.clear();
+	for (int i = 0; i < ScorchDroidTrees::eAtlasCount; i++) g_treeAtlases[i] = 0;
 
 	waterBuilt = false;
 	waterVisible = false;
@@ -3404,6 +3484,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 		{ "sight", sightProgram },     { "mesh", meshProgram },
 		{ "point", pointProgram },     { "particle", particleProgram },
 		{ "instanced-mesh", instancedMeshProgram },
+		{ "tree", treeProgram },
 	};
 	for (const auto &p : programs) {
 		if (p.program == 0) LOGE("Shader program '%s' FAILED to link - it will draw nothing", p.name);
@@ -3556,6 +3637,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// Trees have no mesh (see buildTreeGeometryIfNeeded); they draw the
 		// shared procedural one in these colours instead.
 		bool  isTree;
+		// Which of upstream's 28 tree types, when isTree.
+		TreeModelFactory::TreeType treeType;
 		float treeR, treeG, treeB;
 		Model *model;
 	};
@@ -3605,16 +3688,27 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// black is never what the data meant.
 			inst.brightness = (info.brightness > 0.0f) ? info.brightness : 1.0f;
 			inst.isTree = isTree;
+			inst.treeType = TreeModelFactory::eNone;
 			if (isTree) {
+				// Upstream's own decoding of the ModelID: the mesh name is
+				// "<B|N>:<kind>" (B for the burnt version) and the skin name
+				// starts with S for the snow-laden one, and
+				// TreeModelFactory::getTypes - which is in src/common, so we
+				// have it - maps that pair to one of its 28 types. This
+				// replaces three guessed tint colours with the actual
+				// species, which is what lets the right atlas cell be
+				// sampled.
 				const bool burnt = (info.model.getMeshName()[0] == 'B');
 				const bool snow = (info.model.getSkinName()[0] == 'S');
-				if (burnt) {
-					inst.treeR = 0.20f; inst.treeG = 0.15f; inst.treeB = 0.11f;
-				} else if (snow) {
-					inst.treeR = 0.72f; inst.treeG = 0.78f; inst.treeB = 0.72f;
-				} else {
-					inst.treeR = 0.16f; inst.treeG = 0.34f; inst.treeB = 0.14f;
-				}
+				TreeModelFactory::TreeType normalType = TreeModelFactory::eNone;
+				TreeModelFactory::TreeType burntType = TreeModelFactory::eNone;
+				TreeModelFactory::getTypes(&info.model.getMeshName()[2], snow,
+										   normalType, burntType);
+				inst.treeType = burnt ? burntType : normalType;
+				// Upstream tints only the burnt types, with a flat grey; the
+				// rest take their colour from the atlas.
+				const float tint = ScorchDroidTrees::isBurnt(inst.treeType) ? 0.3f : 1.0f;
+				inst.treeR = inst.treeG = inst.treeB = tint;
 			} else {
 				inst.treeR = inst.treeG = inst.treeB = 1.0f;
 			}
@@ -4358,7 +4452,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// Landscape targets first: they are scenery, so they should be behind
 	// everything that matters, and drawing them before the tanks keeps the
 	// per-target colour uniform out of the tank loop's way.
-	buildTreeGeometryIfNeeded();
 	{
 		// M6 performance: scenery is drawn instanced - one call per distinct
 		// mesh rather than one per target. A landscape scatters up to ~2,000
@@ -4374,6 +4467,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			std::vector<ScorchDroidInstances::Instance> instances;
 		};
 		std::map<GLuint, Bucket> buckets;
+		// Trees are bucketed by type rather than by VBO, because each type
+		// has its own geometry *and* its own atlas cell.
+		std::map<int, std::vector<ScorchDroidInstances::Instance> > treeBuckets;
 
 		for (TargetInstance &inst : targetInstances) {
 			GLuint sourceVbo = 0;
@@ -4385,13 +4481,16 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			packed.rotationRadians = inst.rotationRadians;
 
 			if (inst.isTree) {
-				if (treeVertexCount == 0 || treeVbo == 0) continue;
-				sourceVbo = treeVbo;
-				vertexCount = treeVertexCount;
-				packed.y = inst.y;
-				packed.r = inst.treeR * inst.brightness;
-				packed.g = inst.treeG * inst.brightness;
-				packed.b = inst.treeB * inst.brightness;
+				// Trees have their own pass below - textured and alpha-cut,
+				// which the flat scenery program cannot do.
+				treeBuckets[(int) inst.treeType].push_back(packed);
+				std::vector<ScorchDroidInstances::Instance> &treeBucket =
+					treeBuckets[(int) inst.treeType];
+				treeBucket.back().y = inst.y;
+				treeBucket.back().r = inst.treeR * inst.brightness;
+				treeBucket.back().g = inst.treeG * inst.brightness;
+				treeBucket.back().b = inst.treeB * inst.brightness;
+				continue;
 			} else {
 				GpuModel *gpu = uploadModel(inst.model);
 				if (!gpu || gpu->hull.vertexCount == 0 || gpu->hull.vbo == 0) continue;
@@ -4469,9 +4568,48 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				glDrawArraysInstanced(GL_TRIANGLES, 0, bucket.vertexCount, draw.instanceCount);
 			}
 			glBindVertexArray(0);
-			// The tank loop below expects the ordinary mesh program bound.
-			glUseProgram(meshProgram);
 		}
+
+		// M6: the trees, in their own textured alpha-cut pass - one draw per
+		// species present, which is a handful.
+		if (!treeBuckets.empty() && treeProgram != 0) {
+			glUseProgram(treeProgram);
+			glUniformMatrix4fv(treeViewProjLoc, 1, GL_FALSE, mvp.m);
+			glUniform3f(treeLightDirLoc, 0.4f, 0.82f, 0.35f);
+			glUniform3f(treeFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+			glUniform1f(treeFogDensityLoc, skyDescription.fogDensity);
+			glUniform1i(treeAtlasLoc, 0);
+			glActiveTexture(GL_TEXTURE0);
+			// Foliage is a one-sided shell built from fans; seen from the
+			// other side a branch layer would simply vanish, so both faces
+			// are drawn. The alpha test, not the winding, is what shapes it.
+			glDisable(GL_CULL_FACE);
+
+			for (auto &entry : treeBuckets) {
+				TreeKind *kind = treeKindFor((TreeModelFactory::TreeType) entry.first);
+				if (!kind || kind->atlas == 0) continue;
+
+				std::vector<float> packed;
+				ScorchDroidInstances::pack(entry.second, packed);
+				if (packed != kind->uploaded) {
+					glBindBuffer(GL_ARRAY_BUFFER, kind->instanceVbo);
+					glBufferData(GL_ARRAY_BUFFER, packed.size() * sizeof(float),
+								 packed.data(), GL_DYNAMIC_DRAW);
+					kind->uploaded = packed;
+				}
+
+				glBindTexture(GL_TEXTURE_2D, kind->atlas);
+				glBindVertexArray(kind->vao);
+				frameDrawCalls++;
+				glDrawArraysInstanced(GL_TRIANGLES, 0, kind->vertexCount,
+									  (GLsizei) entry.second.size());
+			}
+			glEnable(GL_CULL_FACE);
+			glBindVertexArray(0);
+		}
+
+		// The tank loop below expects the ordinary mesh program bound.
+		glUseProgram(meshProgram);
 	}
 	std::vector<float> unmodelledMine, unmodelledOther;
 	bool haveSight = false;
