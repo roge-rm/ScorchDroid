@@ -26,6 +26,7 @@
 #include <GLES3/gl3.h>
 #include <android/log.h>
 #include <vector>
+#include <sstream>
 #include <mutex>
 #include <algorithm>
 #include <cmath>
@@ -41,6 +42,7 @@
 #include <landscapedef/LandscapeDefinitionCache.hpp>
 #include <landscapedef/LandscapeDefinition.hpp>
 #include <landscapedef/LandscapeDefn.hpp>
+#include <common/OptionsTransient.hpp>
 #include <landscapedef/LandscapeTex.hpp>
 #include <image/ImageFactory.hpp>
 #include <target/TargetLife.hpp>
@@ -391,6 +393,60 @@ namespace
 	};
 	std::mutex g_overlayMutex;
 	std::vector<TankOverlay> g_tankOverlays;
+
+	// M6: short-lived labels pinned to a world position - the floating
+	// damage numbers upstream draws over a hurt target, and the speech
+	// bubble over a tank that just spoke. Both are *text*, which this
+	// renderer cannot draw: it has no font. So they are projected here and
+	// handed to Compose, the same route the tank name plates already take.
+	struct FloatingLabel {
+		float x, y, z;      // world, render space
+		std::string text;
+		float age = 0.0f, life = 1.0f;
+		float r = 1.0f, g = 1.0f, b = 1.0f;
+		// Filled per frame by the projection below.
+		float screenX = 0.0f, screenY = 0.0f;
+		bool  onScreen = false;
+	};
+	std::vector<FloatingLabel> floatingLabels;
+	std::vector<FloatingLabel> g_labelOverlays;   // published snapshot
+	std::mutex g_labelMutex;
+	// Bounded: a multi-target blast raises one number per target hurt, and
+	// nothing downstream depends on seeing every one.
+	const size_t kMaxFloatingLabels = 48;
+
+	// M6: upstream's thrown rocks. Opaque tumbling meshes flung alongside
+	// the fireball - being solid and dark they read against bright ground,
+	// where the additive fireball sprites simply wash out.
+	//
+	// Drawn through the ordinary mesh program one at a time rather than
+	// instanced, because each tumbles about its own random axis and the
+	// instance format carries only a rotation about world up. They are
+	// short-lived and capped, so this is a bounded handful of draws rather
+	// than the unbounded per-target cost instancing was added to remove.
+	struct DebrisChunk {
+		float x, y, z;
+		float vx, vy, vz;
+		float axisX, axisY, axisZ;   // unit, the tumble axis
+		float angle, spin;           // radians, radians/second
+		float scale;
+		int   mesh;                  // 0 = rock1, 1 = rock2
+		float age = 0.0f, life = 1.0f;
+	};
+	std::vector<DebrisChunk> debrisChunks;
+	const size_t kMaxDebris = 120;
+
+	// M6: upstream's arena wall flash. A shot striking the boundary lights
+	// the *whole* of that side - a full-height translucent panel in the wall
+	// type's colour, fading out - rather than splashing at the impact point.
+	// Walls are on in most rounds (WallType defaults to WallRandom), so this
+	// is ordinary play.
+	//
+	// One fade timer per side, exactly as upstream keeps (Wall::fadeTime_).
+	float wallFade[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	// Upstream's own per-type colours (OptionsTransient::getWallColor):
+	// wrap-around olive, bouncy blue, concrete grey.
+	float wallColor[3] = { 0.5f, 0.5f, 0.5f };
 
 	// M6 terrain picking. Rather than invert the MVP, the camera basis is
 	// published each frame and the pick ray is rebuilt from it. The basis
@@ -2565,6 +2621,19 @@ namespace
 		std::vector<ScorchDroidEffects::EffectEvent> events = ScorchDroidEffects::drain();
 		if (!events.empty() && effectLogsLeft > 0) {
 			effectLogsLeft--;
+			// A count per type, not just the first one's: a batch mixes
+			// explosion, smoke, debris and the rest, and "first type" says
+			// nothing about whether the others arrived. Chasing a missing
+			// effect without this is guesswork.
+			int histogram[16] = { 0 };
+			for (const ScorchDroidEffects::EffectEvent &e : events) {
+				if (e.type >= 0 && e.type < 16) histogram[e.type]++;
+			}
+			std::ostringstream types;
+			for (int t = 0; t < 16; t++) {
+				if (histogram[t]) types << " t" << t << "=" << histogram[t];
+			}
+			LOGI("Effects by type:%s", types.str().c_str());
 			LOGI("Effects: %zu event(s), first type=%d at (%.1f, %.1f, %.1f) size %.1f",
 				 events.size(), (int) events[0].type,
 				 events[0].x, events[0].y, events[0].z, events[0].size);
@@ -2636,6 +2705,137 @@ namespace
 				// its own colour, so the flash lights the whole view the
 				// way a nuke should rather than appearing as an object.
 				skyFlashRemaining = kSkyFlashSeconds;
+				break;
+			}
+			case ScorchDroidEffects::eWallHit: {
+				const int side = (int) event.value;
+				if (side >= 0 && side < 4) wallFade[side] = 1.0f;
+				break;
+			}
+			case ScorchDroidEffects::eDebris: {
+				// One rock per event; the pushing site decides how many,
+				// using upstream's own count.
+				if (debrisChunks.size() >= kMaxDebris) break;
+				const float size = std::max(event.size, 1.0f);
+				DebrisChunk chunk = {};
+				chunk.x = x; chunk.y = y; chunk.z = z;
+				float dx = randomSigned(), dy = randomSigned(), dz = randomSigned();
+				const float len = sqrtf(dx * dx + dy * dy + dz * dz);
+				if (len < 0.001f) break;
+				dx /= len; dy /= len; dz /= len;
+				const float speed = size * (1.2f + randomUnit() * 1.6f);
+				chunk.vx = dx * speed;
+				chunk.vy = fabsf(dy) * speed + size * 1.2f;   // always thrown up
+				chunk.vz = dz * speed;
+				// A second random direction for the tumble, so the spin is
+				// unrelated to the direction of travel.
+				float ax = randomSigned(), ay = randomSigned(), az = randomSigned();
+				const float alen = sqrtf(ax * ax + ay * ay + az * az);
+				if (alen < 0.001f) { ax = 0.0f; ay = 1.0f; az = 0.0f; }
+				else { ax /= alen; ay /= alen; az /= alen; }
+				chunk.axisX = ax; chunk.axisY = ay; chunk.axisZ = az;
+				chunk.angle = randomUnit() * 6.2831853f;
+				chunk.spin = (randomUnit() * 8.0f + 4.0f) * (randomUnit() < 0.5f ? -1.0f : 1.0f);
+				// A fraction of a normalised model rather than an absolute
+				// size: the rock meshes are ~32 units across natively, so
+				// this rides on uploadModel's own 2.2-units normalisation
+				// (applied at the draw) and a chunk ends up a believable
+				// size next to a tank whatever the source mesh measures.
+				chunk.scale = 0.30f + randomUnit() * 0.45f;
+				chunk.mesh = (randomUnit() < 0.5f) ? 0 : 1;
+				chunk.life = 1.6f + randomUnit() * 1.2f;
+				debrisChunks.push_back(chunk);
+				break;
+			}
+			case ScorchDroidEffects::eDamage: {
+				// Upstream's floating damage number - red, over the target,
+				// already scattered by the pushing site so several from one
+				// blast do not stack.
+				if (floatingLabels.size() < kMaxFloatingLabels) {
+					FloatingLabel label;
+					label.x = x; label.y = y; label.z = z;
+					char text[32];
+					snprintf(text, sizeof(text), "%.0f", event.value);
+					label.text = text;
+					label.life = 1.6f;
+					label.r = 0.85f; label.g = 0.1f; label.b = 0.1f;
+					floatingLabels.push_back(label);
+				}
+				break;
+			}
+			case ScorchDroidEffects::eTalk: {
+				// The speech bubble over a tank that just spoke. Upstream
+				// draws a textured quad; a glyph through the same label path
+				// costs nothing extra and reads the same at phone size.
+				if (floatingLabels.size() < kMaxFloatingLabels) {
+					FloatingLabel label;
+					label.x = x; label.y = y + 2.0f; label.z = z;
+					label.text = "\xF0\x9F\x92\xAC";   // speech balloon
+					label.life = 2.5f;
+					label.r = 1.0f; label.g = 1.0f; label.b = 1.0f;
+					floatingLabels.push_back(label);
+				}
+				break;
+			}
+			case ScorchDroidEffects::eMushroom: {
+				// The nuke cloud. Upstream draws a textured sprite that
+				// rises and rolls; this builds the same silhouette out of
+				// the alpha-blended smoke particles the smoke work already
+				// added - a rising stem topped by a spreading cap - which
+				// costs no new texture and no new draw path.
+				//
+				// Deliberately slow and long-lived: what makes a mushroom
+				// cloud read is that it keeps growing after the flash has
+				// gone, so it outlasts the explosion by several seconds.
+				const float size = std::max(event.size, 1.0f);
+
+				// The stem.
+				for (int p = 0; p < 26; p++) {
+					const float up = randomUnit();
+					Particle puff = {};
+					puff.x = x + randomSigned() * size * 0.25f;
+					puff.y = y + up * size * 2.2f;
+					puff.z = z + randomSigned() * size * 0.25f;
+					puff.vx = randomSigned() * size * 0.15f;
+					puff.vy = size * (1.4f + randomUnit() * 0.8f);
+					puff.vz = randomSigned() * size * 0.15f;
+					puff.r = 0.85f; puff.g = 0.80f; puff.b = 0.72f;
+					puff.worldSize = size * (0.35f + randomUnit() * 0.25f);
+					puff.life = 3.5f + randomUnit() * 2.0f;
+					puff.drag = 0.7f;
+					puff.gravityScale = -0.1f;
+					puff.growth = 2.2f;
+					puff.peakAlpha = 0.55f + randomUnit() * 0.2f;
+					puff.alphaBlend = true;
+					addParticle(puff);
+				}
+
+				// The cap: a ring that spreads outward as it rises, which is
+				// the part that makes it a mushroom rather than a column.
+				for (int p = 0; p < 34; p++) {
+					const float angle = randomUnit() * 6.2831853f;
+					const float radius = size * (0.4f + randomUnit() * 0.9f);
+					Particle puff = {};
+					puff.x = x + cosf(angle) * radius;
+					puff.y = y + size * (2.2f + randomUnit() * 0.7f);
+					puff.z = z + sinf(angle) * radius;
+					puff.vx = cosf(angle) * size * 0.7f;
+					puff.vy = size * (0.5f + randomUnit() * 0.5f);
+					puff.vz = sinf(angle) * size * 0.7f;
+					// Warmer at the centre of the cap, as a real one is.
+					const float heat = 1.0f - std::min(radius / (size * 1.3f), 1.0f);
+					puff.r = 0.85f + heat * 0.15f;
+					puff.g = 0.78f + heat * 0.10f;
+					puff.b = 0.70f;
+					puff.worldSize = size * (0.5f + randomUnit() * 0.4f);
+					puff.life = 4.0f + randomUnit() * 2.5f;
+					puff.drag = 0.55f;
+					puff.gravityScale = -0.05f;
+					puff.growth = 2.6f;
+					puff.peakAlpha = 0.5f + randomUnit() * 0.25f;
+					puff.alphaBlend = true;
+					addParticle(puff);
+				}
 				break;
 			}
 			case ScorchDroidEffects::eSmoke: {
@@ -2761,6 +2961,37 @@ namespace
 			particles[live++] = particle;
 		}
 		particles.resize(live);
+
+		for (int i = 0; i < 4; i++) {
+			if (wallFade[i] > 0.0f) wallFade[i] = std::max(0.0f, wallFade[i] - deltaSeconds);
+		}
+
+		live = 0;
+		for (size_t i = 0; i < debrisChunks.size(); i++) {
+			DebrisChunk &chunk = debrisChunks[i];
+			chunk.age += deltaSeconds;
+			if (chunk.age >= chunk.life) continue;
+			// Real ballistics rather than the particles' softened fall -
+			// these are rocks, and they should arc and land like rocks.
+			chunk.vy -= kGravity * deltaSeconds;
+			chunk.x += chunk.vx * deltaSeconds;
+			chunk.y += chunk.vy * deltaSeconds;
+			chunk.z += chunk.vz * deltaSeconds;
+			chunk.angle += chunk.spin * deltaSeconds;
+			debrisChunks[live++] = chunk;
+		}
+		debrisChunks.resize(live);
+
+		live = 0;
+		for (size_t i = 0; i < floatingLabels.size(); i++) {
+			floatingLabels[i].age += deltaSeconds;
+			if (floatingLabels[i].age >= floatingLabels[i].life) continue;
+			// Drift upward as they fade, so a number reads as leaving
+			// rather than simply vanishing.
+			floatingLabels[i].y += deltaSeconds * 2.5f;
+			floatingLabels[live++] = floatingLabels[i];
+		}
+		floatingLabels.resize(live);
 
 		live = 0;
 		for (size_t i = 0; i < beams.size(); i++) {
@@ -4383,6 +4614,86 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 	}
 
+	// M6: the arena wall flash. Drawn after the ground and before the water,
+	// with the other translucent geometry. Each side is one quad standing on
+	// the arena boundary, matching upstream's own corners and its 256-unit
+	// height - the panel is meant to look like the whole wall lighting up,
+	// not a splash where the shot landed.
+	if ((wallFade[0] > 0.0f || wallFade[1] > 0.0f ||
+		 wallFade[2] > 0.0f || wallFade[3] > 0.0f) && sightProgram != 0) {
+		// Upstream's own per-type colours (OptionsTransient::getWallColor),
+		// read from the engine rather than fixed here - the type is picked
+		// per round, since WallType defaults to WallRandom.
+		switch (ctx->getOptionsTransient().getWallType()) {
+			case OptionsTransient::wallWrapAround:
+				wallColor[0] = 0.5f; wallColor[1] = 0.5f; wallColor[2] = 0.0f; break;
+			case OptionsTransient::wallBouncy:
+				wallColor[0] = 0.0f; wallColor[1] = 0.0f; wallColor[2] = 0.5f; break;
+			case OptionsTransient::wallConcrete:
+				wallColor[0] = 0.5f; wallColor[1] = 0.5f; wallColor[2] = 0.5f; break;
+			default:
+				wallColor[0] = wallColor[1] = wallColor[2] = 0.0f; break;
+		}
+
+		GroundMaps &ground = ctx->getLandscapeMaps().getGroundMaps();
+		const float ax = (float) ground.getArenaX();
+		const float ay = (float) ground.getArenaY();
+		const float aw = (float) ground.getArenaWidth();
+		const float ah = (float) ground.getArenaHeight();
+		const float top = 256.0f;   // upstream's own wall height
+
+		// Upstream's corner order, converted to our world axes. Its
+		// LeftSide/RightSide/TopSide/BotSide index the arena in landscape
+		// terms, so the pairs are taken from its own drawWall calls rather
+		// than re-derived.
+		const float sides[4][4] = {
+			// x0, y0(engine), x1, y1(engine)
+			{ ax,      ay + ah, ax,      ay      },  // LeftSide
+			{ ax + aw, ay,      ax + aw, ay + ah },  // RightSide
+			{ ax,      ay,      ax + aw, ay      },  // TopSide
+			{ ax + aw, ay + ah, ax,      ay + ah },  // BotSide
+		};
+
+		std::vector<float> quads;
+		for (int side = 0; side < 4; side++) {
+			const float fade = wallFade[side];
+			if (fade <= 0.0f) continue;
+			const float x0 = sides[side][0], z0 = worldZFromEngineY(sides[side][1]);
+			const float x1 = sides[side][2], z1 = worldZFromEngineY(sides[side][3]);
+			const float r = wallColor[0] * fade;
+			const float g = wallColor[1] * fade;
+			const float b = wallColor[2] * fade;
+			const float corner[6][3] = {
+				{ x0, 0.0f, z0 }, { x1, 0.0f, z1 }, { x1, top, z1 },
+				{ x0, 0.0f, z0 }, { x1, top,  z1 }, { x0, top, z0 },
+			};
+			for (int c = 0; c < 6; c++) {
+				quads.push_back(corner[c][0]);
+				quads.push_back(corner[c][1]);
+				quads.push_back(corner[c][2]);
+				quads.push_back(r); quads.push_back(g); quads.push_back(b);
+			}
+		}
+
+		if (!quads.empty()) {
+			glUseProgram(sightProgram);
+			glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, mvp.m);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+			glDepthMask(GL_FALSE);
+			glDisable(GL_CULL_FACE);
+			glBindVertexArray(beamVao);
+			glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
+			glBufferData(GL_ARRAY_BUFFER, quads.size() * sizeof(float), quads.data(), GL_DYNAMIC_DRAW);
+			frameDrawCalls++;
+			glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (quads.size() / 6));
+			glEnable(GL_CULL_FACE);
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+			glBindVertexArray(0);
+		}
+	}
+
 	// Water goes on immediately after the ground and before anything that
 	// stands on it. It blends over the terrain already drawn (so a shoreline
 	// shows the bottom shelving away) but still writes depth, so a tank or a
@@ -4611,6 +4922,27 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// The tank loop below expects the ordinary mesh program bound.
 		glUseProgram(meshProgram);
 	}
+	// M6: the thrown rocks. Upstream picks between rock1 and rock2 per chunk
+	// and draws them opaque in a flat dark grey-green, untextured.
+	if (!debrisChunks.empty()) {
+		ModelID rockIds[2];
+		rockIds[0].initFromString("ase", "data/meshes/rock1.ase", "none");
+		rockIds[1].initFromString("ase", "data/meshes/rock2.ase", "none");
+		glUniform4f(meshColorLoc, 0.3f, 0.4f, 0.3f, 1.0f);
+		for (const DebrisChunk &chunk : debrisChunks) {
+			Model *model = loadModelSafely(rockIds[chunk.mesh & 1]);
+			if (!model) continue;
+			GpuModel *gpu = uploadModel(model);
+			if (!gpu) continue;
+			Mat4 rockModel = Mat4::multiply(
+				Mat4::translate(chunk.x, chunk.y, chunk.z),
+				Mat4::multiply(
+					Mat4::rotateAxis(chunk.axisX, chunk.axisY, chunk.axisZ, chunk.angle),
+					Mat4::scale(gpu->scale * chunk.scale)));
+			drawMeshGroup(gpu->hull, meshMvpLoc, Mat4::multiply(mvp, rockModel));
+		}
+	}
+
 	std::vector<float> unmodelledMine, unmodelledOther;
 	bool haveSight = false;
 	Mat4 sightTransform = Mat4::identity();
@@ -4956,6 +5288,28 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		std::lock_guard<std::mutex> lock(g_overlayMutex);
 		g_tankOverlays.swap(overlays);
 	}
+
+	// The floating labels take the same projection as the plates above.
+	{
+		std::vector<FloatingLabel> labels;
+		labels.reserve(floatingLabels.size());
+		for (FloatingLabel label : floatingLabels) {
+			const float cx = mvp.m[0] * label.x + mvp.m[4] * label.y + mvp.m[8]  * label.z + mvp.m[12];
+			const float cy = mvp.m[1] * label.x + mvp.m[5] * label.y + mvp.m[9]  * label.z + mvp.m[13];
+			const float cw = mvp.m[3] * label.x + mvp.m[7] * label.y + mvp.m[11] * label.z + mvp.m[15];
+			if (cw > 0.0001f) {
+				const float ndcX = cx / cw, ndcY = cy / cw;
+				label.screenX = (ndcX * 0.5f + 0.5f) * (float) surfaceWidth;
+				label.screenY = (1.0f - (ndcY * 0.5f + 0.5f)) * (float) surfaceHeight;
+				label.onScreen =
+					label.screenX >= 0.0f && label.screenX <= (float) surfaceWidth &&
+					label.screenY >= 0.0f && label.screenY <= (float) surfaceHeight;
+			}
+			labels.push_back(label);
+		}
+		std::lock_guard<std::mutex> lock(g_labelMutex);
+		g_labelOverlays.swap(labels);
+	}
 }
 
 // M6: battlefield touch now drives the orbit camera (see the file-level
@@ -5200,4 +5554,35 @@ Java_com_rm_scorchdroid_GameRenderer_nativeSetCameraPreset(JNIEnv *, jobject, ji
 	// the wrong icon.
 	if (g_camera.preset == OrbitCamera::pFree) g_camera.followMode = false;
 	if (g_camera.preset == OrbitCamera::pFollow) g_camera.followMode = true;
+}
+
+// M6: the short-lived world-anchored labels - floating damage numbers and
+// speech bubbles. Rows are "screenX|screenY|onScreen|fade|r|g|b|text"; text
+// is last so it may contain pipes. Drawn in Compose because this renderer
+// has no font, exactly as the tank name plates are.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeGetFloatingLabels(JNIEnv *env, jobject) {
+    std::vector<FloatingLabel> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(g_labelMutex);
+        snapshot = g_labelOverlays;
+    }
+
+    jclass stringClass = env->FindClass("java/lang/String");
+    jobjectArray result = env->NewObjectArray((jsize) snapshot.size(), stringClass, nullptr);
+    for (size_t i = 0; i < snapshot.size(); i++) {
+        const FloatingLabel &label = snapshot[i];
+        // Fade over the last part of the life, so a number leaves rather
+        // than blinking out.
+        const float remaining = 1.0f - (label.age / label.life);
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "%.1f|%.1f|%d|%.3f|%.3f|%.3f|%.3f|%s",
+                 label.screenX, label.screenY, label.onScreen ? 1 : 0,
+                 std::min(remaining * 2.0f, 1.0f),
+                 label.r, label.g, label.b, label.text.c_str());
+        jstring row = env->NewStringUTF(buffer);
+        env->SetObjectArrayElement(result, (jsize) i, row);
+        env->DeleteLocalRef(row);
+    }
+    return result;
 }

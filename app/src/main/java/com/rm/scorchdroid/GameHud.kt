@@ -48,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
@@ -179,6 +180,10 @@ class GameHudState {
     var shotLocked by mutableStateOf(false)
     // M6: name plates, refreshed from the renderer's projection every tick.
     var tankOverlays by mutableStateOf<List<TankOverlay>>(emptyList())
+    // M6: floating damage numbers and speech bubbles, world-anchored and
+    // already projected by the renderer - it has no font, so they are drawn
+    // here alongside the name plates.
+    var floatingLabels by mutableStateOf<List<FloatingLabel>>(emptyList())
     // M6 parity: current wind (speed + direction) - it really does perturb
     // shots, and nothing showed it before. "" while there's no game yet.
     var windLabel by mutableStateOf("")
@@ -538,6 +543,7 @@ fun GameHud(
         // Name plates and health bars, positioned from the renderer's own
         // projection. Drawn before the dialog host so a modal covers them.
         TankPlates(state.tankOverlays)
+        FloatingLabels(state.floatingLabels)
 
         HudDialogHost(state.dialog)
     }
@@ -1022,8 +1028,24 @@ private fun ChatComposer(
                 singleLine = true,
                 textStyle = MaterialTheme.typography.bodySmall,
                 placeholder = {
-                    Text("Message", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "Message",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.White.copy(alpha = 0.5f),
+                    )
                 },
+                // Explicit colours: the field sits on a near-black surface,
+                // and the theme's defaults are dark-on-light, which left the
+                // text all but invisible against it.
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = Color.White,
+                    unfocusedTextColor = Color.White,
+                    cursorColor = Color.White,
+                    focusedBorderColor = Color.White.copy(alpha = 0.7f),
+                    unfocusedBorderColor = Color.White.copy(alpha = 0.4f),
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                ),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = {
                     if (text.isNotBlank()) onSend(text.trim())
@@ -1034,5 +1056,29 @@ private fun ChatComposer(
                     .focusRequester(focusRequester),
             )
         }
+    }
+}
+
+
+/**
+ * M6: upstream's floating damage numbers and speech bubbles. The renderer
+ * projects them; they are drawn here because it has no font, which is the
+ * same reason the tank name plates live in Compose.
+ */
+@Composable
+private fun FloatingLabels(labels: List<FloatingLabel>) {
+    val density = LocalDensity.current
+    labels.forEach { label ->
+        if (!label.onScreen) return@forEach
+        Text(
+            text = label.text,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = label.color.copy(alpha = label.fade.coerceIn(0f, 1f)),
+            modifier = Modifier.offset(
+                x = with(density) { label.screenX.toDp() } - 16.dp,
+                y = with(density) { label.screenY.toDp() } - 10.dp,
+            ),
+        )
     }
 }
