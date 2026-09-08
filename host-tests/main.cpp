@@ -52,6 +52,7 @@
 #include <TargetModelStore.h>
 #include <SkyDescription.hpp>
 #include <ChatStore.h>
+#include <InstanceBuffer.hpp>
 #include <weapons/WeaponMoveTank.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <DeformEventQueue.h>
@@ -800,6 +801,51 @@ namespace
 	// must be monotonic even across a clear(), and since() must return only
 	// what the caller has not already been shown. Get either wrong and the
 	// on-screen stack either restarts a message's timer forever or drops it.
+	// M6 performance: the instance packing behind instanced scenery drawing.
+	// Worth pinning because a transposed pair of floats here would put every
+	// tree in the wrong place, or tint the lot black, and the symptom would
+	// be a scene that looks wrong with nothing to point at - the GL calls
+	// around it cannot be tested from here, but this can.
+	void testInstancePacking()
+	{
+		printf("\ninstance packing (instanced scenery draw):\n");
+
+		std::vector<ScorchDroidInstances::Instance> instances;
+		ScorchDroidInstances::Instance first;
+		first.x = 1.0f; first.y = 2.0f; first.z = 3.0f; first.scale = 4.0f;
+		first.rotationRadians = 5.0f; first.r = 0.25f; first.g = 0.5f; first.b = 0.75f;
+		instances.push_back(first);
+
+		ScorchDroidInstances::Instance second;
+		second.x = -1.0f; second.y = -2.0f; second.z = -3.0f; second.scale = 0.5f;
+		second.rotationRadians = -1.5f; second.r = 1.0f; second.g = 0.0f; second.b = 0.0f;
+		instances.push_back(second);
+
+		std::vector<float> packed;
+		ScorchDroidInstances::pack(instances, packed);
+
+		check(packed.size() == instances.size() * ScorchDroidInstances::kFloatsPerInstance,
+			"packs exactly kFloatsPerInstance floats per instance");
+		if (packed.size() != 16) return;
+
+		// Attribute 2 is (x, y, z, scale); attribute 3 is (rotation, r, g, b).
+		check(packed[0] == 1.0f && packed[1] == 2.0f && packed[2] == 3.0f && packed[3] == 4.0f,
+			"the first vec4 is position then scale");
+		check(packed[4] == 5.0f && packed[5] == 0.25f && packed[6] == 0.5f && packed[7] == 0.75f,
+			"the second vec4 is rotation then colour");
+
+		// The second instance must start exactly one stride in - an
+		// off-by-one here would shear every instance against the next.
+		check(packed[8] == -1.0f && packed[11] == 0.5f,
+			"the next instance begins one stride later");
+		check(packed[12] == -1.5f && packed[13] == 1.0f && packed[14] == 0.0f,
+			"and carries its own rotation and colour");
+
+		// pack() appends, so several buckets can share one buffer.
+		ScorchDroidInstances::pack(instances, packed);
+		check(packed.size() == 32, "pack() appends rather than replacing");
+	}
+
 	void testChatStore()
 	{
 		printf("\nchat store (ids, since, version):\n");
@@ -1681,6 +1727,7 @@ int main(int argc, char **argv)
 	testTerrainDeformation();
 	testCameraPickRay();
 	testSkyDescription();
+	testInstancePacking();
 	testChatStore();
 	testLandscapeTargets();
 	testTankMovement();
