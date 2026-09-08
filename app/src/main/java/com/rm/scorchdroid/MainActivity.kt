@@ -80,6 +80,12 @@ class MainActivity : AppCompatActivity() {
 
         gameSurface = findViewById(R.id.game_surface)
         gameSurface.setEGLContextClientVersion(3)
+        // Ask to keep the GL context across a minimise/resume. Only a hint -
+        // the driver may drop it anyway under memory pressure, and
+        // nativeOnSurfaceCreated is written to cope when it does - but when
+        // it is honoured the resume is instant instead of rebuilding the
+        // terrain mesh, the ground texture and every model from scratch.
+        gameSurface.preserveEGLContextOnPause = true
         // M6: the 3D renderer needs a real depth buffer (the M2/M5 flat 2D
         // view never did) - GLSurfaceView's default config chooser doesn't
         // reliably request one on every device, so ask explicitly.
