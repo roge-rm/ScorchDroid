@@ -1,0 +1,215 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: the remaining missing visual events
+
+Four hooks found by auditing upstream's client rendering tree against
+this port, rather than by noticing something looked wrong. Each is the
+usual shape: an #else beside an existing #ifndef S3D_SERVER, pushing an
+event and nothing more.
+
+- **Explosion.cpp, mushroom cloud.** Upstream raises a cloud sprite on a
+  per-blast roll against the weapon's <createmushroomamount>, so the same
+  nuke does not always produce one. The roll is reproduced rather than
+  made unconditional - always-on would make every nuke identical.
+
+- **Explosion.cpp, thrown debris.** Upstream flings opaque tumbling rock
+  meshes alongside the fireball. Its count is
+  5 + size * (ExplosionParticleMult / 40); that multiplier is a display
+  option this port does not expose, so its default of 20 is used, and the
+  total is capped so a large blast cannot flood the renderer.
+
+- **TargetDamage.cpp, floating damage numbers.** Same gate as upstream
+  (the target's own displayDamage flag) and the same +-2.5 scatter, so
+  numbers from a multi-target blast do not stack on one spot.
+
+- **PhysicsParticleObject.cpp, arena wall impact.** The wall side is
+  carried in the event because the flash lies in that wall's plane. Worth
+  knowing this is ordinary play, not a corner case: WallType defaults to
+  WallRandom and this port's server config never sets it, so most rounds
+  have walls.
+
+- **TankSay.cpp, speech bubble.** Note this one also restores the *text*:
+  upstream does both the bubble and the ChannelManager::showText call
+  inside its client-only block, so before this a TankSay produced nothing
+  at all here - neither bubble nor message.
+
+No game logic changes; every push is inside #ifdef S3D_SERVER or the
+#else of an existing split.
+
+diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
+index 3f887050..6cebee92 100644
+--- a/src/common/actions/Explosion.cpp
++++ b/src/common/actions/Explosion.cpp
+@@ -98,6 +98,44 @@ void Explosion::init()
+ 		effect.b = colour[2].asFloat();
+ 		ScorchDroidEffects::push(effect);
+ 	}
++	// The mushroom cloud, for nuke-class weapons. Upstream raises it on a
++	// per-blast roll against <createmushroomamount> (Explosion.cpp's client
++	// body), so the same weapon does not always produce one - reproduced
++	// here rather than made unconditional, since always-on would make every
++	// nuke identical.
++	if (params_->getCreateMushroomAmount() > 0 &&
++		fixed::fromFloat(RAND) <= params_->getCreateMushroomAmount())
++	{
++		ScorchDroidEffects::EffectEvent cloud;
++		cloud.type = ScorchDroidEffects::eMushroom;
++		cloud.x = position_[0].asFloat();
++		cloud.y = position_[1].asFloat();
++		cloud.z = position_[2].asFloat();
++		// Upstream's own size for the cloud sprite.
++		cloud.size = params_->getSize().asFloat() - 2.0f;
++		ScorchDroidEffects::push(cloud);
++	}
++
++	// Thrown rock. Upstream's count is
++	// 5 + size * (ExplosionParticleMult / 40), where the multiplier is a
++	// display option this port does not expose; its default of 20 is used.
++	if (params_->getCreateDebris())
++	{
++		const float mult = 20.0f / 40.0f;
++		int debris = 5 + (int) (params_->getSize().asFloat() * mult);
++		if (debris > 40) debris = 40;
++		for (int d = 0; d < debris; d++)
++		{
++			ScorchDroidEffects::EffectEvent rock;
++			rock.type = ScorchDroidEffects::eDebris;
++			rock.x = position_[0].asFloat();
++			rock.y = position_[1].asFloat();
++			rock.z = position_[2].asFloat();
++			rock.size = params_->getSize().asFloat();
++			ScorchDroidEffects::push(rock);
++		}
++	}
++
+ 	// Muzzle smoke. Upstream raises this only for WeaponMuzzle - the puff a
+ 	// gun leaves when it fires, not something every explosion does - and
+ 	// does it right here, in the client body below (search addSmoke). Same
+diff --git a/src/common/actions/TankSay.cpp b/src/common/actions/TankSay.cpp
+index 8a34eb94..0bb3b6cf 100644
+--- a/src/common/actions/TankSay.cpp
++++ b/src/common/actions/TankSay.cpp
+@@ -19,6 +19,11 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #include <actions/TankSay.hpp>
++#ifdef S3D_SERVER
++	// Android build: the speech bubble is client-only here - see
++	// EffectEventQueue.h.
++	#include <EffectEventQueue.h>
++#endif
+ #ifndef S3D_SERVER
+ 	#include <sprites/TalkRenderer.hpp>
+ 	#include <sprites/ExplosionTextures.hpp>
+@@ -59,6 +64,26 @@ void TankSay::init()
+ 				white);
+ 			context_->getActionController().addAction(new SpriteAction(talk));
+ 
++			ChannelText text("general", text_);
++			text.setSrcPlayerId(playerId_);
++			ChannelManager::showText(*context_, text);
++		}
++#else
++		// Android build: the same speech bubble over the speaking tank,
++		// raised as an event. The text itself goes out on the general
++		// channel exactly as above - without this branch a TankSay produced
++		// nothing at all here, neither bubble nor message, since upstream
++		// does both inside the client-only block.
++		if (!context_->getServerMode())
++		{
++			FixedVector turret = tank->getLife().getTankTurretPosition();
++			ScorchDroidEffects::EffectEvent bubble;
++			bubble.type = ScorchDroidEffects::eTalk;
++			bubble.x = turret[0].asFloat();
++			bubble.y = turret[1].asFloat();
++			bubble.z = turret[2].asFloat();
++			ScorchDroidEffects::push(bubble);
++
+ 			ChannelText text("general", text_);
+ 			text.setSrcPlayerId(playerId_);
+ 			ChannelManager::showText(*context_, text);
+diff --git a/src/common/engine/PhysicsParticleObject.cpp b/src/common/engine/PhysicsParticleObject.cpp
+index 459088e3..e2e09803 100644
+--- a/src/common/engine/PhysicsParticleObject.cpp
++++ b/src/common/engine/PhysicsParticleObject.cpp
+@@ -19,6 +19,11 @@
+ ////////////////////////////////////////////////////////////////////////////////
+ 
+ #include <engine/PhysicsParticleObject.hpp>
++#ifdef S3D_SERVER
++	// Android build: the wall-hit flash is client-only here - see
++	// EffectEventQueue.h.
++	#include <EffectEventQueue.h>
++#endif
+ #include <engine/ScorchedContext.hpp>
+ #include <engine/ActionController.hpp>
+ #include <engine/Simulator.hpp>
+@@ -827,5 +832,28 @@ void PhysicsParticleActionObject::shotWallHit(CollisionInfo &collision)
+ 	{
+ 		addWallCollisionParticle(position_.asVector(), collision.collisionId);
+ 	}
++#else
++	// Android build: the same flash on the arena boundary, raised as an
++	// event. The wall side matters and is carried in `value` - the flash
++	// lies in that wall's plane, so without it the renderer cannot orient
++	// it. Walls are on in most rounds: WallType defaults to WallRandom, so
++	// this is ordinary play rather than a corner case.
++	if (!context_->getServerMode())
++	{
++		ScorchDroidEffects::EffectEvent hit;
++		hit.type = ScorchDroidEffects::eWallHit;
++		hit.x = position_[0].asFloat();
++		hit.y = position_[1].asFloat();
++		hit.z = position_[2].asFloat();
++		switch (collision.collisionId)
++		{
++		case CollisionIdWallLeft:   hit.value = (float) OptionsTransient::LeftSide;  break;
++		case CollisionIdWallRight:  hit.value = (float) OptionsTransient::RightSide; break;
++		case CollisionIdWallTop:    hit.value = (float) OptionsTransient::TopSide;   break;
++		case CollisionIdWallBottom: hit.value = (float) OptionsTransient::BotSide;   break;
++		default: return;
++		}
++		ScorchDroidEffects::push(hit);
++	}
+ #endif
+ }
+diff --git a/src/common/target/TargetDamage.cpp b/src/common/target/TargetDamage.cpp
+index cbc81867..79d1f651 100644
+--- a/src/common/target/TargetDamage.cpp
++++ b/src/common/target/TargetDamage.cpp
+@@ -24,6 +24,10 @@
+ #include <actions/Resurrection.hpp>
+ #ifndef S3D_SERVER
+ 	#include <sprites/TextActionRenderer.hpp>
++#else
++	// Android build: the damage number's drawing half is client-only
++	// here - see EffectEventQueue.h.
++	#include <EffectEventQueue.h>
+ #endif
+ #include <common/OptionsScorched.hpp>
+ #include <common/Defines.hpp>
+@@ -171,6 +175,25 @@ void TargetDamage::damageTarget(ScorchedContext &context,
+ 				)
+ 			);
+ 		}
++#else
++		// Android build: the same floating damage number, raised as an event
++		// for the HUD to draw - this port has no in-world text, so it is
++		// projected and drawn in Compose alongside the name plates. Same
++		// gate as upstream (the target's own displayDamage flag) and the
++		// same scatter, so numbers from a multi-target blast do not stack
++		// on one spot.
++		if (!context.getServerMode() &&
++			damagedTarget->getTargetState().getDisplayDamage())
++		{
++			Vector position = damagedTarget->getLife().getFloatPosition();
++			ScorchDroidEffects::EffectEvent number;
++			number.type = ScorchDroidEffects::eDamage;
++			number.x = position[0] + RAND * 5.0f - 2.5f;
++			number.y = position[1] + RAND * 5.0f - 2.5f;
++			number.z = position[2] + RAND * 5.0f - 2.5f;
++			number.value = damage.asFloat();
++			ScorchDroidEffects::push(number);
++		}
+ #endif // #ifndef S3D_SERVER
+ 
+ 		// Remove the life

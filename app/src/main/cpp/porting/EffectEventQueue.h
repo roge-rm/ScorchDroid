@@ -42,6 +42,24 @@ namespace ScorchDroidEffects
 		// and cadence that this port reproduces rather than re-invents:
 		// a gun's muzzle flash, a napalm fire, and a tank driving.
 		eSmoke,
+		// The mushroom cloud a nuke-class weapon raises. Distinct from
+		// eExplosion: upstream draws both, the cloud only for weapons whose
+		// <createmushroomamount> wins its roll. size is the blast size.
+		eMushroom,
+		// One thrown rock. Upstream's explosions fling opaque tumbling rock
+		// meshes alongside the fireball; being solid and dark they read
+		// against bright ground where an additive spark cannot. size is the
+		// blast size; one event per rock.
+		eDebris,
+		// A shot striking the arena boundary wall. `value` carries which
+		// side (OptionsTransient::WallSide), since the flash lies in that
+		// wall's plane.
+		eWallHit,
+		// A speech bubble over a tank that just said something.
+		eTalk,
+		// A floating damage number over a target that was just hurt.
+		// `value` is the amount.
+		eDamage,
 	};
 
 	struct EffectEvent
@@ -55,6 +73,10 @@ namespace ScorchDroidEffects
 
 		// World units. What it measures depends on the type - see above.
 		float size = 1.0f;
+
+		// Type-specific scalar: the damage amount for eDamage, the wall
+		// side for eWallHit. Unused by the rest.
+		float value = 0.0f;
 
 		// 0..1 RGB. Explosions carry the weapon's own <explosioncolour>;
 		// the rest get a sensible constant from the pushing site, since

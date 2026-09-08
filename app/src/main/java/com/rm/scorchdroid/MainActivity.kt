@@ -273,6 +273,7 @@ class MainActivity : AppCompatActivity() {
             // M6 name plates - the renderer projected these on its own
             // thread last frame; this just picks up the result.
             hudState.tankOverlays = parseTankOverlays(gameRenderer.nativeGetTankOverlays())
+            hudState.floatingLabels = parseFloatingLabels(gameRenderer.nativeGetFloatingLabels())
 
             val moveId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
             if (moveId != 0) hudState.shotLocked = false

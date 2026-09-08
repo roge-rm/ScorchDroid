@@ -71,6 +71,13 @@ class GameRenderer : GLSurfaceView.Renderer {
      */
     external fun nativeSetCameraPreset(preset: Int)
 
+    /**
+     * M6: short-lived labels anchored to a world position - floating damage
+     * numbers and speech bubbles - already projected to screen space. See
+     * [parseFloatingLabels].
+     */
+    external fun nativeGetFloatingLabels(): Array<String>
+
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         nativeOnSurfaceCreated()
     }
@@ -98,4 +105,32 @@ enum class CameraPreset(val label: String) {
     TANK("From the tank"),
     ACTION("Action"),
     SHOT("Follow the shot"),
+}
+
+/** One world-anchored label, projected to screen space by the renderer. */
+data class FloatingLabel(
+    val screenX: Float,
+    val screenY: Float,
+    val onScreen: Boolean,
+    val fade: Float,
+    val color: androidx.compose.ui.graphics.Color,
+    val text: String,
+)
+
+fun parseFloatingLabels(rows: Array<String>): List<FloatingLabel> = rows.mapNotNull { row ->
+    val p = row.split("|", limit = 8)
+    if (p.size != 8) return@mapNotNull null
+    FloatingLabel(
+        screenX = p[0].toFloatOrNull() ?: return@mapNotNull null,
+        screenY = p[1].toFloatOrNull() ?: return@mapNotNull null,
+        onScreen = p[2] == "1",
+        fade = p[3].toFloatOrNull() ?: 1f,
+        color = androidx.compose.ui.graphics.Color(
+            red = p[4].toFloatOrNull() ?: 1f,
+            green = p[5].toFloatOrNull() ?: 1f,
+            blue = p[6].toFloatOrNull() ?: 1f,
+            alpha = 1f,
+        ),
+        text = p[7],
+    )
 }
