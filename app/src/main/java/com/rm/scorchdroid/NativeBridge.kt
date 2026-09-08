@@ -266,6 +266,13 @@ object NativeBridge {
      */
     external fun setRenderOptions(showTrees: Boolean, showFog: Boolean)
 
+    /**
+     * M12: replaces the setup options with those in a preset file - upstream's
+     * own data/singletutorial.xml, in the only case that uses it. False if the
+     * file could not be read, in which case nothing changed.
+     */
+    external fun loadSetupPreset(path: String): Boolean
+
     external fun getAvailableMods(): Array<String>
 
     external fun getSelectedMod(): String

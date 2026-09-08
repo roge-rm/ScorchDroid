@@ -160,6 +160,36 @@ namespace ScorchDroidSetup
 		g_options->readOptionsFromFile(g_settingsFile);
 	}
 
+	bool loadPreset(const std::string &path)
+	{
+		// Checked before anything else, because upstream's reader treats a
+		// file it cannot open exactly like an empty one and returns success -
+		// see the "return true for an empty file" in
+		// OptionEntryHelper::readFromFile. Without this a mistyped preset path
+		// would quietly produce a config of nothing but compiled defaults,
+		// which is neither the preset nor what the player had, and would look
+		// like the tutorial simply being wrong.
+		{
+			std::ifstream probe(path.c_str());
+			if (!probe.is_open()) return false;
+		}
+
+		std::lock_guard<std::mutex> lock(g_mutex);
+		// Onto a fresh OptionsGame rather than over the current one: a preset
+		// is "these settings", not "these settings plus whatever was chosen
+		// before", and most options are absent from any given file, so
+		// layering would leave the player's last game showing through.
+		OptionsGame *loaded = new OptionsGame();
+		if (!loaded->readOptionsFromFile(path))
+		{
+			delete loaded;
+			return false;
+		}
+		delete g_options;
+		g_options = loaded;
+		return true;
+	}
+
 	std::vector<std::string> mods(const std::string &dataRoot)
 	{
 		// "none" is upstream's own name for the base game, not a placeholder
