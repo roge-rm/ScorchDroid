@@ -35,6 +35,9 @@ Cheers, enjoy! rm
   buying time, and wind — Scorched3D's own options, with its own limits, read from the engine
   rather than redeclared.
 - Mod support, including the bundled Apocalypse mod with its own weapons, landscapes and models.
+- A settings screen: your player name (shown to everyone in a network game), sound, graphics
+  detail, HUD and control preferences, including left-hand mode.
+- Portrait and landscape, switchable mid-game.
 
 ## Requirements
 
