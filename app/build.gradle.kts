@@ -1,6 +1,13 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+}
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) file.inputStream().use { load(it) }
 }
 
 // Staged before `android { }` so the assets source set below can point at
@@ -21,7 +28,7 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = 1
-        versionName = "1.0"
+        versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -30,10 +37,30 @@ android {
         }
     }
 
+    // Release signing credentials come from local.properties (never
+    // committed) as scorchdroid.release.{storeFile,storePassword,keyAlias,
+    // keyPassword}. Absent them the release build is simply unsigned, so a
+    // plain checkout of this repository still builds.
+    val releaseStoreFile = localProperties.getProperty("scorchdroid.release.storeFile")
+
+    signingConfigs {
+        if (releaseStoreFile != null) {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = localProperties.getProperty("scorchdroid.release.storePassword")
+                keyAlias = localProperties.getProperty("scorchdroid.release.keyAlias")
+                keyPassword = localProperties.getProperty("scorchdroid.release.keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             optimization {
                 enable = false
+            }
+            if (releaseStoreFile != null) {
+                signingConfig = signingConfigs.getByName("release")
             }
         }
     }

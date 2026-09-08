@@ -14,6 +14,8 @@ until it meets parity (or as close as we can get) with the original game.
 
 Cheers, enjoy! rm
 
+<img src="docs/shot-gameplay.png" alt="ScorchDroid mid-round: a forested island seen across the water, the player's red tank aiming from a ridge, with the angle and elevation sliders either side and the weapon and Fire buttons below" width="200" /> <img src="docs/shot-shop.png" alt="The shop, showing the Weapons tab with Baby Digger, Baby Missile, Baby Nuke and the rest priced against the player's $10000" width="200" /> <img src="docs/shot-scores.png" alt="The score table for round 1 of 5, turn 3 of 15, listing the player and a bot with their score, kills, wins and money, and the chat history below" width="200" /> <img src="docs/shot-camera.png" alt="The Action camera view, looking down on the whole island from above and behind the tank" width="200" />
+
 ## Features
 
 - The real Scorched3D simulation, not an approximation: upstream's weapons, accessories, terrain
