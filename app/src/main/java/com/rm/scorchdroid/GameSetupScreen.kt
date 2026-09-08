@@ -83,8 +83,7 @@ fun GameSetupScreen(
             // Back on the title row, like Settings and About: this page
             // scrolls for several screens, and someone who opens it and
             // changes their mind should not have to scroll past every option
-            // to leave. Start stays at the foot - that is the commit action,
-            // and you arrive there having read what you are committing to.
+            // to leave.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -104,7 +103,36 @@ fun GameSetupScreen(
                 color = SetupAccent,
                 style = MaterialTheme.typography.bodySmall,
             )
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(16.dp))
+
+            // Start sits at the top, not at the foot. The defaults are a
+            // playable game, so the common case is opening this screen and
+            // wanting to play - and making that person scroll past every
+            // option to reach the button taxes them for a choice they did not
+            // want to make. Anyone who does want to change something scrolls
+            // down, changes it, and presses Start on the way back up.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(
+                    onClick = onStart,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = SetupAccent.copy(alpha = 0.25f),
+                        contentColor = Color.White,
+                    ),
+                    modifier = Modifier.widthIn(min = 150.dp),
+                ) {
+                    Text("Start", style = MaterialTheme.typography.titleMedium)
+                }
+                TextButton(onClick = onReset) { Text("Reset to defaults", color = SetupAccent) }
+            }
+
+            HorizontalDivider(
+                color = Color.White.copy(alpha = 0.12f),
+                modifier = Modifier.padding(top = 16.dp, bottom = 14.dp),
+            )
 
             options.forEach { option ->
                 SetupRow(option, onChange)
@@ -120,29 +148,28 @@ fun GameSetupScreen(
                 ModRow(mods, selectedMod, onModChange)
             }
 
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = onStart,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = SetupAccent.copy(alpha = 0.25f),
-                    contentColor = Color.White,
-                ),
-                modifier = Modifier.fillMaxWidth().widthIn(max = 340.dp),
-            ) {
-                Text("Start", style = MaterialTheme.typography.titleMedium)
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(onClick = onReset) { Text("Reset to defaults", color = SetupAccent) }
-            }
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
 
+/**
+ * Enums whose values form a scale rather than a set, and so read better as a
+ * slider than as a row of chips.
+ *
+ * Upstream declares WindForce as Random, None, 1, 2, 3, 4, 5, Breezy, Gale and
+ * WindType as Never, Sometimes, Frequently, Constantly, Always - both in
+ * increasing order, so dragging right means more wind and more change. The
+ * other enums are not like that: WallType's Concrete, Bouncy, Random and
+ * TurnType's several turn orders are unordered alternatives, and putting them
+ * on a track would invent an ordering upstream does not have.
+ */
+private val SLIDER_ENUMS = setOf("WindForce", "WindType")
+
 @Composable
 private fun SetupRow(option: SetupOption, onChange: (SetupOption, String) -> Unit) {
+    val asSlider = option.kind == SetupKind.ENUM && option.name in SLIDER_ENUMS &&
+        option.choices.size > 1
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -154,9 +181,16 @@ private fun SetupRow(option: SetupOption, onChange: (SetupOption, String) -> Uni
                 color = Color.White,
                 style = MaterialTheme.typography.titleSmall,
             )
-            if (option.kind == SetupKind.BOUNDED_INT || option.kind == SetupKind.INT) {
+            val shown = when {
+                option.kind == SetupKind.BOUNDED_INT || option.kind == SetupKind.INT -> option.value
+                // The choice's presentable name, not its raw identifier: the
+                // chips show "Breezy" and so should this.
+                asSlider -> option.choices.firstOrNull { it.rawLabel == option.value }?.label
+                else -> null
+            }
+            if (shown != null) {
                 Text(
-                    text = option.value,
+                    text = shown,
                     color = SetupAccent,
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
@@ -171,7 +205,9 @@ private fun SetupRow(option: SetupOption, onChange: (SetupOption, String) -> Uni
         Spacer(Modifier.height(6.dp))
         when (option.kind) {
             SetupKind.BOUNDED_INT -> BoundedIntControl(option, onChange)
-            SetupKind.ENUM -> EnumControl(option, onChange)
+            SetupKind.ENUM ->
+                if (asSlider) EnumSliderControl(option, onChange)
+                else EnumControl(option, onChange)
             SetupKind.BOOL -> BoolControl(option, onChange)
             // A plain int has no range to constrain a slider, and a free text
             // field for a game rule invites values upstream would refuse. None
@@ -211,6 +247,33 @@ private fun BoundedIntControl(option: SetupOption, onChange: (SetupOption, Strin
         },
         valueRange = option.minValue.toFloat()..option.maxValue.toFloat(),
         steps = if (stepCount in 1..12) stepCount else 0,
+        colors = SliderDefaults.colors(
+            thumbColor = SetupAccent,
+            activeTrackColor = SetupAccent.copy(alpha = 0.7f),
+            inactiveTrackColor = Color.White.copy(alpha = 0.2f),
+        ),
+    )
+}
+
+@Composable
+private fun EnumSliderControl(option: SetupOption, onChange: (SetupOption, String) -> Unit) {
+    // The slider runs over positions in upstream's list, not over the enum's
+    // numbers. They happen to agree for both wind options, but nothing
+    // guarantees an enum is numbered contiguously from zero - WindForce
+    // already skips nothing only by luck - and a gap would leave dead stretches
+    // of track that snap to a value the option does not have.
+    val index = option.choices.indexOfFirst { it.rawLabel == option.value }.coerceAtLeast(0)
+    val last = option.choices.size - 1
+    Slider(
+        value = index.toFloat(),
+        onValueChange = { raw ->
+            val picked = option.choices[raw.roundToInt().coerceIn(0, last)]
+            if (picked.rawLabel != option.value) onChange(option, picked.rawLabel)
+        },
+        valueRange = 0f..last.toFloat(),
+        // One tick per choice: nine of them at most, and here they do mean
+        // "these are your choices" - there is nothing between Breezy and Gale.
+        steps = (last - 1).coerceAtLeast(0),
         colors = SliderDefaults.colors(
             thumbColor = SetupAccent,
             activeTrackColor = SetupAccent.copy(alpha = 0.7f),
