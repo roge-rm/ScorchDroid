@@ -153,6 +153,10 @@ target_link_options(host_tests PRIVATE -rdynamic)
 # filesystem access to the submodule checkout.
 target_compile_definitions(host_tests PRIVATE
     SCORCHED_SUBMODULE_ROOT="${THIRD_PARTY_DIR}/scorched3d"
+    # The config the app actually ships, so the setup tests exercise our own
+    # server settings rather than upstream's data/server.xml - the bot it
+    # names is exactly what a mod has to be able to provide.
+    SCORCHDROID_APP_CONFIG="${CMAKE_CURRENT_SOURCE_DIR}/../app/src/main/assets/scorchdroid_server.xml"
 )
 
 enable_testing()

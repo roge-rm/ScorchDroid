@@ -2090,7 +2090,10 @@ static void testGameSetup()
 {
 	printf("game setup (M10: choosing rounds, wall type and the rest):\n");
 
-	ScorchDroidSetup::ensureLoaded("data/server.xml");
+	// Our own shipped config, not upstream's data/server.xml: this is the file
+	// the setup screen edits, and the bot it names ("Moron") is exactly what a
+	// mod has to be able to provide.
+	ScorchDroidSetup::ensureLoaded(SCORCHDROID_APP_CONFIG);
 	std::vector<ScorchDroidSetup::Option> options = ScorchDroidSetup::options();
 	check(!options.empty(), "the setup surface exposes some options");
 
@@ -2200,47 +2203,73 @@ static void testGameSetup()
 	ScorchDroidSetup::setMod("none");
 	unlink(sessionPath);
 
-	// The bundled Apocalypse mod does not work with the version of Scorched3D
-	// this port pins, and the failure is upstream's, in upstream's own data.
+	// The bundled Apocalypse mod, and the bot it cannot provide.
 	//
-	// apoc's data/tankais.xml defines twelve AIs, but only the first seven
-	// load. The eighth, "Shark", declares its weapons in the old inline form
-	// (a <weaponset> full of <weapon> nodes) while this version's parser wants
-	// a named set (<weapons><weaponset>WeaponSetSniper</weaponset></weapons>)
-	// and returns false without one - see TankAICurrent::parseConfig. Worse,
-	// TankAIStore::loadAIs abandons the *whole list* at the first rejection,
-	// so everything after Shark is missing too, including "Moron", which the
-	// shipped server config names as the bot to play against. The result on a
-	// device is a game that loads its landscape, logs "Failed to find a tank
-	// ai called Moron" every tick with the bot slot unfilled, and never
-	// starts.
+	// apoc's data/tankais.xml looks like it defines twelve AIs. Five of them,
+	// including "Moron", sit inside an XML comment, so upstream's parser never
+	// sees them and the mod really offers seven. The shipped server config
+	// names "Moron" as the bot to play against, so choosing this mod produced
+	// a game that loaded its landscape and then waited forever for a bot that
+	// could never be created - logging "Failed to find a tank ai called
+	// Moron" every tick, where nothing surfaced it.
 	//
-	// Pinned here rather than worked around: this is what makes the mod
-	// picker unsafe to offer, and if a future upstream bump fixes the data
-	// this test fails and tells us the picker can be turned on.
+	// Both halves are checked: that the scan agrees with what the engine
+	// actually loads (the trap - a scan that read commented-out definitions
+	// would report bots that do not exist), and that the substitution leaves
+	// the config naming a bot the mod really has.
 	{
+		std::vector<std::string> baseBots = ScorchDroidSetup::botNames(".", "none");
+		std::vector<std::string> apocBots = ScorchDroidSetup::botNames(".", "apoc");
+		check(!baseBots.empty() && !apocBots.empty(), "both mods' bot lists are readable");
+
+		bool baseHasMoron = false, apocHasMoron = false, apocHasCyborg = false;
+		for (size_t i = 0; i < baseBots.size(); i++)
+			if (baseBots[i] == "Moron") baseHasMoron = true;
+		for (size_t i = 0; i < apocBots.size(); i++)
+		{
+			if (apocBots[i] == "Moron") apocHasMoron = true;
+			if (apocBots[i] == "Cyborg") apocHasCyborg = true;
+		}
+		check(baseHasMoron, "the base game provides the bot the shipped config asks for");
+		check(apocHasCyborg, "Apocalypse provides the bots that are not commented out");
+		check(!apocHasMoron,
+			"...and not the ones that are - the scan must agree with the parser, "
+			"not with what the file appears to contain");
+
 		ScorchDroidSetup::setMod("apoc");
-		const char *probePath = "/tmp/scorchdroid-host-tests-apoc.xml";
-		ScorchDroidSetup::writeSessionFile(probePath);
-		ScorchedServerSettingsOptions apocSettings(probePath, false, false);
+		check(ScorchDroidSetup::ensureBotsValidForMod(".") > 0,
+			"choosing Apocalypse replaces the bot it cannot provide");
+		check(ScorchDroidSetup::ensureBotsValidForMod(".") == 0,
+			"...and doing it again changes nothing, so it is safe every start");
+
+		// The real proof: start a server with that mod and ask the engine's
+		// own store for the bot the config now names.
+		const char *apocPath = "/tmp/scorchdroid-host-tests-apoc.xml";
+		ScorchDroidSetup::writeSessionFile(apocPath);
+		ScorchedServerSettingsOptions apocSettings(apocPath, false, false);
 		bool apocUp = ScorchedServer::startServer(apocSettings, true, nullptr);
 		check(apocUp, "a server starts with the Apocalypse mod selected");
 		if (apocUp)
 		{
 			check(std::string(ScorchedServer::instance()->getOptionsGame().getMod()) == "apoc",
 				"...and really is running that mod, so the session config route works");
-
 			TankAIStore &ais = ScorchedServer::instance()->getTankAIs();
-			check(ais.getAIByName("Cyborg") != nullptr,
-				"the AIs before the broken entry load");
-			check(ais.getAIByName("Shark") == nullptr,
-				"\"Shark\" does not, because its weapons are in a format this version dropped");
-			check(ais.getAIByName("Moron") == nullptr,
-				"and nor does \"Moron\", which the file defines *after* Shark - "
-				"one bad entry costs every entry below it");
+			std::string configuredBot;
+			std::list<OptionEntry *> &players =
+				ScorchedServer::instance()->getOptionsGame().getMainOptions().getPlayerTypeOptions();
+			for (std::list<OptionEntry *>::iterator itor = players.begin();
+				itor != players.end();
+				++itor)
+			{
+				const std::string value = (*itor)->getValueAsString();
+				if (value != "Human" && !value.empty()) configuredBot = value;
+			}
+			check(!configuredBot.empty(), "the session config still names a bot");
+			check(!configuredBot.empty() && ais.getAIByName(configuredBot.c_str()) != nullptr,
+				"...and the engine can actually create it, which is what was broken");
 		}
 		ScorchDroidSetup::setMod("none");
-		unlink(probePath);
+		unlink(apocPath);
 	}
 
 	ScorchDroidSetup::reset();

@@ -325,6 +325,17 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
     // read-only or full data directory costs the player their choices rather
     // than the game.
     ScorchDroidSetup::ensureLoaded("scorchdroid_server.xml");
+    // A mod brings its own set of bot AIs, and the shipped config names one
+    // ("Moron") that the Apocalypse mod does not provide - five of its
+    // definitions, that one included, sit inside an XML comment. A slot naming
+    // an AI the engine cannot create never fills, and the game then loads its
+    // landscape and waits forever. Done before the config is written, since
+    // that is what the server reads.
+    const int botsChanged = ScorchDroidSetup::ensureBotsValidForMod(".");
+    if (botsChanged > 0) {
+        LOGI("Mod \"%s\" does not provide the configured bot(s); substituted %d",
+             ScorchDroidSetup::mod().c_str(), botsChanged);
+    }
     const char *kSessionFile = "scorchdroid_session.xml";
     const bool wroteSession = ScorchDroidSetup::writeSessionFile(kSessionFile);
     if (!wroteSession) {

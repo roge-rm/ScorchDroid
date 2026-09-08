@@ -233,22 +233,11 @@ class MainActivity : AppCompatActivity() {
     private fun openSetup(title: String) {
         setupTitle = title
         setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
-        // Not offered, because the only mod there is to choose does not work
-        // with the Scorched3D version this port pins - and the fault is in
-        // upstream's own data, not here.
-        //
-        // apoc's data/tankais.xml declares its eighth AI's weapons in a format
-        // this version's parser dropped, and TankAIStore::loadAIs abandons the
-        // whole list at the first rejection - so the bot the shipped config
-        // names is missing, its slot never fills, and the game never starts.
-        // testGameSetup pins all of that; if an upstream bump ever fixes the
-        // data, that test fails and this line can go.
-        //
-        // The plumbing underneath is real and stays: the mod reaches the
-        // server through the session config, which is the only route that can
-        // work at all, since startServerInternal() loads mod files partway
-        // through its own startup.
-        availableMods = emptyList()
+        // The mod reaches the server through the session config, which is the
+        // only route that can work: startServerInternal() loads mod files
+        // partway through its own startup, so anything applied after
+        // startServer() is far too late for it.
+        availableMods = NativeBridge.getAvailableMods().toList()
         selectedMod = NativeBridge.getSelectedMod()
         appScreen = AppScreen.SETUP
     }
