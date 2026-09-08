@@ -3822,6 +3822,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float x, y, z;
 		float headingRadians;
 		float elevationRadians;
+		// Which way the hull faces. Upstream turns it as the tank drives
+		// (TanketMovement sets the target's rotation to the bearing of each
+		// step it takes) and it is quite separate from headingRadians,
+		// which is where the *gun* points - a tank can drive east while
+		// aiming north.
+		float hullYawRadians;
 		bool mine;
 		bool alive;
 		// Tank::getVisible() - alive, or shopping in the buying phase.
@@ -4080,6 +4086,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// shot.
 		float heading = tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
 		float elevation = tank->getShotInfo().getRotationGunYZ().asFloat() * (float) M_PI / 180.0f;
+		// The hull's own bearing, from the same place a moving target's
+		// comes from: TargetLife keeps it only as a quaternion, a yaw about
+		// the engine's up axis laid out (w, x, y, z). Zeroed when the tank
+		// stops (TanketMovement setRotation(0)), so a parked tank faces the
+		// way upstream parks it.
+		FixedVector4 &tankQuat = tank->getLife().getQuaternion();
+		float hullYaw = 2.0f * atan2f(tankQuat[3].asFloat(), tankQuat[0].asFloat());
 		bool alive = (tank->getState().getState() == TankState::sNormal);
 		bool visible = tank->getVisible();
 
@@ -4143,7 +4156,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 
 		tankInstances.push_back({
-			x, groundY, z, heading, elevation, mine, alive, visible, groundTilt, model,
+			x, groundY, z, heading, elevation, hullYaw, mine, alive, visible, groundTilt, model,
 			LangStringUtil::convertFromLang(tank->getTargetName()),
 			std::min(std::max(lifeFraction, 0.0f), 1.0f),
 			std::min(std::max(shieldFraction, 0.0f), 1.0f),
@@ -4992,19 +5005,25 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// follow camera; it doesn't need to lie about its colour too.
 		glUniform4f(meshColorLoc, inst.colorR, inst.colorG, inst.colorB, 1.0f);
 
-		// Hull sits still; the turret swings to the firing bearing and the
-		// gun additionally lifts to the elevation, each about its own pivot
-		// (see uploadModel) - the same articulation upstream does.
+		// The hull faces the way the tank last drove; the turret swings to
+		// the firing bearing and the gun additionally lifts to the
+		// elevation, each about its own pivot (see uploadModel) - the same
+		// articulation upstream does. The turret's bearing is a world
+		// angle, not one relative to the hull, so it is deliberately built
+		// from `base` rather than off the hull's transform.
 		Mat4 base = Mat4::multiply(
 			Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
 			Mat4::scale(gpu->scale));
 		// The hull, and only the hull, leans onto the ground - the turret
 		// and gun below stay in world axes so the barrel keeps agreeing
 		// with the shot (see where groundTilt is built).
+		// Tilt first, then yaw inside it, so a tank driving across a slope
+		// turns about its own up axis rather than the world's - the same
+		// order the ground tilt was added under.
 		Mat4 hullMvp = Mat4::multiply(mvp, Mat4::multiply(
 			Mat4::multiply(
 				Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
-				inst.groundTilt),
+				Mat4::multiply(inst.groundTilt, Mat4::rotateY(inst.hullYawRadians))),
 			Mat4::scale(gpu->scale)));
 		drawMeshGroup(gpu->hull, meshMvpLoc, hullMvp);
 
