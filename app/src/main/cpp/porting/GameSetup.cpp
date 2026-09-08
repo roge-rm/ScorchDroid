@@ -23,16 +23,30 @@ namespace
 	// destinations, master-server publishing, sync-check tuning - that mean
 	// nothing when the "server" is the phone in your hand. These are the ones
 	// that change how a game plays.
+	// M17 fills this out: the first nine were the ones a first game needs,
+	// and everything else upstream lets a host decide was simply
+	// unreachable. The order is the order the screen shows them - the shape
+	// of the game first, then the clocks, then the arsenal, then the
+	// physics - rather than OptionsGame's own, which is grouped by the
+	// section of the config file it lives in.
 	const char *kExposed[] = {
 		"NumberOfRounds",
 		"MaxNumberOfRoundTurns",
+		"PlayerLives",
 		"TurnType",
+		"Teams",
+		"TeamBallance",
 		"WallType",
 		"MoneyStarting",
 		"ShotTime",
 		"BuyingTime",
+		"StartArmsLevel",
+		"EndArmsLevel",
+		"WeaponSpeed",
+		"Gravity",
 		"WindForce",
 		"WindType",
+		"ResignMode",
 		nullptr,
 	};
 
@@ -50,6 +64,14 @@ namespace
 
 	bool describe(OptionEntry *entry, ScorchDroidSetup::Option &out)
 	{
+		// Upstream keeps its retired options in the list, flagged rather than
+		// deleted, so a config file written years ago still parses. They read
+		// as ordinary bounded ints and enums, which is exactly how one would
+		// end up on this screen by mistake - MaxArmsLevel, ScoreType and
+		// AutoBallanceTeams all look like live options and none of them does
+		// anything any more.
+		if (entry->getData() & OptionEntry::DataDepricated) return false;
+
 		out.name = entry->getName();
 		out.description = entry->getDescription();
 		out.value = entry->getValueAsString();
