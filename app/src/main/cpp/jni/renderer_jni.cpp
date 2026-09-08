@@ -191,6 +191,7 @@ namespace
 	GLuint waterProgram = 0, waterVao = 0, waterVbo = 0;
 	GLint  waterMvpLoc = -1, waterDeepLoc = -1, waterShallowLoc = -1;
 	GLint  waterAlphaLoc = -1, waterTimeLoc = -1, waterEyeLoc = -1;
+	GLint  waterSkyHorizonLoc = -1, waterSkyZenithLoc = -1, waterEyePosLoc = -1;
 	bool   waterBuilt = false;    // one attempt per landscape, success or not
 	bool   waterVisible = false;  // this landscape actually has water
 	float  waterHeight = 0.0f;
@@ -1041,6 +1042,7 @@ namespace
 		uniform vec2  uWaveCentre;
 		uniform float uWaveReach;
 		out vec2 vWorld;
+		out vec3 vWorldPos;
 		out float vViewDepth;
 		out vec3 vNormal;
 
@@ -1073,6 +1075,7 @@ namespace
 					  - waveHeight(vWorld - vec2(0.0, e), uTime)) * amp;
 			vNormal = normalize(vec3(-hx, 2.0 * e, -hz));
 
+			vWorldPos = world;
 			gl_Position = uMVP * vec4(world, 1.0);
 			vViewDepth = gl_Position.w;
 		}
@@ -1081,10 +1084,14 @@ namespace
 	const char *kWaterFragmentShader = R"(#version 300 es
 		precision mediump float;
 		in vec2 vWorld;
+		in vec3 vWorldPos;
 		in float vViewDepth;
 		in vec3 vNormal;
 		out vec4 fragColor;
 		uniform vec3 uSunDir;
+		uniform vec3 uSkyHorizon;
+		uniform vec3 uSkyZenith;
+		uniform vec3 uEyePos;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
 		uniform vec3 uDeepColor;
@@ -1117,6 +1124,37 @@ namespace
 			vec3 n = normalize(vNormal);
 			float glint = pow(max(dot(n, normalize(uSunDir)), 0.0), 24.0);
 			water += vec3(1.0) * glint * 0.35;
+
+			// M10.5: the sky, reflected, weighted by Fresnel.
+			//
+			// Without this the surface colour does not depend on where it is
+			// viewed from at all, which is the single biggest reason the
+			// water read as flat blue paint rather than as a surface: real
+			// water is nearly transparent underfoot and nearly a mirror at a
+			// grazing angle, and the camera here sweeps through both (its
+			// pitch runs from about 8 degrees off the horizontal to nearly
+			// overhead).
+			//
+			// The sky is evaluated from its own two colours rather than
+			// sampled from a reflection buffer. Upstream renders the whole
+			// scene a second time, mirrored, into a 512-square texture; that
+			// buys reflected *terrain* as well, at the cost of drawing
+			// everything twice. This gets the part that covers most of the
+			// surface most of the time for the price of a few instructions,
+			// and leaves that judgement to be made on what it looks like.
+			vec3 viewDir = normalize(vWorldPos - uEyePos);
+			vec3 reflectDir = reflect(viewDir, n);
+			// Up the reflected ray is sky; below the horizon there is
+			// nothing to reflect but more water, so it stays at the horizon
+			// colour rather than going dark.
+			float up = clamp(reflectDir.y, 0.0, 1.0);
+			vec3 sky = mix(uSkyHorizon, uSkyZenith, sqrt(up));
+			// Schlick, with water's real normal-incidence reflectance of
+			// about 2% - so looking straight down barely reflects and a low
+			// angle mostly does.
+			float facing = clamp(dot(-viewDir, n), 0.0, 1.0);
+			float fresnel = 0.02 + 0.98 * pow(1.0 - facing, 5.0);
+			water = mix(water, sky, clamp(fresnel, 0.0, 1.0));
 
 			// Foam along the shore. The mask is in landscape space, so v
 			// runs the other way to world Z - the same flip the ground
@@ -3564,6 +3602,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterAlphaLoc = glGetUniformLocation(waterProgram, "uAlpha");
 	waterTimeLoc = glGetUniformLocation(waterProgram, "uTime");
 	waterEyeLoc = glGetUniformLocation(waterProgram, "uEye");
+	waterSkyHorizonLoc = glGetUniformLocation(waterProgram, "uSkyHorizon");
+	waterSkyZenithLoc = glGetUniformLocation(waterProgram, "uSkyZenith");
+	waterEyePosLoc = glGetUniformLocation(waterProgram, "uEyePos");
 	waterFogColorLoc = glGetUniformLocation(waterProgram, "uFogColor");
 	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
 	waterWaveAmpLoc = glGetUniformLocation(waterProgram, "uWaveAmplitude");
@@ -4737,6 +4778,17 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform1f(waterAlphaLoc, waterAlpha);
 		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
 		glUniform2f(waterEyeLoc, eyeX, eyeZ);
+		// The same two ends of the gradient the sky dome is drawn from, so a
+		// reflection cannot disagree with the sky it is reflecting.
+		glUniform3f(waterSkyHorizonLoc,
+					skyDescription.gradient[0][0],
+					skyDescription.gradient[0][1],
+					skyDescription.gradient[0][2]);
+		glUniform3f(waterSkyZenithLoc,
+					skyDescription.gradient[ScorchDroidSky::kGradientSteps - 1][0],
+					skyDescription.gradient[ScorchDroidSky::kGradientSteps - 1][1],
+					skyDescription.gradient[ScorchDroidSky::kGradientSteps - 1][2]);
+		glUniform3f(waterEyePosLoc, eyeX, eyeY, eyeZ);
 		float waterFog[3];
 		currentFogColor(waterFog);
 		glUniform3f(waterFogColorLoc, waterFog[0], waterFog[1], waterFog[2]);
