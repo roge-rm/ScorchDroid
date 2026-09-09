@@ -70,6 +70,7 @@
 #include <AmbientSound.h>
 #include <OceanWaves.h>
 #include <ShoreBreakers.h>
+#include <ParticleTextures.h>
 #include <landscapedef/LandscapeDefinitionsBase.hpp>
 #include <tankai/TankAIStore.hpp>
 #include <tankai/TankAI.hpp>
@@ -2979,6 +2980,38 @@ static void testOceanWaves()
 	check(galePeak > calmPeak * 5.0f, "the height grows with the wind, as upstream's does");
 }
 
+// V1: upstream's particle texture sets, loaded the way ExplosionTextures
+// loads them. Checked here because it is file parsing and pixel work over
+// the shipped data, and a wrong set name or frame count would only show
+// as a silent fallback to the disc.
+static void testParticleTextures()
+{
+	printf("particle textures (V1: upstream's texture sets):\n");
+	ScorchDroidParticleTextures::Atlas atlas = ScorchDroidParticleTextures::load();
+	check(atlas.valid(), "the texture sets load into one stack of 128-square layers");
+	printf("    %d layers in %d sets\n", atlas.layers, (int) atlas.sets.size());
+	const ScorchDroidParticleTextures::Set *exp0 = atlas.find("exp00");
+	check(exp0 && exp0->count == 10, "exp00 has upstream's ten frames");
+	const ScorchDroidParticleTextures::Set *flames = atlas.find("flames");
+	check(flames && flames->count == 33, "the napalm flames set has its 33 frames");
+	const ScorchDroidParticleTextures::Set *trans = atlas.find("trans");
+	check(trans && trans->count == 12, "the teleport set has its 12 frames");
+	check(atlas.find("smoke") && atlas.find("ring") && atlas.find("particle") && atlas.find("talk"),
+		"smoke, ring, particle and talk are all present");
+	check(!atlas.find("nosuchset"), "an unknown name finds nothing");
+	// The alpha comes from the image itself: an explosion frame's corner is
+	// black and so transparent, its centre bright and opaque.
+	if (exp0 && atlas.valid())
+	{
+		const int n = ScorchDroidParticleTextures::kSize;
+		const unsigned char *layer = &atlas.rgba[(size_t) (exp0->firstLayer + 4) * n * n * 4];
+		const int corner = layer[3];
+		const int centre = layer[((size_t) (n / 2) * n + n / 2) * 4 + 3];
+		printf("    exp00 frame 5: corner alpha %d, centre alpha %d\n", corner, centre);
+		check(corner < 32 && centre > 128, "an explosion frame is transparent at the corner and opaque at the centre");
+	}
+}
+
 // M16: who the player is - the name, and now the tank model, colour and
 // avatar. The lists are all read from shipped data, so what is worth pinning
 // is that they are found at all and that a choice survives being made.
@@ -3118,6 +3151,7 @@ int main(int argc, char **argv)
 	testPlayerProfile();
 	testAmbientSound();
 	testOceanWaves();
+	testParticleTextures();
 
 	printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
 		failures, failures == 1 ? "" : "s");

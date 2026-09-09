@@ -113,6 +113,7 @@ add_library(scorched_common STATIC
     ${ANDROID_PORTING_DIR}/AmbientSound.cpp
     ${ANDROID_PORTING_DIR}/OceanWaves.cpp
     ${ANDROID_PORTING_DIR}/ShoreBreakers.cpp
+    ${ANDROID_PORTING_DIR}/ParticleTextures.cpp
     ${ANDROID_PORTING_DIR}/ScoreboardState.cpp
     ${ANDROID_PORTING_DIR}/GameSetup.cpp
     ${ANDROID_PORTING_DIR}/PlayerProfile.cpp
