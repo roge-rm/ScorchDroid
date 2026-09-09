@@ -2274,7 +2274,11 @@ namespace
 						  int *outW = nullptr, int *outH = nullptr)
 	{
 		if (file.empty()) return 0;
-		Image image = ImageFactory::loadImage(S3D::eModLocation, file, mask, false);
+		// toRGB: the roof and sky images of the storm set are greyscale
+		// JPEGs, which arrive with one channel; uploaded as GL_RGB they
+		// were rainbow noise (the cavern's ceiling on every phone).
+		Image image = LandscapeTextureBuilder::toRGB(
+			ImageFactory::loadImage(S3D::eModLocation, file, mask, false));
 		if (!image.getBits() || image.getWidth() <= 0) return 0;
 		if (outW) *outW = image.getWidth();
 		if (outH) *outH = image.getHeight();
@@ -5150,8 +5154,8 @@ namespace
 		if (it != g_modelTextures.end()) return it->second;
 
 		GLuint texture = 0;
-		Image image = ImageFactory::loadImage(S3D::eAbsLocation, name,
-											  alphaName ? alphaName : "", false);
+		Image image = LandscapeTextureBuilder::toRGB(ImageFactory::loadImage(
+			S3D::eAbsLocation, name, alphaName ? alphaName : "", false));
 		if (image.getBits() && image.getWidth() > 0) {
 			glGenTextures(1, &texture);
 			glBindTexture(GL_TEXTURE_2D, texture);

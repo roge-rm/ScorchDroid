@@ -56,6 +56,7 @@
 #include <TreeGeometry.hpp>
 #include <weapons/WeaponMoveTank.hpp>
 #include <LandscapeTextureBuilder.hpp>
+#include <image/ImageFactory.hpp>
 #include <DeformEventQueue.h>
 #include <landscapedef/LandscapeDefinition.hpp>
 #include <landscapedef/LandscapeTex.hpp>
@@ -798,6 +799,34 @@ namespace
 		DeformLandscape::flattenArea(server->getContext(), flatPos, false);
 		check(ScorchDroidLandscape::takeDirtyRegion(dMinX, dMinY, dMaxX, dMaxY),
 			"flattenArea reports a dirty region too, not just explosions");
+
+		// A greyscale JPEG (the storm set, used by the cavern map) comes
+		// out of the loader with one channel; everything downstream reads
+		// three. toRGB widens it, and leaves a colour image alone.
+		{
+			Image grey = ImageFactory::loadImage(S3D::eModLocation,
+				"data/textures/landscape/storm/texture0.jpg");
+			check(grey.getWidth() == 256 && grey.getComponents() == 1,
+				  "storm/texture0.jpg loads as a one-channel 256x256 image");
+			Image rgb = LandscapeTextureBuilder::toRGB(grey);
+			bool equalChannels = rgb.getComponents() == 3 &&
+				rgb.getWidth() == grey.getWidth() && rgb.getHeight() == grey.getHeight();
+			for (int y = 0; equalChannels && y < rgb.getHeight(); y++) {
+				for (int x = 0; x < rgb.getWidth(); x++) {
+					unsigned char *g = grey.getBitsPos(x, y);
+					unsigned char *c = rgb.getBitsPos(x, y);
+					if (c[0] != g[0] || c[1] != g[0] || c[2] != g[0]) { equalChannels = false; break; }
+				}
+			}
+			check(equalChannels, "toRGB widens a greyscale image to three equal channels");
+			Image colour = ImageFactory::loadImage(S3D::eModLocation,
+				"data/textures/landscape/default/texture0.jpg");
+			Image same = LandscapeTextureBuilder::toRGB(colour);
+			check(colour.getComponents() == 3 && same.getComponents() == 3 &&
+				  same.getBits() != nullptr && memcmp(same.getBits(), colour.getBits(),
+				  (size_t) colour.getWidth() * colour.getHeight() * 3) == 0,
+				  "toRGB leaves a colour image unchanged");
+		}
 
 		// M6: the ground texture generator (LandscapeTextureBuilder) - our
 		// reimplementation of GLImageModifier::addHeightToBitmap, which is
