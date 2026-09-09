@@ -98,6 +98,7 @@
 #include <target/Target.hpp>
 #include <tanket/TanketShotInfo.hpp>
 #include <map>
+#include <set>
 #include <string>
 #include <cstring>
 
@@ -5127,6 +5128,7 @@ namespace
 	struct GpuModel {
 		MeshGroup hull, turret, gun;
 		float scale = 1.0f;         // upstream's "don't let the model be huge" rule
+		float rawSize = 0.0f;       // the model's bounding diagonal before any scale
 		float groundOffset = 0.0f;  // lifts the model so its base sits on the ground
 		// The same lift in raw model units. Non-tank targets carry their
 		// own scale from the landscape definition rather than the tank
@@ -5344,6 +5346,7 @@ namespace
 		float size = sqrtf(dx * dx + dy * dy + dz * dz);
 		const float kMaxSize = 3.0f;
 		if (size > kMaxSize) gpu.scale = 2.2f / size;
+		gpu.rawSize = size;
 
 		// Hull and turret sit on the turret pivot; the gun additionally
 		// sits on its own pivot so it elevates about the right point.
@@ -5952,6 +5955,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float x, y, z;
 		float rotationRadians;
 		float scale;
+		std::string meshName;  // for the oversize diagnostic in the scenery pass
 		float brightness;
 		float shadowRadius;
 		// Trees have no mesh (see buildTreeGeometryIfNeeded); they draw the
@@ -6014,6 +6018,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			inst.rotationRadians =
 				2.0f * atan2f(quat[3].asFloat(), quat[0].asFloat());
 			inst.scale = info.scale;
+			inst.meshName = info.model.getMeshName();
 			// Upstream multiplies the model by this grey ("color_", used as
 			// glColor3f(c,c,c)), randomising it when the definition asks by
 			// setting -1. But TargetDefinition's constructor never
@@ -6874,6 +6879,17 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				} else {
 					GpuModel *gpu = uploadModel(inst.model);
 					if (!gpu || gpu->hull.vertexCount == 0 || gpu->hull.vbo == 0) continue;
+					// Diagnostic for the oversized object dan photographed:
+					// anything that would draw more than 40 units across is
+					// named once, with the numbers that made it that size.
+					if (gpu->rawSize * inst.scale > 40.0f) {
+						static std::set<std::string> reported;
+						if (reported.insert(inst.meshName).second) {
+							LOGI("Oversize target: %s raw %.1f x scale %.4f = %.1f units at (%.0f, %.0f, %.0f)",
+								 inst.meshName.c_str(), gpu->rawSize, inst.scale,
+								 gpu->rawSize * inst.scale, inst.x, inst.y, inst.z);
+						}
+					}
 					sourceVbo = gpu->hull.vbo;
 					vertexCount = gpu->hull.vertexCount;
 					// The model's base lift, scaled by the definition's own
@@ -7052,6 +7068,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			if (inst.y < cullBelowY) continue;
 
 			GpuModel *gpu = uploadModel(inst.model);
+			if (gpu && gpu->rawSize * gpu->scale > 10.0f) {
+				static std::set<Model *> reported;
+				if (reported.insert(inst.model).second) {
+					LOGI("Oversize tank: %s raw %.1f x scale %.4f = %.1f units",
+						 inst.name.c_str(), gpu->rawSize, gpu->scale, gpu->rawSize * gpu->scale);
+				}
+			}
 			if (!gpu) {
 				if (!collect) continue;
 				auto &bucket = inst.mine ? unmodelledMine : unmodelledOther;
