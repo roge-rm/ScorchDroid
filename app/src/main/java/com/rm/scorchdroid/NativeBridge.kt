@@ -267,6 +267,13 @@ object NativeBridge {
     external fun setRenderOptions(showTrees: Boolean, showFog: Boolean)
 
     /**
+     * M22: which aim sight to draw - 0 for this port's own blade, 1 for
+     * Scorched3D's own arrangement (a protractor ring under the tank, a
+     * bearing marker on the ground, a blade along the barrel).
+     */
+    external fun setSightStyle(style: Int)
+
+    /**
      * M16: the tank models the selected mod offers, by name, from its own
      * tanks.xml. Does not include upstream's "Random" entry - that is the
      * empty choice, not a model.

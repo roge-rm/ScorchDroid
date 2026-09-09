@@ -215,6 +215,21 @@ class GameSettings(context: Context) {
         prefs.edit().putBoolean(KEY_TREES, value).apply()
     }
 
+    /**
+     * M22: which aim sight to draw. False is this port's own blade - one wide
+     * wedge along the barrel; true is Scorched3D's own, which surrounds the
+     * tank with a protractor ring and puts a separate marker for the bearing
+     * flat on the ground.
+     */
+    var originalSight by mutableStateOf(prefs.getBoolean(KEY_SIGHT, false))
+        private set
+
+    fun updateOriginalSight(value: Boolean) {
+        originalSight = value
+        prefs.edit().putBoolean(KEY_SIGHT, value).apply()
+        NativeBridge.setSightStyle(if (value) 1 else 0)
+    }
+
     var showFog by mutableStateOf(prefs.getBoolean(KEY_FOG, true))
         private set
 
@@ -236,6 +251,7 @@ class GameSettings(context: Context) {
         music?.let { it.volume = musicVolume; it.enabled = musicEnabled }
         ambient?.enabled = ambientEnabled
         NativeBridge.setRenderOptions(showTrees, showFog)
+        NativeBridge.setSightStyle(if (originalSight) 1 else 0)
     }
 
     private companion object {
@@ -257,5 +273,6 @@ class GameSettings(context: Context) {
         const val KEY_OPACITY = "controls.opacity"
         const val KEY_TREES = "graphics.trees"
         const val KEY_FOG = "graphics.fog"
+        const val KEY_SIGHT = "graphics.originalSight"
     }
 }

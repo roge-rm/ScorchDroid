@@ -233,6 +233,17 @@ namespace
 	GLuint meshProgram = 0;
 	GLint  meshMvpLoc = -1, meshLightDirLoc = -1, meshColorLoc = -1;
 	GLuint sightProgram = 0, sightVao = 0, sightVbo = 0;
+	// M22: the "original" sight, upstream's own (TargetRendererImplTank::
+	// drawSight). Three pieces, because each lives in a different frame:
+	// the protractor ring lies flat under the tank, the bearing marker and
+	// the elevation arc turn with the turret, and the barrel blade
+	// additionally lifts with the gun.
+	GLuint sightRingVao = 0, sightRingVbo = 0;
+	GLuint sightBearingVao = 0, sightBearingVbo = 0;
+	GLuint sightBarrelVao = 0, sightBarrelVbo = 0;
+	int sightRingVertexCount = 0, sightBearingVertexCount = 0, sightBarrelVertexCount = 0;
+	// 0 = this port's own blade, 1 = upstream's arrangement.
+	std::atomic<int> g_sightStyle{0};
 	GLint  sightMvpLoc = -1;
 
 	GLuint particleProgram = 0, particleVao = 0, particleVbo = 0;
@@ -3291,6 +3302,145 @@ namespace
 	constexpr float kSightSpanDegrees = 16.0f;  // arc either side of the aim line
 	constexpr int   kSightSteps = 4;
 
+	// M22: upstream's sight, as geometry rather than as its four textures.
+	//
+	// aimrotation.png is a ring of twenty-four radial ticks, aimbot.png a
+	// blue tapered blade and aimtop.png a red one - shapes, not artwork, so
+	// they are built here instead of decoding PNGs and adding a textured
+	// pass for four of them. The colours are the textures' own.
+	//
+	// Triangles rather than a strip: the ring and the arc are rows of
+	// separate ticks, and stitching those into one strip means degenerate
+	// vertices between every pair. Two triangles per quad costs a few dozen
+	// vertices on a mesh built once.
+	//
+	// Not reproduced: aimside.png, a one-unit strip standing on edge beside
+	// the barrel blade. It reads as a thin line even in upstream and adds
+	// nothing on a phone.
+	struct SightVertex { float x, y, z, r, g, b; };
+
+	void appendQuad(std::vector<float> &verts,
+		const SightVertex &a, const SightVertex &b,
+		const SightVertex &c, const SightVertex &d)
+	{
+		const SightVertex order[6] = { a, b, c, a, c, d };
+		for (const SightVertex &v : order) {
+			verts.push_back(v.x); verts.push_back(v.y); verts.push_back(v.z);
+			verts.push_back(v.r); verts.push_back(v.g); verts.push_back(v.b);
+		}
+	}
+
+	// A spike: a point at `near` widening to `halfWidth` at `far`, in columns
+	// so the colour can fade to the edges the way the textures' alpha does.
+	// `flat` lays it on the ground rather than along the barrel.
+	void appendTaperedBlade(std::vector<float> &verts,
+		float nearRadius, float farRadius, float halfWidth,
+		float r, float g, float b, bool flat)
+	{
+		const int columns = 4;
+		// A little clear of the ground rather than flat on it: this port's
+		// terrain mesh is coarser than upstream's, so a ring lying at exactly
+		// the tank's base height disappears into the interpolated surface on
+		// any slope.
+		const float lift = flat ? 0.4f : 0.0f;
+		auto vertex = [&](float lateral, float radius) {
+			const float fade = 1.0f - fabsf(lateral);
+			const float taper = (radius - nearRadius) / (farRadius - nearRadius);
+			SightVertex v;
+			v.x = lateral * halfWidth * taper;
+			v.y = lift;
+			v.z = -radius;
+			v.r = r * fade; v.g = g * fade; v.b = b * fade;
+			return v;
+		};
+		for (int i = -columns; i < columns; i++) {
+			const float left = (float) i / (float) columns;
+			const float right = (float) (i + 1) / (float) columns;
+			appendQuad(verts,
+				vertex(left, nearRadius), vertex(left, farRadius),
+				vertex(right, farRadius), vertex(right, nearRadius));
+		}
+	}
+
+	// One arc of ticks: upstream's ring is twenty-four of them over a full
+	// turn, and its elevation quadrant is a quarter of the same.
+	void appendTickArc(std::vector<float> &verts, int ticks, float sweep,
+		float inner, float outer, bool flat, float r, float g, float b)
+	{
+		const float halfTick = 0.11f;   // radians; upstream's ticks are ~6deg
+		for (int i = 0; i < ticks; i++) {
+			const float centre = sweep * ((float) i / (float) ticks);
+			auto vertex = [&](float angle, float radius) {
+				SightVertex v;
+				if (flat) {
+					// Flat on the ground: the ring lies in the x/z plane.
+					v.x = sinf(angle) * radius;
+					v.y = 0.4f;
+					v.z = -cosf(angle) * radius;
+				} else {
+					// Standing up in the plane the barrel swings through.
+					v.x = 0.0f;
+					v.y = sinf(angle) * radius;
+					v.z = -cosf(angle) * radius;
+				}
+				v.r = r; v.g = g; v.b = b;
+				return v;
+			};
+			appendQuad(verts,
+				vertex(centre - halfTick, inner), vertex(centre - halfTick, outer),
+				vertex(centre + halfTick, outer), vertex(centre + halfTick, inner));
+		}
+	}
+
+	void uploadSightPiece(const std::vector<float> &verts, GLuint &vao, GLuint &vbo, int &count)
+	{
+		count = (int) (verts.size() / 6);
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+		glBindVertexArray(0);
+	}
+
+	void buildOriginalSightGeometry()
+	{
+		if (sightRingVertexCount > 0) return;
+
+		const float kInner = 9.5f, kOuter = 13.5f;
+		const float kRingR = 0.68f, kRingG = 0.68f, kRingB = 1.0f;
+
+		// Flat under the tank: the protractor ring.
+		{
+			std::vector<float> verts;
+			appendTickArc(verts, 24, 2.0f * (float) M_PI, kInner, kOuter, true,
+				kRingR, kRingG, kRingB);
+			uploadSightPiece(verts, sightRingVao, sightRingVbo, sightRingVertexCount);
+		}
+
+		// Turning with the turret: the blue bearing marker lying on the
+		// ground, and the arc the barrel's elevation is read against.
+		{
+			std::vector<float> verts;
+			appendTaperedBlade(verts, 3.0f, 15.0f, 1.0f, 0.35f, 0.35f, 1.0f, true);
+			appendTickArc(verts, 7, (float) M_PI_2, kInner, kOuter, false,
+				kRingR, kRingG, kRingB);
+			uploadSightPiece(verts, sightBearingVao, sightBearingVbo, sightBearingVertexCount);
+		}
+
+		// Lifting with the gun: the red blade along the barrel, upstream's
+		// aimtop.png - two units across at fifteen out, a point at three.
+		{
+			std::vector<float> verts;
+			appendTaperedBlade(verts, 3.0f, 15.0f, 1.0f, 1.0f, 0.25f, 0.25f, false);
+			uploadSightPiece(verts, sightBarrelVao, sightBarrelVbo, sightBarrelVertexCount);
+		}
+	}
+
 	void buildSightGeometry()
 	{
 		if (sightVertexCount > 0) return;
@@ -3641,6 +3791,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	sightProgram = linkProgram(kSightVertexShader, kSightFragmentShader);
 	sightMvpLoc = glGetUniformLocation(sightProgram, "uMVP");
 	sightVertexCount = 0;
+	sightRingVertexCount = 0;
+	sightBearingVertexCount = 0;
+	sightBarrelVertexCount = 0;
 
 	meshProgram = linkProgram(kMeshVertexShader, kMeshFragmentShader);
 	meshMvpLoc = glGetUniformLocation(meshProgram, "uMVP");
@@ -5165,6 +5318,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	std::vector<float> unmodelledMine, unmodelledOther;
 	bool haveSight = false;
 	Mat4 sightTransform = Mat4::identity();
+	Mat4 sightBaseTransform = Mat4::identity();
+	Mat4 sightBearingTransform = Mat4::identity();
 	for (TankInstance &inst : tankInstances) {
 		// Upstream's rule, verbatim: TargetRendererImplTank::render() opens
 		// with `if (tank_->getState().getState() != TankState::sNormal)
@@ -5235,6 +5390,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// strict turn order, so every live moment is your turn.
 		if (inst.mine && inst.alive) {
 			haveSight = true;
+			// M22: upstream's sight needs three frames, not one - see
+			// buildOriginalSightGeometry.
+			sightBaseTransform = Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z);
+			sightBearingTransform = Mat4::multiply(
+				sightBaseTransform, Mat4::rotateY(inst.headingRadians));
 			// The blade lives in the gun's own frame, so it inherits the
 			// bearing and elevation for free - but not the model scale,
 			// since its radii are already in world units.
@@ -5246,7 +5406,28 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 	}
 
-	if (haveSight) {
+	if (haveSight && g_sightStyle.load() == 1) {
+		// M22: upstream's own arrangement - a protractor ring flat under the
+		// tank, a bearing marker on the ground, an arc for the elevation and
+		// the red blade along the barrel.
+		buildOriginalSightGeometry();
+		glUseProgram(sightProgram);
+		glDisable(GL_CULL_FACE);
+		struct Piece { GLuint vao; int count; const Mat4 *frame; };
+		const Piece pieces[] = {
+			{ sightRingVao,    sightRingVertexCount,    &sightBaseTransform },
+			{ sightBearingVao, sightBearingVertexCount, &sightBearingTransform },
+			{ sightBarrelVao,  sightBarrelVertexCount,  &sightTransform },
+		};
+		for (const Piece &piece : pieces) {
+			if (piece.count == 0) continue;
+			Mat4 pieceMvp = Mat4::multiply(mvp, *piece.frame);
+			glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, pieceMvp.m);
+			glBindVertexArray(piece.vao);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, piece.count);
+		}
+		glEnable(GL_CULL_FACE);
+	} else if (haveSight) {
 		buildSightGeometry();
 		glUseProgram(sightProgram);
 		Mat4 sightMvp = Mat4::multiply(mvp, sightTransform);
@@ -5815,6 +5996,14 @@ Java_com_rm_scorchdroid_NativeBridge_setRenderOptions(
         JNIEnv *env, jobject, jboolean showTrees, jboolean showFog) {
     g_showTrees = (showTrees == JNI_TRUE);
     g_showFog = (showFog == JNI_TRUE);
+}
+
+// M22: which aim sight to draw - 0 for this port's own blade, 1 for
+// upstream's arrangement of a protractor ring, a bearing marker on the
+// ground and a blade along the barrel.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setSightStyle(JNIEnv *env, jobject, jint style) {
+    g_sightStyle.store(style == 1 ? 1 : 0);
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL

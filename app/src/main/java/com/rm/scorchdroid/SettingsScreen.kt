@@ -214,6 +214,15 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.applyAll()
                         }
 
+                        SwitchRow(
+                            "Scorched3D's aim sight",
+                            "Its own: a protractor ring around the tank and a separate " +
+                                "bearing marker on the ground. Off is this port's single blade",
+                            settings.originalSight,
+                        ) {
+                            settings.updateOriginalSight(it)
+                        }
+
                         Group("HUD")
                         SwitchRow(
                             "Name plates",
