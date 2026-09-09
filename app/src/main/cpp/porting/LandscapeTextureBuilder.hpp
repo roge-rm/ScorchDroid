@@ -121,21 +121,6 @@ namespace LandscapeTextureBuilder
 	//
 	// Returns false if there is no landscape or the texture is unusable.
 	bool applyLightMap(ScorchedContext &context, Texture &texture);
-
-	// How close each landscape cell is to the shoreline, for the water to
-	// draw foam along. One byte per cell of a [size] x [size] grid, 255 at
-	// the water's edge falling to 0 by [reach] units of depth.
-	//
-	// Upstream finds the shore the same way (WaterWaveDistance::generate:
-	// ground within a few units *below* the waterline, whose neighbours
-	// cross it) and uses it to place wave sprites. This bakes the whole
-	// band into a mask instead, which the water shader can sample - no
-	// sprites to place, and it follows the coast a crater carves.
-	//
-	// GL-free, so host-tests cover it. Empty if there is no landscape.
-	std::vector<unsigned char> buildShoreMask(ScorchedContext &context,
-											  float waterHeight, int size,
-											  float reach = 3.0f);
 }
 
 #endif  // __INCLUDE_LandscapeTextureBuilder_hpp_INCLUDE__

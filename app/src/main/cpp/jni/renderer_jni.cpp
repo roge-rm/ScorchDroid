@@ -206,9 +206,7 @@ namespace
 	// bottom in a trough and top on a crest.
 	float  waterUpwellBot[3] = { 0.29f, 0.56f, 0.91f };
 	float  waterUpwellTop[3] = { 0.49f, 0.83f, 0.94f };
-	float  waterAlpha = 0.8f;
-	// Shoreline foam: a baked mask of how close each cell is to the water's
-	// edge, sampled by the water shader (see buildShoreMask).
+	float  waterAlpha = 1.0f;
 	// W2: the displaced part of the surface. The flat skirt above still
 	// covers out to the far plane; this grid is the near water that moves.
 	GLuint waterGridVao = 0, waterGridVbo = 0;
@@ -274,9 +272,7 @@ namespace
 	float  waveCentreX = 0.0f, waveCentreZ = 0.0f, waveReach = 1.0f;
 	GLint  waterWaveAmpLoc = -1, waterWaveCentreLoc = -1, waterWaveReachLoc = -1;
 	GLint  waterSunDirLoc = -1;
-	GLuint waterShoreTexture = 0;
-	GLint  waterShoreLoc = -1, waterMapSizeLoc = -1;
-	constexpr int kShoreMaskSize = 256;
+	GLint  waterMapSizeLoc = -1;
 
 	// M6: SkyFlash. Seconds of flash left; the sky pass lifts its colour
 	// by whatever remains, so a nuke whites out the whole view briefly.
@@ -1341,7 +1337,6 @@ namespace
 		uniform vec3 uSunDiffuse;
 		uniform float uAlpha;
 		uniform highp float uTime;  // must match the vertex shader's, see above
-		uniform sampler2D uShore;
 		uniform vec2 uMapSize;
 		// W3: the mirrored scene, when it is being drawn.
 		uniform sampler2D uReflectionTex;
@@ -1374,10 +1369,6 @@ namespace
 			return textureProj(uShadowTex, vShadowCoord);
 		}
 		void main() {
-			// Kept only for the surf's own phase below - the surface colour
-			// no longer comes from a pair of sines.
-			float a = sin(vWorld.x * 0.09 + uTime * 0.7);
-
 			float fogFactor = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
 
 			// Upstream's two noise layers, added to the geometric normal:
@@ -1445,26 +1436,6 @@ namespace
 			vec3 water = mix(refraction, reflected, fresnel * min(1.0, s0 + 0.8))
 				+ specular * s0;
 
-			// Foam along the shore. The mask is in landscape space, so v
-			// runs the other way to world Z - the same flip the ground
-			// texture takes. Off the map there is no shore, hence the
-			// explicit bounds test rather than clamping, which would smear
-			// the edge band out to the horizon.
-			//
-			// Upstream mixes its foam towards the sun's own diffuse colour
-			// rather than to white, and takes it back where the water is
-			// shadowed; both are done here.
-			vec2 land = vec2(vWorld.x, uMapSize.y - vWorld.y);
-			if (land.x >= 0.0 && land.y >= 0.0 &&
-				land.x <= uMapSize.x && land.y <= uMapSize.y) {
-				float shore = texture(uShore, land / uMapSize).r;
-				// Break the band up so it reads as surf rather than a
-				// contour line.
-				float surf = shore * (0.75 + 0.25 * sin(uTime * 2.0 + a * 3.0));
-				float foam = clamp(surf * surf, 0.0, 1.0) * 0.85;
-				foam = max(foam - (1.0 - s0) * 0.5, 0.0);
-				water = mix(water, uSunDiffuse, foam);
-			}
 			fragColor = vec4(mix(uFogColor, water, fogFactor), uAlpha);
 		}
 	)";
@@ -2724,11 +2695,13 @@ namespace
 			waterUpwellBot[i] = water->wavebottoma[i] + (water->wavebottomb[i] - water->wavebottoma[i]) * light;
 		}
 
-		// waterTransparency defaults to 1.0 and no shipped landscape sets
-		// it, so it can only make the surface *more* see-through than the
-		// value chosen here - opaque enough to read as a surface, open
-		// enough that a shoreline shows the ground shelving away under it.
-		waterAlpha = std::min(1.0f, std::max(0.0f, 0.82f * water->waterTransparency));
+		// Upstream's water is opaque. Its shader has a depth-transparency
+		// branch, but the uniform that gates it (landfoam) is set from a
+		// default Vector - all zero - so the branch never runs and the alpha
+		// is the landscape's own <watertransparency>, which is 1.0 in every
+		// shipped landscape, unless the hide-water key is held. The 0.82 this
+		// port drew at showed the drowned terrain through the whole sea.
+		waterAlpha = std::min(1.0f, std::max(0.0f, water->waterTransparency));
 
 		// The surface runs well past the landscape on every side. Upstream
 		// does the same (its water plane is far larger than the map), and
@@ -2823,27 +2796,8 @@ namespace
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
 		glBindVertexArray(0);
 
-		// Shore mask for the foam. Single channel, so the row stride is the
-		// width and needs the unpack alignment relaxed for odd sizes.
-		std::vector<unsigned char> shore = LandscapeTextureBuilder::buildShoreMask(
-			ctx, waterHeight, kShoreMaskSize);
-		if (!shore.empty()) {
-			if (waterShoreTexture == 0) glGenTextures(1, &waterShoreTexture);
-			glBindTexture(GL_TEXTURE_2D, waterShoreTexture);
-			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, kShoreMaskSize, kShoreMaskSize, 0,
-						 GL_RED, GL_UNSIGNED_BYTE, shore.data());
-			glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-			glBindTexture(GL_TEXTURE_2D, 0);
-		}
-
 		waterVisible = true;
-		LOGI("Water surface at height %.1f, alpha %.2f, shore mask %s",
-			 waterHeight, waterAlpha, shore.empty() ? "none" : "built");
+		LOGI("Water surface at height %.1f, alpha %.2f", waterHeight, waterAlpha);
 		LOGI("Water upwelling: bottom (%.2f, %.2f, %.2f), top (%.2f, %.2f, %.2f)",
 			 waterUpwellBot[0], waterUpwellBot[1], waterUpwellBot[2],
 			 waterUpwellTop[0], waterUpwellTop[1], waterUpwellTop[2]);
@@ -4369,7 +4323,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterWaveCentreLoc = glGetUniformLocation(waterProgram, "uWaveCentre");
 	waterWaveReachLoc = glGetUniformLocation(waterProgram, "uWaveReach");
 	waterSunDirLoc = glGetUniformLocation(waterProgram, "uSunDir");
-	waterShoreLoc = glGetUniformLocation(waterProgram, "uShore");
 	waterMapSizeLoc = glGetUniformLocation(waterProgram, "uMapSize");
 
 	sightProgram = linkProgram(kSightVertexShader, kSightFragmentShader);
@@ -4476,7 +4429,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 
 	waterBuilt = false;
 	waterVisible = false;
-	waterVao = waterVbo = waterGridVao = waterGridVbo = waterShoreTexture = 0;
+	waterVao = waterVbo = waterGridVao = waterGridVbo = 0;
 
 	skyBuilt = false;
 	skyVao = skyVbo = 0;
@@ -6456,11 +6409,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform3f(waterFogColorLoc, waterFog[0], waterFog[1], waterFog[2]);
 		glUniform1f(waterFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 		glUniform2f(waterMapSizeLoc, mapWidthUnits, mapHeightUnits);
-		if (waterShoreTexture != 0) {
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, waterShoreTexture);
-			glUniform1i(waterShoreLoc, 0);
-		}
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		// The surface extends far past the map on every side, so with the
