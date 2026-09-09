@@ -19,7 +19,24 @@ object LanDiscovery {
     private const val TAG = "LanDiscovery"
     const val SERVICE_TYPE = "_scorchdroid._tcp."
 
-    data class FoundGame(val name: String, val host: String, val port: Int)
+    /**
+     * A game someone is advertising, from whichever mechanism found it -
+     * this type is shared with [WifiDirectTransport], since to a player the
+     * two are one "find a game" feature and only differ in which radio
+     * carried the announcement.
+     *
+     * [p2pDeviceAddress] is set only by the Wi-Fi Direct side, and when it
+     * is, [host] is empty: a Wi-Fi Direct peer has no IP until a group has
+     * been formed with it, so the address only exists after the player has
+     * chosen to join. An NSD result is the other way round - a real host and
+     * no device address.
+     */
+    data class FoundGame(
+        val name: String,
+        val host: String,
+        val port: Int,
+        val p2pDeviceAddress: String? = null,
+    )
 
     private var nsdManager: NsdManager? = null
     private var registrationListener: NsdManager.RegistrationListener? = null
