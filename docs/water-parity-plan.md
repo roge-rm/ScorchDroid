@@ -28,11 +28,11 @@ Two controls, both under "Scorched3D's ocean" in Settings.
 **Water detail** (slider, three positions, default Full - per the rule that a
 performance trade-off is exposed, not chosen, and defaults to quality):
 
-| Position | Grid cell over the map | Ocean updates per second |
+| Position (left to right) | Grid cell over the map | Ocean updates per second |
 |---|---|---|
-| Full | 2 units (upstream's own) | 24 (upstream's own phase rate) |
-| Half | 4 | 12 |
 | Quarter | 8 (today's) | 6 |
+| Half | 4 | 12 |
+| Full | 2 units (upstream's own) | 24 (upstream's own phase rate) |
 
 The grid is the only part with a real GPU cost (see W11 for the triangle
 counts); the update rate is the only CPU cost. One slider covers both because

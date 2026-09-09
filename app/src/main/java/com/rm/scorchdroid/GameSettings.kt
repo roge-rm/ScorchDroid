@@ -249,13 +249,15 @@ class GameSettings(context: Context) {
     }
 
     /**
-     * Water detail: how finely Scorched3D's sea is drawn. 0 is Full - its
+     * Water detail: how finely Scorched3D's sea is drawn. 2 is Full - its
      * own 2-unit grid and its own 24 wave phases a second; 1 is Half (4
-     * units, 12/s); 2 is Quarter (8 units, 6/s). The sea itself is the same
+     * units, 12/s); 0 is Quarter (8 units, 6/s). The sea itself is the same
      * at every position - the Tessendorf spectrum upstream generates, driven
      * by the round's wind - only its cost changes.
+     *
+     * Low is on the left and high on the right, as on every slider here.
      */
-    var waterDetail by mutableIntStateOf(prefs.getInt(KEY_WATER_DETAIL, 0))
+    var waterDetail by mutableIntStateOf(prefs.getInt(KEY_WATER_DETAIL, 2))
         private set
 
     fun updateWaterDetail(value: Int) {
