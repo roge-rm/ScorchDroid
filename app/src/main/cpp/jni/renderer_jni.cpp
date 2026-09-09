@@ -593,6 +593,12 @@ namespace
 
 	constexpr int kTerrainFloatsPerVertex = 8;  // pos(3) + normal(3) + uv(2)
 	std::vector<float> terrainHeights;          // terrainVerts1D^2, row-major by gz
+	// G4: the heightmap's own normals (HeightMap::getNormal, upstream's
+	// average of cross products at distances 1 and 3), in render axes,
+	// three per vertex. The mesh used to take a central difference of its
+	// sampled heights, which shaded slightly sharper than upstream and
+	// from different normals than the ground texture was built from.
+	std::vector<float> terrainNormals;
 	std::vector<float> terrainWorldX, terrainWorldZ;
 	int    terrainSrcWidth = 0, terrainSrcHeight = 0;
 	// Set when a new landscape is built, cleared once the free-fly camera
@@ -1664,30 +1670,20 @@ namespace
 	// client rendering code). Split out of the full build so a partial
 	// rebuild after a crater produces byte-identical vertices to a full
 	// one - the two paths can't drift apart.
+	// Engine normal (x, y, up) -> render (x, up, z), with the engine's y
+	// running the other way to render z (worldZFromEngineY).
+	inline void renderNormalFromEngine(FixedVector &n, float out[3])
+	{
+		out[0] = n[0].asFloat();
+		out[1] = n[2].asFloat();
+		out[2] = -n[1].asFloat();
+	}
+
 	void writeTerrainVertex(int gx, int gz, float *out)
 	{
-		const int last = terrainVerts1D - 1;
-		float py = terrainHeights[gz * terrainVerts1D + gx];
-		float pxL = terrainWorldX[std::max(gx - 1, 0)];
-		float pxR = terrainWorldX[std::min(gx + 1, last)];
-		float hL = terrainHeights[gz * terrainVerts1D + std::max(gx - 1, 0)];
-		float hR = terrainHeights[gz * terrainVerts1D + std::min(gx + 1, last)];
-		float pzT = terrainWorldZ[std::max(gz - 1, 0)];
-		float pzB = terrainWorldZ[std::min(gz + 1, last)];
-		float hT = terrainHeights[std::max(gz - 1, 0) * terrainVerts1D + gx];
-		float hB = terrainHeights[std::min(gz + 1, last) * terrainVerts1D + gx];
-
-		// Tangent along +X and along +Z, then normal = normalize(tZ x tX)
-		// (chosen order/signs give an outward/up-facing normal for a
-		// heightmap in this y-up, right-handed world).
-		float tXx = pxR - pxL, tXy = hR - hL, tXz = 0.0f;
-		float tZx = 0.0f, tZy = hB - hT, tZz = pzB - pzT;
-		float nx = tZy * tXz - tZz * tXy;
-		float ny = tZz * tXx - tZx * tXz;
-		float nz = tZx * tXy - tZy * tXx;
-		float nLen = sqrtf(nx * nx + ny * ny + nz * nz);
-		if (nLen < 1e-6f) { nx = 0; ny = 1; nz = 0; } else { nx /= nLen; ny /= nLen; nz /= nLen; }
-
+		const float py = terrainHeights[gz * terrainVerts1D + gx];
+		const float *n = &terrainNormals[(size_t) (gz * terrainVerts1D + gx) * 3];
+		const float nx = n[0], ny = n[1], nz = n[2];
 		out[0] = terrainWorldX[gx];
 		out[1] = py;
 		out[2] = terrainWorldZ[gz];
@@ -1806,6 +1802,7 @@ namespace
 		mapWidthUnits = (float) w;
 		mapHeightUnits = (float) h;
 		terrainHeights.assign(verts1D * verts1D, 0.0f);
+		terrainNormals.assign((size_t) verts1D * verts1D * 3, 0.0f);
 		terrainWorldX.assign(verts1D, 0.0f);
 		terrainWorldZ.assign(verts1D, 0.0f);
 		terrainMinHeight = 1e9f;
@@ -1820,6 +1817,8 @@ namespace
 				int sx = heightMapColForGridX(gx, w);
 				float height = heightMap.getHeight(sx, sy).asFloat();
 				terrainHeights[gz * verts1D + gx] = height;
+				renderNormalFromEngine(heightMap.getNormal(sx, sy),
+									   &terrainNormals[(size_t) (gz * verts1D + gx) * 3]);
 				terrainMinHeight = std::min(terrainMinHeight, height);
 				terrainMaxHeight = std::max(terrainMaxHeight, height);
 			}
@@ -2725,25 +2724,13 @@ namespace
 			for (int gx = 0; gx < verts1D; gx++) {
 				float *out = &vertexData[(gz * verts1D + gx) * kTerrainFloatsPerVertex];
 
-				// Same central-difference normal as the terrain, negated:
-				// the face that matters is the underside.
-				const float pxL = terrainWorldX[std::max(gx - 1, 0)];
-				const float pxR = terrainWorldX[std::min(gx + 1, last)];
-				const float hL = heights[gz * verts1D + std::max(gx - 1, 0)];
-				const float hR = heights[gz * verts1D + std::min(gx + 1, last)];
-				const float pzT = terrainWorldZ[std::max(gz - 1, 0)];
-				const float pzB = terrainWorldZ[std::min(gz + 1, last)];
-				const float hT = heights[std::max(gz - 1, 0) * verts1D + gx];
-				const float hB = heights[std::min(gz + 1, last) * verts1D + gx];
-
-				const float tXx = pxR - pxL, tXy = hR - hL;
-				const float tZy = hB - hT, tZz = pzB - pzT;
-				float nx = -tZz * tXy;
-				float ny = tZz * tXx;
-				float nz = -tZy * tXx;
-				const float nLen = sqrtf(nx * nx + ny * ny + nz * nz);
-				if (nLen < 1e-6f) { nx = 0; ny = 1; nz = 0; }
-				else { nx /= nLen; ny /= nLen; nz /= nLen; }
+				// G4: the roof map's own normals. RoofMaps creates its
+				// HeightMap with invertedNormals, so getNormal already
+				// points down at the cavern floor - the face that matters.
+				float n[3];
+				renderNormalFromEngine(rmap.getNormal(heightMapColForGridX(gx, w),
+													  heightMapRowForGridZ(gz, h)), n);
+				const float nx = -n[0], ny = -n[1], nz = -n[2];
 
 				out[0] = terrainWorldX[gx];
 				out[1] = heights[gz * verts1D + gx];
@@ -3327,6 +3314,10 @@ namespace
 				int sx = heightMapColForGridX(gx, w);
 				float height = heightMap.getHeight(sx, sy).asFloat();
 				terrainHeights[gz * terrainVerts1D + gx] = height;
+				// setHeight zeroed the normals around the crater; getNormal
+				// recomputes them here, on this thread, under the lock.
+				renderNormalFromEngine(heightMap.getNormal(sx, sy),
+									   &terrainNormals[(size_t) (gz * terrainVerts1D + gx) * 3]);
 				// The shader colours by height ratio, so let the range grow
 				// with a crater rather than clamping new extremes flat.
 				terrainMinHeight = std::min(terrainMinHeight, height);
