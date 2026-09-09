@@ -1299,9 +1299,17 @@ namespace
 			// The ray's distance to that dome is solved here per fragment.
 			// In thousands of units: the raw coefficients are around 1e-7,
 			// which a phone's mediump float flushes to zero.
+			//
+			// The eye is kept inside the dome. Upstream's camera never
+			// rises above it, but this port's can (the buying-phase view
+			// and the free camera both go past 210 units), and from above
+			// the dome every ray hits it within a few units - no fog at
+			// all, and the raw horizon colour across the whole lower sky.
+			// Pinned just under the top, the horizon stays 2000 units away
+			// and the zenith close, whatever the camera does.
 			{
 				float R = 2.0, r = 0.225;
-				float h = (uEyeHeight + 15.0) / 1000.0;
+				float h = min((uEyeHeight + 15.0) / 1000.0, r * 0.9);
 				float a = (d.x * d.x + d.z * d.z) / (R * R) + (d.y * d.y) / (r * r);
 				float b = 2.0 * h * d.y / (r * r);
 				float c = (h * h) / (r * r) - 1.0;
@@ -2462,11 +2470,16 @@ namespace
 		glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
 		// No depth writes: this is a backdrop, and everything drawn after
 		// it must win the depth test whatever its distance.
+		// The backdrop sits on the far plane, where the GL_LESS depth test
+		// rejects it against the cleared depth; it is drawn first, so the
+		// test is simply off for it.
+		glDisable(GL_DEPTH_TEST);
 		glDepthMask(GL_FALSE);
 		glDisable(GL_CULL_FACE);
 		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
 		glEnable(GL_CULL_FACE);
 		glDepthMask(GL_TRUE);
+		glEnable(GL_DEPTH_TEST);
 		glBindVertexArray(0);
 	}
 
@@ -5255,7 +5268,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	breakerVertexCount[0] = breakerVertexCount[1] = 0;
 
 	skyBuilt = false;
-	skyVao = skyVbo = 0;
+	// Not skyVao/skyVbo: unlike everything else in this block they are
+	// created unconditionally above in this same function, and zeroing
+	// them here threw the fresh handles away - every sky draw then bound
+	// buffer 0, failed, and the sky was the clear colour.
 
 	cloudsBuilt = false;
 	cloudsVisible = false;
