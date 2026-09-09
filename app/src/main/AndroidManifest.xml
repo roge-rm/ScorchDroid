@@ -15,6 +15,30 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
+    <!-- Wi-Fi Direct peer-to-peer play (see WifiDirectTransport.kt): devices
+         form their own group with no router, no hotspot and no internet, and
+         the game then runs over the same sockets a LAN game uses.
+         CHANGE_WIFI_STATE is what actually lets the app form and join a
+         group. Discovering peers needs a runtime permission whose shape
+         changed in API 33 - before that the framework treated finding nearby
+         devices as a location capability and demanded ACCESS_FINE_LOCATION,
+         which is why that one is capped at 32; from 33 there is a dedicated
+         NEARBY_WIFI_DEVICES, declared neverForLocation because the game does
+         not want, derive or keep the player's location. Wi-Fi Direct is
+         required="false" so the game still installs on hardware without it -
+         every entry point checks WifiDirectTransport.isSupported. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="32" />
+
+    <uses-feature
+        android:name="android.hardware.wifi.direct"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

@@ -51,6 +51,21 @@ class MainActivity : AppCompatActivity() {
     // exactly while a game is running.
     private var gameJob: Job? = null
 
+    // Wi-Fi Direct's discovery permission (see WifiDirectTransport). The
+    // first runtime permission this game has ever asked for, and asked for
+    // once, on the way into multiplayer - not at launch, where a player who
+    // only ever plays solo would be handed a prompt for something they will
+    // never use, and not at the moment of hosting, where the system dialog
+    // would land on top of a game that has already started.
+    //
+    // Nothing is gated on the answer: refusing costs the Wi-Fi Direct rows in
+    // "Find Games" and nothing else, so the result is only worth acting on to
+    // the extent of not asking twice.
+    private var askedForNearbyPermission = false
+    private val nearbyPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { /* Either way the game works; see above. */ }
+
     // M10: the game-setup screen's state. The options come from the engine
     // (upstream's own entries, ranges and descriptions) rather than being
     // declared here - see GameSetup.h.
@@ -151,7 +166,10 @@ class MainActivity : AppCompatActivity() {
                 AppScreen.SPLASH -> SplashScreen(splashStatus, null)
                 AppScreen.MENU -> MainMenuScreen(
                     onSinglePlayer = { appScreen = AppScreen.SINGLE_PLAYER },
-                    onMultiplayer = { appScreen = AppScreen.MULTIPLAYER },
+                    onMultiplayer = {
+                        requestNearbyPermissionOnce()
+                        appScreen = AppScreen.MULTIPLAYER
+                    },
                     onSettings = { appScreen = AppScreen.SETTINGS },
                     onAbout = { appScreen = AppScreen.ABOUT },
                 )
@@ -457,13 +475,34 @@ class MainActivity : AppCompatActivity() {
                 return@launch
             }
 
-            hudState.statusText = "Connecting to ${target.first}:${target.second}..."
+            // A Wi-Fi Direct pick is not an address yet. Forming the group
+            // takes several seconds and puts an invitation prompt on the
+            // host's screen, so it gets its own status line - told that it is
+            // "connecting to :27270", a player would reasonably think the
+            // game had hung.
+            val host = if (target.p2pDeviceAddress != null) {
+                hudState.statusText = "Asking ${target.name} to connect..."
+                val owner = WifiDirectTransport.connectToOwner(
+                    applicationContext, target.p2pDeviceAddress
+                )
+                if (owner == null) {
+                    hudState.statusText =
+                        "Couldn't form a Wi-Fi Direct group with ${target.name}. " +
+                            "Tap Cancel to go back."
+                    return@launch
+                }
+                owner
+            } else {
+                target.host
+            }
+
+            hudState.statusText = "Connecting to $host:${target.port}..."
             val connecting = withContext(Dispatchers.Default) {
-                NativeBridge.startJoinGame(target.first, target.second)
+                NativeBridge.startJoinGame(host, target.port)
             }
             if (!connecting) {
                 hudState.statusText =
-                    "Couldn't reach ${target.first}:${target.second}. Tap Cancel to go back."
+                    "Couldn't reach $host:${target.port}. Tap Cancel to go back."
                 return@launch
             }
 
@@ -501,6 +540,7 @@ class MainActivity : AppCompatActivity() {
         ambient?.stop()
         lastLandscapeTex = ""
         hudState.reset()
+        stopNetworkAdvertising()
         appScreen = AppScreen.MULTIPLAYER
     }
 
@@ -556,6 +596,43 @@ class MainActivity : AppCompatActivity() {
      * destroyed, which is what makes the next game's context - and so the
      * renderer's whole cache - genuinely fresh.
      */
+    /**
+     * Asks for Wi-Fi Direct's discovery permission the first time the player
+     * goes looking for a multiplayer game, and never again in this session -
+     * see [nearbyPermissionLauncher]. Silent on hardware that cannot do
+     * Wi-Fi Direct at all, and on a device where it has already been granted.
+     */
+    private fun requestNearbyPermissionOnce() {
+        if (askedForNearbyPermission) return
+        askedForNearbyPermission = true
+        if (!WifiDirectTransport.isSupported(applicationContext)) return
+        if (WifiDirectTransport.hasPermissions(applicationContext)) return
+        nearbyPermissionLauncher.launch(WifiDirectTransport.requiredPermissions())
+    }
+
+    /**
+     * Stops telling other devices about a game that has ended, and drops any
+     * Wi-Fi Direct group this device is in.
+     *
+     * Both halves matter for different reasons. The NSD registration going
+     * stale is a nuisance - peers keep seeing a game whose socket
+     * stopGame() has already closed - but a Wi-Fi Direct group left up is a
+     * real cost: it holds the radio in a group and can keep the device off
+     * its normal Wi-Fi, long after the game it existed for is over.
+     */
+    private fun stopNetworkAdvertising() {
+        LanDiscovery.stopRegistration()
+        LanDiscovery.stopDiscovery()
+        stopWifiDirect()
+    }
+
+    private fun stopWifiDirect() {
+        if (!WifiDirectTransport.isSupported(applicationContext)) return
+        WifiDirectTransport.stopDiscovery()
+        WifiDirectTransport.stopAdvertising(applicationContext)
+        WifiDirectTransport.disconnect(applicationContext)
+    }
+
     private fun quitToMenu() {
         gameJob?.cancel()
         gameJob = null
@@ -574,6 +651,7 @@ class MainActivity : AppCompatActivity() {
         aimSeeded = false
         lastChatVersion = 0
         lastChatLineId = 0
+        stopNetworkAdvertising()
         appScreen = AppScreen.MENU
     }
 
@@ -624,11 +702,16 @@ class MainActivity : AppCompatActivity() {
     // host:port manually, or cancels (null). A thin wrapper around
     // showFindGames's dialog plus a manual-entry option, since a PC host or
     // an NSD-blocked network has nothing to discover.
+    //
+    // Answers with the whole FoundGame rather than a host/port pair: a Wi-Fi
+    // Direct result has no address yet, and turning it into one is a
+    // seconds-long negotiation the caller has to be able to narrate and
+    // cancel - see startJoinFlow.
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private suspend fun pickJoinTarget(): Pair<String, Int>? =
+    private suspend fun pickJoinTarget(): LanDiscovery.FoundGame? =
         kotlinx.coroutines.suspendCancellableCoroutine { cont ->
             showFindGames(
-                onSelected = { host, port -> if (cont.isActive) cont.resume(host to port) {} },
+                onSelected = { game -> if (cont.isActive) cont.resume(game) {} },
                 onCancelled = { if (cont.isActive) cont.resume(null) {} },
             )
         }
@@ -1565,12 +1648,27 @@ class MainActivity : AppCompatActivity() {
         CoroutineScope(Dispatchers.Main).launch {
             val hosting = withContext(Dispatchers.Default) { NativeBridge.isHostingOnNetwork() }
             val port = withContext(Dispatchers.Default) { NativeBridge.getServerPort() }
-            hudState.hostingLabel = if (hosting) {
-                val ip = getLocalIpAddress() ?: "unknown IP"
-                "Hosting on $ip:$port"
-                    .also { LanDiscovery.registerService(applicationContext, port) }
-            } else {
-                "Solo only - could not open port $port for LAN play"
+            if (!hosting) {
+                hudState.hostingLabel = "Solo only - could not open port $port for LAN play"
+                return@launch
+            }
+
+            val ip = getLocalIpAddress() ?: "unknown IP"
+            hudState.hostingLabel = "Hosting on $ip:$port"
+            LanDiscovery.registerService(applicationContext, port)
+
+            // Wi-Fi Direct is advertised alongside, not instead: the two
+            // reach different people. NSD finds anyone already on this
+            // network (including a PC); Wi-Fi Direct reaches someone sitting
+            // next to you with no network at all. Only claimed in the label
+            // once the group has actually formed - announcing a way to be
+            // reached that isn't up is worse than not offering it.
+            if (WifiDirectTransport.isSupported(applicationContext) &&
+                WifiDirectTransport.hasPermissions(applicationContext)
+            ) {
+                WifiDirectTransport.advertise(applicationContext, port) { advertising ->
+                    if (advertising) hudState.hostingLabel = "Hosting on $ip:$port + Wi-Fi Direct"
+                }
             }
         }
     }
@@ -1584,29 +1682,47 @@ class MainActivity : AppCompatActivity() {
     // (used mid-game, purely to browse - see the button's own click
     // handler) keep working as a no-op-on-selection browse dialog without
     // having to pass callbacks it doesn't care about.
-    private fun showFindGames(onSelected: (String, Int) -> Unit = { _, _ -> }, onCancelled: () -> Unit = {}) {
+    private fun showFindGames(
+        onSelected: (LanDiscovery.FoundGame) -> Unit = {},
+        onCancelled: () -> Unit = {},
+    ) {
         val found = mutableListOf<LanDiscovery.FoundGame>()
         var resolved = false
+        // Both scans run at once and land in the same list. Each reports
+        // finishing separately, so the closing title waits for both rather
+        // than for whichever happened to be quicker.
+        // Not while this device is the one hosting a group: the HUD's "Find
+        // Games" button is reachable mid-game, and putting the radio into a
+        // peer scan there would disturb the very group the host is running
+        // the game on. A host has no reason to be looking anyway.
+        val wifiDirect = WifiDirectTransport.isSupported(applicationContext) &&
+            WifiDirectTransport.hasPermissions(applicationContext) &&
+            !WifiDirectTransport.isAdvertising()
+        var scansRunning = if (wifiDirect) 2 else 1
 
         fun manualEntryLabel() = "Enter address manually..."
 
+        fun stopScans() {
+            LanDiscovery.stopDiscovery()
+            if (wifiDirect) WifiDirectTransport.stopDiscovery()
+        }
+
         val listDialog = HudDialog.ListChoice(
-            title = "Searching for LAN games...",
+            title = if (wifiDirect) "Searching for games..." else "Searching for LAN games...",
             items = listOf(manualEntryLabel()),
             cancelLabel = "Cancel",
             onSelect = { index ->
                 resolved = true
-                LanDiscovery.stopDiscovery()
+                stopScans()
                 hudState.dialog = HudDialog.None
                 if (index < found.size) {
-                    val game = found[index]
-                    onSelected(game.host, game.port)
+                    onSelected(found[index])
                 } else {
                     promptManualAddress(onSelected, onCancelled)
                 }
             },
             onCancel = {
-                LanDiscovery.stopDiscovery()
+                stopScans()
                 hudState.dialog = HudDialog.None
                 if (!resolved) onCancelled()
             },
@@ -1614,28 +1730,58 @@ class MainActivity : AppCompatActivity() {
         hudState.dialog = listDialog
 
         fun refresh() {
-            listDialog.items = found.map { "${it.name} - ${it.host}:${it.port}" } + manualEntryLabel()
+            // A Wi-Fi Direct peer has no address to show yet - there is no IP
+            // until a group forms - so it is labelled by how it was found
+            // instead, which is the part the player cares about anyway.
+            listDialog.items = found.map { game ->
+                if (game.p2pDeviceAddress != null) "${game.name} - Wi-Fi Direct"
+                else "${game.name} - ${game.host}:${game.port}"
+            } + manualEntryLabel()
+        }
+
+        fun add(game: LanDiscovery.FoundGame) {
+            val duplicate = found.any {
+                if (game.p2pDeviceAddress != null) it.p2pDeviceAddress == game.p2pDeviceAddress
+                else it.host == game.host && it.port == game.port
+            }
+            if (duplicate) return
+            found.add(game)
+            refresh()
+        }
+
+        fun scanFinished() {
+            if (scansRunning <= 0 || --scansRunning > 0) return
+            listDialog.title = if (found.isEmpty()) "No games found" else "Found ${found.size} game(s)"
         }
 
         LanDiscovery.startDiscovery(
             applicationContext,
             durationMs = 4000,
-            onFound = { game ->
-                if (found.none { it.host == game.host && it.port == game.port }) {
-                    found.add(game)
-                    refresh()
-                }
-            },
-            onFinished = {
-                listDialog.title = if (found.isEmpty()) "No LAN games found" else "Found ${found.size} game(s)"
-            },
+            onFound = { add(it) },
+            onFinished = { scanFinished() },
         )
+
+        if (wifiDirect) {
+            // Longer than the NSD scan: a Wi-Fi Direct service discovery has
+            // to get the radio scanning for peers before any of them can
+            // answer, where mDNS is one multicast onto a network that already
+            // exists.
+            WifiDirectTransport.startDiscovery(
+                applicationContext,
+                durationMs = 8000,
+                onFound = { add(it) },
+                onFinished = { scanFinished() },
+            )
+        }
     }
 
     // M5 Phase 2: falls back to a typed "host:port" when nothing useful
     // showed up via NSD - the only way to reach a PC host today, since
     // desktop Scorched3D doesn't advertise itself via Android's NSD/mDNS.
-    private fun promptManualAddress(onSelected: (String, Int) -> Unit, onCancelled: () -> Unit) {
+    private fun promptManualAddress(
+        onSelected: (LanDiscovery.FoundGame) -> Unit,
+        onCancelled: () -> Unit,
+    ) {
         hudState.dialog = HudDialog.ManualAddress(
             onConnect = { text ->
                 val parts = text.trim().split(":")
@@ -1643,7 +1789,7 @@ class MainActivity : AppCompatActivity() {
                 val port = parts.getOrNull(1)?.toIntOrNull()
                 hudState.dialog = HudDialog.None
                 if (host != null && port != null) {
-                    onSelected(host, port)
+                    onSelected(LanDiscovery.FoundGame(name = host, host = host, port = port))
                 } else {
                     onCancelled()
                 }
@@ -1687,8 +1833,7 @@ class MainActivity : AppCompatActivity() {
         ambient?.release()
         music = null
         super.onDestroy()
-        LanDiscovery.stopRegistration()
-        LanDiscovery.stopDiscovery()
+        stopNetworkAdvertising()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
