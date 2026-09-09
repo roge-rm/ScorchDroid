@@ -328,26 +328,54 @@ namespace
 	// M6 terrain destruction: the sampled grid is kept around after the
 	// initial build so a crater can re-sample and re-upload just the
 	// vertices it touched (see applyTerrainDeformations) instead of
-	// rebuilding the whole mesh. kGrid x kGrid quads => (kGrid+1)^2 verts.
-	constexpr int kGrid = 96;
-	constexpr int kTerrainVerts1D = kGrid + 1;
+	// rebuilding the whole mesh. terrainGrid^2 quads => (terrainGrid+1)^2 verts.
+	// M23: the resolution the landscape is drawn at, and a setting rather
+	// than a number chosen once.
+	//
+	// This was a fixed 96, sampled out of a heightmap that is 256 across -
+	// so six of every seven heights upstream generated never reached the
+	// GPU, and small features between grid points simply did not exist in
+	// the drawn surface. Upstream draws the whole map (with level of detail,
+	// which this port has no equivalent of), so the default here is the
+	// whole map too, and the slider is for the device that cannot afford it.
+	constexpr int kTerrainGridMax = 256;
+	constexpr int kTerrainGridMin = 32;
+	// What the settings screen has asked for; read on the next build.
+	std::atomic<int> g_requestedTerrainGrid{kTerrainGridMax};
+	// What the mesh currently on the GPU was actually built with - clamped
+	// to the map's own resolution, since sampling finer than the heightmap
+	// only duplicates vertices.
+	int terrainGrid = kTerrainGridMax;
+	int terrainVerts1D = kTerrainGridMax + 1;
+
+	// The grid to build with: what the player asked for, but never finer
+	// than the heightmap itself - past that the extra vertices carry no new
+	// information.
+	int requestedGridFor(ScorchedContext &ctx)
+	{
+		HeightMap &heightMap = ctx.getLandscapeMaps().getGroundMaps().getHeightMap();
+		const int source = std::max(heightMap.getMapWidth(), heightMap.getMapHeight());
+		int wanted = g_requestedTerrainGrid.load();
+		if (source > 0) wanted = std::min(wanted, source);
+		return std::min(std::max(wanted, kTerrainGridMin), kTerrainGridMax);
+	}
 
 	// Which heightmap cell a mesh grid vertex samples. The rows run
 	// backwards for the same reason worldZFromEngineY subtracts: grid row 0
 	// sits at world Z = 0, which is landscape y = mapHeight.
 	inline int heightMapRowForGridZ(int gz, int mapH) {
-		return std::min(std::max(mapH - gz * mapH / kGrid, 0), mapH - 1);
+		return std::min(std::max(mapH - gz * mapH / terrainGrid, 0), mapH - 1);
 	}
 	inline int heightMapColForGridX(int gx, int mapW) {
-		return std::min(std::max(gx * mapW / kGrid, 0), mapW - 1);
+		return std::min(std::max(gx * mapW / terrainGrid, 0), mapW - 1);
 	}
 	// ...and back, for turning a deformed heightmap region into the grid
 	// rows that need re-sampling.
 	inline int gridZForHeightMapRow(int row, int mapH) {
-		return (mapH > 0) ? ((mapH - row) * kGrid / mapH) : 0;
+		return (mapH > 0) ? ((mapH - row) * terrainGrid / mapH) : 0;
 	}
 	inline int gridXForHeightMapCol(int col, int mapW) {
-		return (mapW > 0) ? (col * kGrid / mapW) : 0;
+		return (mapW > 0) ? (col * terrainGrid / mapW) : 0;
 	}
 	// M6 S6: the cavern roof. A landscape's <roof> is either type="sky",
 	// which is LandscapeDefnTypeNone and means no roof at all (33 of the 36
@@ -383,7 +411,7 @@ namespace
 	bool loggedShieldHit = false, loggedParachute = false;
 
 	constexpr int kTerrainFloatsPerVertex = 8;  // pos(3) + normal(3) + uv(2)
-	std::vector<float> terrainHeights;          // kTerrainVerts1D^2, row-major by gz
+	std::vector<float> terrainHeights;          // terrainVerts1D^2, row-major by gz
 	std::vector<float> terrainWorldX, terrainWorldZ;
 	int    terrainSrcWidth = 0, terrainSrcHeight = 0;
 	// Set when a new landscape is built, cleared once the free-fly camera
@@ -1253,16 +1281,16 @@ namespace
 	// one - the two paths can't drift apart.
 	void writeTerrainVertex(int gx, int gz, float *out)
 	{
-		const int last = kTerrainVerts1D - 1;
-		float py = terrainHeights[gz * kTerrainVerts1D + gx];
+		const int last = terrainVerts1D - 1;
+		float py = terrainHeights[gz * terrainVerts1D + gx];
 		float pxL = terrainWorldX[std::max(gx - 1, 0)];
 		float pxR = terrainWorldX[std::min(gx + 1, last)];
-		float hL = terrainHeights[gz * kTerrainVerts1D + std::max(gx - 1, 0)];
-		float hR = terrainHeights[gz * kTerrainVerts1D + std::min(gx + 1, last)];
+		float hL = terrainHeights[gz * terrainVerts1D + std::max(gx - 1, 0)];
+		float hR = terrainHeights[gz * terrainVerts1D + std::min(gx + 1, last)];
 		float pzT = terrainWorldZ[std::max(gz - 1, 0)];
 		float pzB = terrainWorldZ[std::min(gz + 1, last)];
-		float hT = terrainHeights[std::max(gz - 1, 0) * kTerrainVerts1D + gx];
-		float hB = terrainHeights[std::min(gz + 1, last) * kTerrainVerts1D + gx];
+		float hT = terrainHeights[std::max(gz - 1, 0) * terrainVerts1D + gx];
+		float hB = terrainHeights[std::min(gz + 1, last) * terrainVerts1D + gx];
 
 		// Tangent along +X and along +Z, then normal = normalize(tZ x tX)
 		// (chosen order/signs give an outward/up-facing normal for a
@@ -1284,12 +1312,12 @@ namespace
 		// UV spans the whole landscape once - the ground texture is
 		// generated per-landscape at map resolution, not tiled here
 		// (LandscapeTextureBuilder already tiles its sources).
-		out[6] = (float) gx / (float) kGrid;
+		out[6] = (float) gx / (float) terrainGrid;
 		// V runs backwards for the same reason the heightmap rows do: the
 		// ground texture is generated in landscape orientation (row index =
 		// landscape y - see LandscapeTextureBuilder, and the scorch marks
 		// painted into it), while world Z runs the other way.
-		out[7] = 1.0f - (float) gz / (float) kGrid;
+		out[7] = 1.0f - (float) gz / (float) terrainGrid;
 	}
 
 	// Builds the real terrain mesh - a regular grid sampled from the real
@@ -1304,8 +1332,11 @@ namespace
 		// Rebuild whenever the landscape changes (a new round), not just
 		// once per process.
 		unsigned int defnNumber = ctx.getLandscapeMaps().getDefinitions().getDefinition().getDefinitionNumber();
-		if (terrainBuilt && defnNumber == builtDefinitionNumber) return;
-		if (terrainBuilt && defnNumber != builtDefinitionNumber) {
+		// M23: a changed detail setting rebuilds the mesh too - the grid is
+		// baked into every vertex, index and texture coordinate.
+		const bool gridChanged = (terrainGrid != requestedGridFor(ctx));
+		if (terrainBuilt && defnNumber == builtDefinitionNumber && !gridChanged) return;
+		if (terrainBuilt && (defnNumber != builtDefinitionNumber || gridChanged)) {
 			// Drop the old landscape's GL objects before rebuilding.
 			if (terrainVao) glDeleteVertexArrays(1, &terrainVao);
 			if (terrainVbo) glDeleteBuffers(1, &terrainVbo);
@@ -1371,7 +1402,10 @@ namespace
 		int h = heightMap.getMapHeight();
 		if (w <= 0 || h <= 0) return;
 
-		const int verts1D = kTerrainVerts1D;
+		// Adopt the requested detail before anything is sized by it.
+		terrainGrid = requestedGridFor(ctx);
+		terrainVerts1D = terrainGrid + 1;
+		const int verts1D = terrainVerts1D;
 		terrainSrcWidth = w;
 		terrainSrcHeight = h;
 		// Set before anything below converts a landscape coordinate -
@@ -1384,8 +1418,8 @@ namespace
 		terrainMinHeight = 1e9f;
 		terrainMaxHeight = -1e9f;
 		for (int i = 0; i < verts1D; i++) {
-			terrainWorldX[i] = (float) i / (float) kGrid * (float) w;
-			terrainWorldZ[i] = (float) i / (float) kGrid * (float) h;
+			terrainWorldX[i] = (float) i / (float) terrainGrid * (float) w;
+			terrainWorldZ[i] = (float) i / (float) terrainGrid * (float) h;
 		}
 		for (int gz = 0; gz < verts1D; gz++) {
 			int sy = heightMapRowForGridZ(gz, h);
@@ -1408,9 +1442,9 @@ namespace
 		}
 
 		std::vector<unsigned int> indices;
-		indices.reserve(kGrid * kGrid * 6);
-		for (int gz = 0; gz < kGrid; gz++) {
-			for (int gx = 0; gx < kGrid; gx++) {
+		indices.reserve(terrainGrid * terrainGrid * 6);
+		for (int gz = 0; gz < terrainGrid; gz++) {
+			for (int gx = 0; gx < terrainGrid; gx++) {
 				unsigned int i00 = gz * verts1D + gx;
 				unsigned int i10 = i00 + 1;
 				unsigned int i01 = i00 + verts1D;
@@ -1979,7 +2013,7 @@ namespace
 		LandscapeDefnRoofCavern *cavern = (LandscapeDefnRoofCavern *) defn->roof;
 		const float radius = cavern->width.asFloat();
 
-		const int verts1D = kTerrainVerts1D;
+		const int verts1D = terrainVerts1D;
 		const float centreX = mapWidthUnits * 0.5f;
 		const float centreZ = mapHeightUnits * 0.5f;
 		const int steps = 5;
@@ -2090,13 +2124,13 @@ namespace
 		// strip; the corners are covered because the two edges meeting there
 		// each start from the same vertex.
 		float a[3], b[3];
-		for (int gx = 0; gx < kGrid; gx++) {
+		for (int gx = 0; gx < terrainGrid; gx++) {
 			edgePoint(gx, 0, a);          edgePoint(gx + 1, 0, b);          addSegment(a, b);
-			edgePoint(gx + 1, kGrid, a);  edgePoint(gx, kGrid, b);          addSegment(a, b);
+			edgePoint(gx + 1, terrainGrid, a);  edgePoint(gx, terrainGrid, b);          addSegment(a, b);
 		}
-		for (int gz = 0; gz < kGrid; gz++) {
+		for (int gz = 0; gz < terrainGrid; gz++) {
 			edgePoint(0, gz + 1, a);      edgePoint(0, gz, b);              addSegment(a, b);
-			edgePoint(kGrid, gz, a);      edgePoint(kGrid, gz + 1, b);      addSegment(a, b);
+			edgePoint(terrainGrid, gz, a);      edgePoint(terrainGrid, gz + 1, b);      addSegment(a, b);
 		}
 
 		roofSkirtVertexCount = (int) (verts.size() / kTerrainFloatsPerVertex);
@@ -2148,7 +2182,7 @@ namespace
 
 		// Sampled onto the same grid as the terrain, so the two meet at the
 		// map edges and the sampling helpers can be shared verbatim.
-		const int verts1D = kTerrainVerts1D;
+		const int verts1D = terrainVerts1D;
 		std::vector<float> heights(verts1D * verts1D, 0.0f);
 		roofMinHeight = 1e9f;
 		roofMaxHeight = -1e9f;
@@ -2213,8 +2247,8 @@ namespace
 				out[3] = -nx;
 				out[4] = -ny;
 				out[5] = -nz;
-				out[6] = (float) gx / (float) kGrid * uScale;
-				out[7] = (1.0f - (float) gz / (float) kGrid) * vScale;
+				out[6] = (float) gx / (float) terrainGrid * uScale;
+				out[7] = (1.0f - (float) gz / (float) terrainGrid) * vScale;
 			}
 		}
 
@@ -2222,9 +2256,9 @@ namespace
 		// keeps the underside - the only side anyone can see - and discards
 		// the top.
 		std::vector<unsigned int> indices;
-		indices.reserve(kGrid * kGrid * 6);
-		for (int gz = 0; gz < kGrid; gz++) {
-			for (int gx = 0; gx < kGrid; gx++) {
+		indices.reserve(terrainGrid * terrainGrid * 6);
+		for (int gz = 0; gz < terrainGrid; gz++) {
+			for (int gx = 0; gx < terrainGrid; gx++) {
 				const unsigned int i00 = gz * verts1D + gx;
 				const unsigned int i10 = i00 + 1;
 				const unsigned int i01 = i00 + verts1D;
@@ -2449,7 +2483,7 @@ namespace
 		// The row range flips end for end on the way across: grid rows run
 		// opposite to landscape y (see worldZFromEngineY), so the dirty
 		// region's *max* y is its lowest grid row.
-		const int last = kTerrainVerts1D - 1;
+		const int last = terrainVerts1D - 1;
 		int gx0 = std::max(gridXForHeightMapCol(minX, w) - 2, 0);
 		int gx1 = std::min(gridXForHeightMapCol(maxX, w) + 2, last);
 		int gz0 = std::max(gridZForHeightMapRow(maxY, h) - 2, 0);
@@ -2464,7 +2498,7 @@ namespace
 			for (int gx = std::max(gx0 - 1, 0); gx <= std::min(gx1 + 1, last); gx++) {
 				int sx = heightMapColForGridX(gx, w);
 				float height = heightMap.getHeight(sx, sy).asFloat();
-				terrainHeights[gz * kTerrainVerts1D + gx] = height;
+				terrainHeights[gz * terrainVerts1D + gx] = height;
 				// The shader colours by height ratio, so let the range grow
 				// with a crater rather than clamping new extremes flat.
 				terrainMinHeight = std::min(terrainMinHeight, height);
@@ -2479,7 +2513,7 @@ namespace
 			for (int i = 0; i < rowVerts; i++) {
 				writeTerrainVertex(gx0 + i, gz, &row[i * kTerrainFloatsPerVertex]);
 			}
-			GLintptr offset = (GLintptr) (gz * kTerrainVerts1D + gx0)
+			GLintptr offset = (GLintptr) (gz * terrainVerts1D + gx0)
 				* kTerrainFloatsPerVertex * sizeof(float);
 			glBufferSubData(GL_ARRAY_BUFFER, offset,
 							row.size() * sizeof(float), row.data());
@@ -5996,6 +6030,23 @@ Java_com_rm_scorchdroid_NativeBridge_setRenderOptions(
         JNIEnv *env, jobject, jboolean showTrees, jboolean showFog) {
     g_showTrees = (showTrees == JNI_TRUE);
     g_showFog = (showFog == JNI_TRUE);
+}
+
+// M23: how finely the landscape is drawn, as a grid resolution. Takes
+// effect on the next landscape build, which the renderer forces as soon as
+// it sees the value change.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setTerrainDetail(JNIEnv *env, jobject, jint grid) {
+    g_requestedTerrainGrid.store(grid);
+}
+
+// The range the setting may ask for, as "min|max", so the slider does not
+// have to repeat numbers this file owns.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getTerrainDetailRange(JNIEnv *env, jobject) {
+    std::ostringstream out;
+    out << kTerrainGridMin << "|" << kTerrainGridMax;
+    return env->NewStringUTF(out.str().c_str());
 }
 
 // M22: which aim sight to draw - 0 for this port's own blade, 1 for

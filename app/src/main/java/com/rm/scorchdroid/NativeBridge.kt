@@ -274,6 +274,16 @@ object NativeBridge {
     external fun setSightStyle(style: Int)
 
     /**
+     * M23: how finely the landscape is drawn, as the resolution of the mesh
+     * grid. The default is the heightmap's own, which is what upstream draws;
+     * lower is cheaper. Takes effect on the next landscape.
+     */
+    external fun setTerrainDetail(grid: Int)
+
+    /** M23: the range [setTerrainDetail] accepts, as "min|max". */
+    external fun getTerrainDetailRange(): String
+
+    /**
      * M16: the tank models the selected mod offers, by name, from its own
      * tanks.xml. Does not include upstream's "Random" entry - that is the
      * empty choice, not a model.
