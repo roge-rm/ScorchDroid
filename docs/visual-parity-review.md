@@ -154,6 +154,20 @@ draw calls rise only by the number of distinct materials per model
 and light are applied to the port's own tree program too. Emulator: the
 T-55 draws its olive skin, turret and barrel shaded by the sun.
 
+**0.7.0 on a phone (2026-09-09) showed three things the emulator never
+did, all in the image loaders rather than the renderer:** a greyscale
+JPEG (the whole storm set, so the cavern's roof and ground) came out of
+`ImageJpgFactory` with one channel and was read as three - rainbow static
+on the ceiling, a cyan wash on the ground - fixed by widening to RGB at
+load (`LandscapeTextureBuilder::toRGB`); the port's BMP loader turned rows
+over, so every `.bmp` skin was upside down against the JPEG/PNG loaders
+and the grey destroyer drew in its hull's navy (patch 0021); and `rand()`
+was never seeded, so every launch replayed the same maps (Quick Game most
+visibly). The giant carrier and destroyer on the snow and default maps
+are upstream's own size: `<modelscale>` 0.04 on a 2,567-unit model is a
+103-unit ship, and every tank model is now host-tested through the
+sizing rule to prove bounds were not the cause.
+
 ### V2 – Textured models
 
 - `uploadModel` carries UVs; meshes with a `*BITMAP` draw it; tanks draw
