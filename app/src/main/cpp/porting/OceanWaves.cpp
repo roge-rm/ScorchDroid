@@ -150,9 +150,13 @@ namespace ScorchDroidOcean
 
 	void generate(float seconds, Tile &out)
 	{
-		out.height.assign((size_t) N * N, 0.0f);
-		out.slopeX.assign((size_t) N * N, 0.0f);
-		out.slopeZ.assign((size_t) N * N, 0.0f);
+		const size_t count = (size_t) N * N;
+		out.height.assign(count, 0.0f);
+		out.dispX.assign(count, 0.0f);
+		out.dispZ.assign(count, 0.0f);
+		out.normalX.assign(count, 0.0f);
+		out.normalY.assign(count, 1.0f);
+		out.normalZ.assign(count, 0.0f);
 
 		std::vector<Complex> h0;
 		{
@@ -167,8 +171,8 @@ namespace ScorchDroidOcean
 		const float w0 = 2.0f * (float) M_PI / kCycleSeconds;
 		const float twoPi = 2.0f * (float) M_PI;
 
-		std::vector<Complex> heightSpectrum((size_t) N * N);
-		std::vector<Complex> slopeSpectrum((size_t) N * N);
+		std::vector<Complex> heightSpectrum(count);
+		std::vector<Complex> dispSpectrum(count);
 		for (int y = 0; y < N; y++) {
 			const float ky = twoPi * (float) (y - N / 2) / kL;
 			for (int x = 0; x < N; x++) {
@@ -183,30 +187,84 @@ namespace ScorchDroidOcean
 				const Complex h = a * rot + b * std::conj(rot);
 
 				heightSpectrum[(size_t) y * N + x] = h;
-				// Both slopes at once: multiplying by i*k differentiates, and
-				// packing dx into the real part and dz into the imaginary one
-				// gets them from a single transform.
-				slopeSpectrum[(size_t) y * N + x] = Complex(0.0f, 1.0f) * h * Complex(kx, ky);
+
+				// Upstream's compute_displacements: the spectrum of the
+				// horizontal displacement is -i * h * k/|k|, one for each
+				// axis. Both at once: x in the real part and z in the
+				// imaginary one, which a single transform separates
+				// because each is itself a real (Hermitian) field.
+				Complex unitK(0.0f, 0.0f);
+				if (k > 0.0f) unitK = Complex(kx / k, ky / k);
+				dispSpectrum[(size_t) y * N + x] = Complex(0.0f, -1.0f) * h * unitK;
 			}
 		}
 
 		fft2D(heightSpectrum, 1.0f);
-		fft2D(slopeSpectrum, 1.0f);
+		fft2D(dispSpectrum, 1.0f);
 
 		// The spectrum was laid out with k = 0 in the middle, so the result
 		// comes back with the tile's origin in the corners; the (-1)^(x+y)
 		// factor shifts it back, which is the usual fftshift done in the
 		// spatial domain because it is free here.
+		//
+		// The displacement's scale is upstream's own: it passes -2.0 as the
+		// scale factor, Tessendorf's lambda, so a point moves sideways by
+		// about twice what it rises.
+		const float kChoppiness = -2.0f;
 		for (int y = 0; y < N; y++) {
 			for (int x = 0; x < N; x++) {
 				const size_t i = (size_t) y * N + x;
 				const float sign = ((x + y) & 1) ? -1.0f : 1.0f;
 				out.height[i] = heightSpectrum[i].real() * sign;
-				out.slopeX[i] = slopeSpectrum[i].real() * sign;
-				out.slopeZ[i] = slopeSpectrum[i].imag() * sign;
+				out.dispX[i] = dispSpectrum[i].real() * sign * kChoppiness;
+				out.dispZ[i] = dispSpectrum[i].imag() * sign * kChoppiness;
 			}
 		}
 
-		// Not normalised: the heights are world units, see kHeightScalar.
+		// Normals of the displaced surface, as Water2Patch::generate builds
+		// them: the point's displaced position against its four neighbours
+		// (wrapping, since the tile repeats) at upstream's two units per
+		// point, normal = normalize(cross(+x, +y) + cross(-x, -y)) in the
+		// tile's Z-up frame. Mapped to Y-up on the way out.
+		const float spacing = kL / (float) N;
+		auto position = [&](int x, int y, float p[3]) {
+			const int wx = (x + N) % N, wy = (y + N) % N;
+			const size_t i = (size_t) wy * N + wx;
+			p[0] = out.dispX[i] + (float) x * spacing;
+			p[1] = out.dispZ[i] + (float) y * spacing;
+			p[2] = out.height[i];
+		};
+		auto cross = [](const float a[3], const float b[3], float r[3]) {
+			r[0] = a[1] * b[2] - a[2] * b[1];
+			r[1] = a[2] * b[0] - a[0] * b[2];
+			r[2] = a[0] * b[1] - a[1] * b[0];
+		};
+		for (int y = 0; y < N; y++) {
+			for (int x = 0; x < N; x++) {
+				float c[3], px[3], py[3], mx[3], my[3];
+				position(x, y, c);
+				position(x + 1, y, px);
+				position(x, y + 1, py);
+				position(x - 1, y, mx);
+				position(x, y - 1, my);
+				float d1[3], d2[3], d3[3], d4[3];
+				for (int j = 0; j < 3; j++) {
+					d1[j] = px[j] - c[j]; d2[j] = py[j] - c[j];
+					d3[j] = mx[j] - c[j]; d4[j] = my[j] - c[j];
+				}
+				float n1[3], n2[3];
+				cross(d1, d2, n1);
+				cross(d3, d4, n2);
+				float n[3] = { n1[0] + n2[0], n1[1] + n2[1], n1[2] + n2[2] };
+				const float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+				const size_t i = (size_t) y * N + x;
+				if (len > 1e-12f) {
+					// Tile (x, y, up) -> world (x, up, z).
+					out.normalX[i] = n[0] / len;
+					out.normalY[i] = n[2] / len;
+					out.normalZ[i] = n[1] / len;
+				}
+			}
+		}
 	}
 }

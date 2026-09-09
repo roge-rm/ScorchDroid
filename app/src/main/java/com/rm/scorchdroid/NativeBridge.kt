@@ -281,10 +281,10 @@ object NativeBridge {
     external fun setTerrainDetail(grid: Int)
 
     /**
-     * W4: which sea to draw - 0 for this port's two sine waves, 1 for
-     * Scorched3D's own Tessendorf spectrum, generated on a worker thread.
+     * Water detail: 0 Full (upstream's 2-unit grid, 24 wave phases a
+     * second), 1 Half, 2 Quarter.
      */
-    external fun setOceanStyle(style: Int)
+    external fun setWaterDetail(level: Int)
 
     /** 0 low, 1 normal, 2 high - upstream's own effects detail levels. */
     external fun setEffectsDetail(level: Int)

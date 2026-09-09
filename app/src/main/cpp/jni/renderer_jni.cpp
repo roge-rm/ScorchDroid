@@ -256,9 +256,22 @@ namespace
 	// at all.
 	bool   groundBakedForShadows = false;
 
-	GLuint oceanTexture = 0;
-	GLint  waterWaveTexLoc = -1, waterUseWaveTexLoc = -1, waterWaveTileLoc = -1;
-	std::atomic<int> g_oceanStyle{0};     // 0 = this port's sine waves, 1 = upstream's
+	// W4/W6/W7: the ocean tile as two textures. oceanTexture is RGB16F -
+	// height, x displacement, z displacement, world units - which the
+	// vertex shader displaces the grid by. oceanNormalTexture is RGBA8 -
+	// the displaced surface's normal, encoded n * 127 + 128 exactly as
+	// upstream's Water2Patches::generateNormalMap does, with the whitecap
+	// foam amount in alpha (W10a). The vertex shader reads it for the
+	// vertex normal; the fragment shader reads it *again* at 1/8 and 1/32
+	// scale for the fine detail, which is what upstream's "noise" layers
+	// really are - its own sea, small. Mipmapped for that reason: the
+	// 16-unit layer is a few texels per pixel at distance.
+	GLuint oceanTexture = 0, oceanNormalTexture = 0;
+	GLint  waterWaveTexLoc = -1, waterWaveNormalTexLoc = -1, waterWaveTileLoc = -1;
+	// Water detail, the one water setting: 0 = Full (upstream's 2-unit grid,
+	// 24 tile updates a second - its own phase rate), 1 = Half (4 units,
+	// 12/s), 2 = Quarter (8 units, 6/s). The grid part lands with W11.
+	std::atomic<int> g_waterDetail{0};
 	std::thread oceanThread;
 	std::atomic<bool> oceanRunning{false};
 	std::mutex oceanMutex;
@@ -266,6 +279,12 @@ namespace
 	bool oceanHasNew = false;             // guarded by oceanMutex
 	float oceanSeededSpeed = -1.0f, oceanSeededDirection = 0.0f;
 	std::vector<float> oceanUpload;       // reused, so no per-update allocation
+	std::vector<unsigned char> oceanNormalUpload;
+	// Upstream's second ripple layer runs on its own wind: the round's
+	// speed plus a random offset in [-1, 1], the direction jittered by up
+	// to 0.2 on each axis (Water2Renderer::generate). Rolled once per
+	// landscape so it holds for a round.
+	float  waterWind2SpeedOffset = 0.0f, waterWind2JitterX = 0.0f, waterWind2JitterZ = 0.0f;
 	int oceanUploadLogsLeft = 3;
 	int    waterGridVertexCount = 0;
 	int    waterSkirtVertexCount = 0;
@@ -1198,11 +1217,11 @@ namespace
 	// transparency). So the surface is ours to draw, from upstream's own
 	// numbers.
 	//
-	// Deliberately not a texture: what sells water at a glance is that it
-	// moves and that it is flat where the land is not. Two of the
-	// definition's own colours crossfaded by a pair of slow, non-commensurate
-	// sine waves gives that for a few instructions, with no image to load
-	// and nothing to keep in step with the ground texture.
+	// The surface is upstream's own sea: the Tessendorf tile from
+	// OceanWaves.h, generated on a worker thread and uploaded as the two
+	// textures described above. The vertex shader displaces a flat grid by
+	// it - up by the height and sideways by the choppy displacement - and
+	// the fragment shader shades it with a transcription of water.fshader.
 	const char *kWaterVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
 		uniform mat4 uMVP;
@@ -1236,19 +1255,14 @@ namespace
 		uniform mat4 uReflectMatrix;
 		uniform mat4 uShadowMatrix;
 
-		// W4: Scorched3D's own ocean, as a tile the CPU regenerates from a
-		// Tessendorf spectrum (see OceanWaves.h). Height in R, the two
-		// slopes in G and B, repeated across the sea.
+		// Scorched3D's own ocean, as a tile the CPU regenerates from a
+		// Tessendorf spectrum (see OceanWaves.h). Height in R and the
+		// horizontal displacement in G (x) and B (z), all world units,
+		// repeated across the sea; the displaced surface's normal in the
+		// second texture, encoded n * 127 + 128 as upstream stores it.
 		uniform sampler2D uWaveTex;
-		uniform float uUseWaveTex;
+		uniform sampler2D uWaveNormalTex;
 		uniform float uWaveTileLength;
-
-		// The same two waves the surface is coloured by, as a height field,
-		// so the shape and the shading cannot drift apart.
-		float waveHeight(vec2 p, float t) {
-			return sin(p.x * 0.09 + t * 0.7)
-				 + sin((p.x * 0.4 + p.y * 0.9) * 0.05 - t * 0.5);
-		}
 
 		void main() {
 			vWorld = aPosition.xz;
@@ -1260,31 +1274,21 @@ namespace
 			float amp = uWaveAmplitude * (1.0 - clamp(edge, 0.0, 1.0));
 
 			vec3 world = aPosition;
-			if (uUseWaveTex > 0.5) {
-				// textureLod, not texture: a vertex shader has no
-				// derivatives to pick a mip level from, and ES3 requires the
-				// level to be given explicitly here.
-				vec3 wave = textureLod(uWaveTex, vWorld / uWaveTileLength, 0.0).rgb;
-				world.y += wave.r * amp;
-				// The slopes come out of the spectrum differentiated
-				// analytically, so the normal is exact rather than sampled
-				// from neighbours - but they are slopes of a unit-amplitude
-				// tile, so they scale with the same amplitude the height
-				// does.
-				vNormal = normalize(vec3(-wave.g * amp, 1.0, -wave.b * amp));
-			} else {
-				world.y += waveHeight(vWorld, uTime) * amp;
-
-				// Normal from the analytic slope rather than from
-				// neighbouring vertices: exact, and it costs two more
-				// evaluations instead of a bigger vertex format.
-				float e = 1.0;
-				float hx = (waveHeight(vWorld + vec2(e, 0.0), uTime)
-						  - waveHeight(vWorld - vec2(e, 0.0), uTime)) * amp;
-				float hz = (waveHeight(vWorld + vec2(0.0, e), uTime)
-						  - waveHeight(vWorld - vec2(0.0, e), uTime)) * amp;
-				vNormal = normalize(vec3(-hx, 2.0 * e, -hz));
-			}
+			// textureLod, not texture: a vertex shader has no derivatives
+			// to pick a mip level from, and ES3 requires the level to be
+			// given explicitly here.
+			vec2 tile = vWorld / uWaveTileLength;
+			vec3 wave = textureLod(uWaveTex, tile, 0.0).rgb;
+			// Up by the height and sideways by the choppy displacement -
+			// upstream's Water2Patch places each vertex at exactly this
+			// sum, which is what makes crests sharp and troughs broad.
+			world.y += wave.r * amp;
+			world.xz += wave.gb * amp;
+			// The normal of the displaced surface, built on the CPU from
+			// the displaced neighbours as Water2Patch builds it; leaned
+			// back towards straight up by the same fade the height takes.
+			vec3 n0 = textureLod(uWaveNormalTex, tile, 0.0).rgb * 2.0 - 1.0;
+			vNormal = normalize(vec3(n0.x * amp, n0.y, n0.z * amp));
 
 			vWorldPos = world;
 
@@ -1343,23 +1347,15 @@ namespace
 		uniform float uUseReflection;
 		uniform highp sampler2DShadow uShadowTex;
 		uniform int uShadowEnabled;
-		// Upstream's two noise layers: xy is the scroll offset, z the scale
-		// (its noise_xform_0 / noise_xform_1).
+		// Upstream's two "noise" layers: xy is the scroll offset, z the
+		// scale (its noise_xform_0 / noise_xform_1). What they sample is
+		// not noise but the sea's own normal map at 1/8 and 1/32 scale.
 		uniform vec3 uNoise0;
 		uniform vec3 uNoise1;
+		uniform sampler2D uWaveNormalTex;
 
 		// Upstream's water shininess, from water.fshader.
 		const float kWaterShininess = 120.0;
-
-		// The slope of a small ripple field. This stands in for upstream's
-		// normal map, which it generates from the wave height field and
-		// samples at two scales - it has no equivalent here, and a handful of
-		// sines costs less than carrying one.
-		vec2 rippleSlope(vec2 p) {
-			return vec2(
-				cos(p.x * 6.2831) * 0.5 + cos((p.x + p.y) * 6.6) * 0.3,
-				cos(p.y * 5.1000) * 0.5 + cos((p.x - p.y) * 5.5) * 0.3);
-		}
 
 		float sunShadow() {
 			if (uShadowEnabled == 0) return 1.0;
@@ -1371,25 +1367,22 @@ namespace
 		void main() {
 			float fogFactor = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
 
-			// Upstream's two noise layers, added to the geometric normal:
+			// Upstream's two "noise" layers, from water.vshader/fshader:
+			//   noise_texc = vertex / 2 * noise_xform.z + noise_xform.xy
+			//   N0 = texture(tex_normal, noise_texc) * 2 - 1, times fog
 			//   N = normalize(normal + N0 + N1)
-			// with both faded out by the fog factor. This is not decoration.
-			// The far water here is one flat quad with a constant normal, so
-			// without it every point shares a reflection vector and the
-			// specular term - pow(dot(R,E), 120) - stops being a glitter path
-			// and becomes one solid saturated lobe covering half the sea.
-			// That was the white water: a moon reflection with no surface to
-			// break it up. Upstream never has a flat normal to begin with.
-			vec2 t0 = vWorld * uNoise0.z + uNoise0.xy;
-			vec2 t1 = vWorld * uNoise1.z + uNoise1.xy;
-			// Named ripple0/ripple1, not s0/s1: `s0` is already the shadow
-			// term further down, and shadowing it here made the whole water
-			// shader fail to compile - which is not a visible failure, because
-			// the water simply stops being drawn.
-			vec2 ripple0 = rippleSlope(t0) * 0.30 * fogFactor;
-			vec2 ripple1 = rippleSlope(t1) * 0.18 * fogFactor;
-			vec3 n = normalize(vNormal +
-				vec3(-ripple0.x - ripple1.x, 0.0, -ripple0.y - ripple1.y));
+			// tex_normal is the sea's own normal map, so the fine detail is
+			// the same wind-aligned, moving sea at 1/8 and 1/32 scale
+			// (repeating every 64 and 16 units, with the halving). N0 and
+			// N1 are decoded as *full* unit normals, y near 1, so the sum
+			// flattens every slope by about three - that is upstream's
+			// look, not a mistake to correct. Without these the far water
+			// shares one normal and the specular term becomes a solid lobe.
+			vec2 t0 = vWorld / 2.0 * uNoise0.z + uNoise0.xy;
+			vec2 t1 = vWorld / 2.0 * uNoise1.z + uNoise1.xy;
+			vec3 N0 = (texture(uWaveNormalTex, t0).rgb * 2.0 - 1.0) * fogFactor;
+			vec3 N1 = (texture(uWaveNormalTex, t1).rgb * 2.0 - 1.0) * fogFactor;
+			vec3 n = normalize(vNormal + N0 + N1);
 			// E, the direction *to* the viewer, and L, the direction to the
 			// sun - both as upstream's shader has them.
 			vec3 E = normalize(uEyePos - vWorldPos);
@@ -2566,20 +2559,18 @@ namespace
 					oceanReady = tile;
 					oceanHasNew = true;
 				}
-				// Twenty a second is smooth for a sea and leaves the core
-				// alone the rest of the time.
-				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+				// Upstream steps its baked phases 24 times a second; Half
+				// and Quarter detail halve and quarter that, which is the
+				// CPU side of the one water setting.
+				const int detail = g_waterDetail.load();
+				const int millis = detail <= 0 ? 41 : (detail == 1 ? 83 : 166);
+				std::this_thread::sleep_for(std::chrono::milliseconds(millis));
 			}
 		});
 	}
 
 	void updateOceanIfNeeded(ScorchedContext &ctx)
 	{
-		if (g_oceanStyle.load() != 1) {
-			stopOceanWorker();
-			return;
-		}
-
 		// Upstream seeds its generator from the game's own wind, and falls
 		// back to a diagonal breeze when the round is dead calm - a flat sea
 		// is not a sea.
@@ -2617,10 +2608,16 @@ namespace
 			if (oceanHasNew && !oceanReady.height.empty()) {
 				const int n = ScorchDroidOcean::kResolution;
 				oceanUpload.resize((size_t) n * n * 3);
+				oceanNormalUpload.resize((size_t) n * n * 4);
 				for (size_t i = 0; i < (size_t) n * n; i++) {
 					oceanUpload[i * 3 + 0] = oceanReady.height[i];
-					oceanUpload[i * 3 + 1] = oceanReady.slopeX[i];
-					oceanUpload[i * 3 + 2] = oceanReady.slopeZ[i];
+					oceanUpload[i * 3 + 1] = oceanReady.dispX[i];
+					oceanUpload[i * 3 + 2] = oceanReady.dispZ[i];
+					// Upstream's own encoding (Water2Patches::generateNormalMap).
+					oceanNormalUpload[i * 4 + 0] = (unsigned char) (oceanReady.normalX[i] * 127.0f + 128.0f);
+					oceanNormalUpload[i * 4 + 1] = (unsigned char) (oceanReady.normalY[i] * 127.0f + 128.0f);
+					oceanNormalUpload[i * 4 + 2] = (unsigned char) (oceanReady.normalZ[i] * 127.0f + 128.0f);
+					oceanNormalUpload[i * 4 + 3] = 0;
 				}
 				oceanHasNew = false;
 				haveNew = true;
@@ -2641,17 +2638,34 @@ namespace
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, n, n, 0, GL_RGB, GL_FLOAT, nullptr);
 		}
+		if (oceanNormalTexture == 0) {
+			glGenTextures(1, &oceanNormalTexture);
+			glBindTexture(GL_TEXTURE_2D, oceanNormalTexture);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+			// Trilinear: the fragment shader reads this at 1/32 scale,
+			// where a far pixel covers many texels and would shimmer
+			// without the mip chain (upstream asks for hardware mipmaps
+			// on exactly this texture).
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, n, n, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		}
 		glBindTexture(GL_TEXTURE_2D, oceanTexture);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, GL_RGB, GL_FLOAT, oceanUpload.data());
+		glBindTexture(GL_TEXTURE_2D, oceanNormalTexture);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, GL_RGBA, GL_UNSIGNED_BYTE, oceanNormalUpload.data());
+		glGenerateMipmap(GL_TEXTURE_2D);
 		if (oceanUploadLogsLeft > 0) {
 			oceanUploadLogsLeft--;
-			float peak = 0.0f, peakSlope = 0.0f;
+			float peak = 0.0f, peakDisp = 0.0f, peakTilt = 0.0f;
 			for (size_t i = 0; i < (size_t) n * n; i++) {
 				peak = std::max(peak, fabsf(oceanUpload[i * 3]));
-				peakSlope = std::max(peakSlope, fabsf(oceanUpload[i * 3 + 1]));
+				peakDisp = std::max(peakDisp, std::max(fabsf(oceanUpload[i * 3 + 1]), fabsf(oceanUpload[i * 3 + 2])));
+				peakTilt = std::max(peakTilt, fabsf(oceanReady.normalX[i]));
 			}
-			LOGI("Ocean tile uploaded: wind %.1f bearing %.2f, peak height %.2f, peak slope %.3f",
-				 oceanSeededSpeed, oceanSeededDirection, peak, peakSlope);
+			LOGI("Ocean tile uploaded: wind %.1f bearing %.2f, peak height %.2f, peak displacement %.2f, peak normal tilt %.3f",
+				 oceanSeededSpeed, oceanSeededDirection, peak, peakDisp, peakTilt);
 		}
 	}
 
@@ -2795,6 +2809,22 @@ namespace
 		glEnableVertexAttribArray(0);
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
 		glBindVertexArray(0);
+
+		// Upstream's second ripple wind (Water2Renderer::generate):
+		//   windSpeed2 = max(0, RAND * 2 - 1 + windSpeed1)
+		//   windDir2   = normalize(windDir1 + (RAND * 0.4 - 0.2, RAND * 0.4 - 0.2))
+		// Rolled here, once per landscape, with a small generator of its
+		// own so it cannot disturb anything else's randomness.
+		{
+			static unsigned int roll = 0x2545f491u;
+			auto next = [&]() {
+				roll = roll * 1664525u + 1013904223u;
+				return (float) ((roll >> 8) & 0xffffffu) / (float) 0x1000000u;
+			};
+			waterWind2SpeedOffset = next() * 2.0f - 1.0f;
+			waterWind2JitterX = next() * 0.4f - 0.2f;
+			waterWind2JitterZ = next() * 0.4f - 0.2f;
+		}
 
 		waterVisible = true;
 		LOGI("Water surface at height %.1f, alpha %.2f", waterHeight, waterAlpha);
@@ -4312,7 +4342,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterSkyHorizonLoc = glGetUniformLocation(waterProgram, "uSkyHorizon");
 	waterSkyZenithLoc = glGetUniformLocation(waterProgram, "uSkyZenith");
 	waterWaveTexLoc = glGetUniformLocation(waterProgram, "uWaveTex");
-	waterUseWaveTexLoc = glGetUniformLocation(waterProgram, "uUseWaveTex");
+	waterWaveNormalTexLoc = glGetUniformLocation(waterProgram, "uWaveNormalTex");
 	waterWaveTileLoc = glGetUniformLocation(waterProgram, "uWaveTileLength");
 	waterReflectTexLoc = glGetUniformLocation(waterProgram, "uReflectionTex");
 	waterUseReflectLoc = glGetUniformLocation(waterProgram, "uUseReflection");
@@ -6327,10 +6357,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// on top of the surface.
 	if (waterVisible && waterProgram != 0) {
 		glUseProgram(waterProgram);
-		// W4: the ocean tile, when upstream's spectrum is the one in use.
+		// The ocean tile: refreshed from the worker if it has a new one.
 		updateOceanIfNeeded(*ctx);
-		const bool useOcean = (g_oceanStyle.load() == 1) && oceanTexture != 0;
-		glUniform1f(waterUseWaveTexLoc, useOcean ? 1.0f : 0.0f);
 		glUniform1f(waterWaveTileLoc, ScorchDroidOcean::kTileLength);
 		const bool useReflection = wantReflection && reflectionTexture != 0;
 		glUniform1f(waterUseReflectLoc, useReflection ? 1.0f : 0.0f);
@@ -6339,11 +6367,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glBindTexture(GL_TEXTURE_2D, reflectionTexture);
 			glUniform1i(waterReflectTexLoc, 4);
 		}
-		if (useOcean) {
-			glActiveTexture(GL_TEXTURE3);
-			glBindTexture(GL_TEXTURE_2D, oceanTexture);
-			glUniform1i(waterWaveTexLoc, 3);
-		}
+		glActiveTexture(GL_TEXTURE3);
+		glBindTexture(GL_TEXTURE_2D, oceanTexture);
+		glUniform1i(waterWaveTexLoc, 3);
+		glActiveTexture(GL_TEXTURE6);
+		glBindTexture(GL_TEXTURE_2D, oceanNormalTexture);
+		glUniform1i(waterWaveNormalTexLoc, 6);
 		glUniformMatrix4fv(waterMvpLoc, 1, GL_FALSE, mvp.m);
 		// Upstream's reflection texture matrix: bias * proj * view of the
 		// *real* camera. The mirrored pass drew into the buffer with a view
@@ -6368,9 +6397,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		//   D_0 = windDir1 * (windSpeed1 / (-64 * 6))
 		//   D_1 = windDir2 * (windSpeed2 / (-16 * 6))
 		//   noise_n_pos = D_n * (totalTime / 24), z = 8/256 and 32/256
-		// with windSpeed1 the game's own wind mapped its way (speed*2 + 3).
-		// The second layer is a slightly faster, slightly turned copy of the
-		// first, which is what stops the two from beating against each other.
+		// with windSpeed1 the game's own wind mapped its way (speed*2 + 3),
+		// and the second layer on upstream's second wind: speed1 plus a
+		// random offset in [-1, 1], floored at 0, the direction jittered by
+		// up to 0.2 on each axis and renormalised. The jitter is rolled per
+		// landscape (buildWaterIfNeeded) as upstream rolls it per generate.
 		{
 			Wind &waterWind = ctx->getSimulator().getWind();
 			FixedVector dir = waterWind.getWindDirection();
@@ -6379,17 +6410,15 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			if (wlen < 0.01f) { wdx = 0.707f; wdz = 0.707f; }   // a dead calm still drifts
 			else { wdx /= wlen; wdz /= wlen; }
 			const float speed1 = waterWind.getWindSpeed().asFloat() * 2.0f + 3.0f;
-			const float speed2 = speed1 * 1.15f;
-			const float t = (float) fmod(lastFrameSeconds, 3600.0) * 24.0f / 24.0f;
+			const float speed2 = std::max(0.0f, speed1 + waterWind2SpeedOffset);
+			float w2x = wdx + waterWind2JitterX, w2z = wdz + waterWind2JitterZ;
+			const float w2len = sqrtf(w2x * w2x + w2z * w2z);
+			if (w2len > 0.001f) { w2x /= w2len; w2z /= w2len; }
+			const float t = (float) fmod(lastFrameSeconds, 3600.0);
 			const float d0 = speed1 / (-64.0f * 6.0f) * t;
 			const float d1 = speed2 / (-16.0f * 6.0f) * t;
-			// The second layer is turned a little off the wind, as upstream
-			// jitters its own second direction.
-			const float c = 0.966f, s = 0.259f;   // 15 degrees
 			glUniform3f(waterNoise0Loc, wdx * d0, wdz * d0, 8.0f / 256.0f);
-			glUniform3f(waterNoise1Loc,
-						(wdx * c - wdz * s) * d1, (wdx * s + wdz * c) * d1,
-						32.0f / 256.0f);
+			glUniform3f(waterNoise1Loc, w2x * d1, w2z * d1, 32.0f / 256.0f);
 		}
 		glUniform1f(waterAlphaLoc, waterAlpha);
 		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
@@ -6432,10 +6461,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// Then the grid inside the ring, which does move. Its amplitude
 		// fades to zero at its own edge, so it meets the skirt flush.
 		// The ocean tile is already in world units at upstream's own
-		// scale (OceanWaves.h), so it is drawn at 1; the sine sea is a
-		// unit wave and keeps its own height.
-		if (waterGridVertexCount > 0) {
-			glUniform1f(waterWaveAmpLoc, useOcean ? 1.0f : 0.45f);
+		// scale (OceanWaves.h), so it is drawn at 1.
+		if (waterGridVertexCount > 0 && oceanTexture != 0) {
+			glUniform1f(waterWaveAmpLoc, 1.0f);
 			glBindVertexArray(waterGridVao);
 			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, waterGridVertexCount);
 		}
@@ -7018,11 +7046,11 @@ Java_com_rm_scorchdroid_NativeBridge_setEffectsDetail(JNIEnv *env, jobject, jint
     LOGI("Effects detail: level %d, %d particles", (int) level, budget);
 }
 
-// W4: which sea to draw - 0 for this port's two sine waves, 1 for
-// Scorched3D's own Tessendorf spectrum.
+// Water detail: 0 Full (upstream's own grid and phase rate), 1 Half,
+// 2 Quarter. See g_waterDetail.
 extern "C" JNIEXPORT void JNICALL
-Java_com_rm_scorchdroid_NativeBridge_setOceanStyle(JNIEnv *env, jobject, jint style) {
-    g_oceanStyle.store(style == 1 ? 1 : 0);
+Java_com_rm_scorchdroid_NativeBridge_setWaterDetail(JNIEnv *env, jobject, jint level) {
+    g_waterDetail.store(level < 0 ? 0 : (level > 2 ? 2 : level));
 }
 
 extern "C" JNIEXPORT void JNICALL

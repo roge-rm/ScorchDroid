@@ -29,14 +29,32 @@ namespace ScorchDroidOcean
 
 	struct Tile
 	{
-		// Row-major, kResolution^2. Height is a displacement about the water
-		// plane in world units, at upstream's own scale (so it grows with
-		// the wind, from a few tenths of a unit in a calm to about four in
-		// a gale); the slopes are d(height)/dx and d(height)/dz at that
-		// point, which is what a normal is built from.
+		// Row-major, kResolution^2, all in world units at upstream's own
+		// scale (so the sea grows with the wind, from a few tenths of a
+		// unit in a calm to about four in a gale).
+		//
+		// Height is the displacement about the water plane. dispX and
+		// dispZ are the *horizontal* displacement of the same point - the
+		// "choppy" term of Tessendorf's method, which upstream applies
+		// through compute_displacements(-2): a point is pulled sideways
+		// towards the crest, which is what makes crests sharp and troughs
+		// broad rather than the surface a sum of smooth sines. Both are
+		// in the tile's own frame, x along the tile's x and z along its y
+		// (which the renderer lays along world z).
 		std::vector<float> height;
-		std::vector<float> slopeX;
-		std::vector<float> slopeZ;
+		std::vector<float> dispX;
+		std::vector<float> dispZ;
+
+		// The unit normal of the *displaced* surface at each point, as
+		// Water2Patch builds it: cross products across the four neighbours
+		// two units away. Not an analytic slope of the height field - once
+		// the points move sideways that is no longer the surface's slope.
+		// Stored Y-up, in the renderer's world frame (x, up, z), so the
+		// shader uses it as it is. This is also what upstream's
+		// Water2Patches::generateNormalMap bakes into its normal map.
+		std::vector<float> normalX;
+		std::vector<float> normalY;
+		std::vector<float> normalZ;
 	};
 
 	// Builds the wave spectrum for a given wind. Deterministic for a given
