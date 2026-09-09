@@ -467,36 +467,4 @@ bool applyLightMap(ScorchedContext &context, Texture &texture)
 	return true;
 }
 
-std::vector<unsigned char> buildShoreMask(ScorchedContext &context,
-										  float waterHeight, int size,
-										  float reach)
-{
-	std::vector<unsigned char> mask;
-	if (size <= 0 || reach <= 0.0f) return mask;
-
-	HeightMap &hMap = context.getLandscapeMaps().getGroundMaps().getHeightMap();
-	const int mapW = hMap.getMapWidth(), mapH = hMap.getMapHeight();
-	if (mapW <= 0 || mapH <= 0) return mask;
-
-	mask.assign((size_t) size * size, 0);
-	for (int y = 0; y < size; y++) {
-		const int sy = std::min(y * mapH / size, mapH - 1);
-		for (int x = 0; x < size; x++) {
-			const int sx = std::min(x * mapW / size, mapW - 1);
-			const float ground = hMap.getHeight(sx, sy).asFloat();
-
-			// Only *under* the water: foam belongs on the submerged shelf
-			// by the shore, not on dry land, and not out in deep water.
-			const float depth = waterHeight - ground;
-			if (depth < 0.0f || depth > reach) continue;
-
-			// 255 at the waterline, fading to nothing at full depth.
-			const float strength = 1.0f - (depth / reach);
-			mask[(size_t) y * size + x] =
-				(unsigned char) std::min(255.0f, std::max(0.0f, strength * 255.0f));
-		}
-	}
-	return mask;
-}
-
 }  // namespace LandscapeTextureBuilder

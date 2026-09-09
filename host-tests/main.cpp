@@ -857,63 +857,6 @@ namespace
 				printf("  (light map: %d texels darkened, mean drop %.1f/255)\n",
 					darker, (double) deltaTotal / (double) ground.rgb.size());
 
-				// M6 shoreline foam: the mask the water shader draws surf from.
-			// Checked here for the same reason as the light map - it is
-			// pure pixel work over a real landscape, and "does the band
-			// actually follow the coast" is not something a screenshot of
-			// an unfamiliar shore answers.
-			{
-				LandscapeTex *landTex =
-					server->getLandscapeMaps().getDefinitions().getTex();
-				float waterHeight = 5.0f;
-				if (landTex && landTex->border &&
-					landTex->border->getType() == LandscapeTexType::eWater)
-				{
-					waterHeight = ((LandscapeTexBorderWater *)
-						landTex->border)->height.asFloat();
-				}
-
-				const int maskSize = 128;
-				const float reach = 3.0f;
-				std::vector<unsigned char> shore =
-					LandscapeTextureBuilder::buildShoreMask(
-						server->getContext(), waterHeight, maskSize, reach);
-				check(!shore.empty(), "the shore mask is built");
-				check(shore.size() == (size_t) maskSize * maskSize,
-					"the shore mask is the size asked for");
-
-				HeightMap &hm2 =
-					server->getLandscapeMaps().getGroundMaps().getHeightMap();
-				int lit = 0, wrongSide = 0;
-				for (int y = 0; y < maskSize; y++)
-				{
-					for (int x = 0; x < maskSize; x++)
-					{
-						const unsigned char v = shore[(size_t) y * maskSize + x];
-						if (v == 0) continue;
-						lit++;
-						const int sx = std::min(x * hm2.getMapWidth() / maskSize,
-							hm2.getMapWidth() - 1);
-						const int sy = std::min(y * hm2.getMapHeight() / maskSize,
-							hm2.getMapHeight() - 1);
-						const float ground = hm2.getHeight(sx, sy).asFloat();
-						// Foam belongs on the submerged shelf only: under
-						// the water, but within reach of the surface.
-						const float depth = waterHeight - ground;
-						if (depth < 0.0f || depth > reach) wrongSide++;
-					}
-				}
-				printf("  (shore mask: %d of %d cells lit)\n",
-					lit, maskSize * maskSize);
-				check(wrongSide == 0,
-					"every lit cell is under the water and within reach of the surface");
-				// A mask that lit nothing would silently mean no foam; one
-				// that lit everything would flood the sea white.
-				check(lit > 0, "the shore mask marks some coastline");
-				check(lit < maskSize * maskSize / 2,
-					"the shore mask is a band, not the whole sea");
-			}
-
 			int black = 0;
 				for (size_t i = 0; i < ground.rgb.size(); i++)
 				{
