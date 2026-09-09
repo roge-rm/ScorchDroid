@@ -2734,7 +2734,11 @@ static void testOceanWaves()
 		mean += tile.height[i];
 	}
 	mean /= (float) tile.height.size();
-	check(peak > 0.9f && peak <= 1.0001f, "...normalised to a unit peak");
+	// Upstream's own scale, not a unit peak: the heights are world units
+	// and grow with the wind. Measured against a build of the generator
+	// with upstream's constant in place: peak 0.23 at generator wind 3,
+	// 0.73 at 5, 1.4 at 7, 2.3 at 9, 3.9 at 13.
+	check(peak > 0.5f && peak < 8.0f, "...at upstream's own scale, in world units");
 	check(fabsf(mean) < 0.05f, "...with no net displacement, as a sea has none");
 
 	// A sea is not a plane and not noise: neighbouring points must be
@@ -2823,6 +2827,28 @@ static void testOceanWaves()
 	const float calm = crossingsPerRow(4.0f);
 	const float gale = crossingsPerRow(20.0f);
 	check(gale < calm * 0.5f, "a stronger wind builds a longer-wavelength sea");
+
+	// ...and a taller one. Upstream's height scalar is what makes the sea
+	// grow with the wind; a fixed amplitude, however plausible, is not
+	// its sea. The bands are the measured values above with room either
+	// side for a different seed.
+	auto peakFor = [&](float speed) {
+		ScorchDroidOcean::Tile t;
+		ScorchDroidOcean::reseed(speed, 0.7f, 12345u);
+		float p = 0.0f;
+		for (float time : { 0.0f, 2.5f, 5.0f, 7.5f })
+		{
+			ScorchDroidOcean::generate(time, t);
+			for (size_t i = 0; i < t.height.size(); i++) p = std::max(p, fabsf(t.height[i]));
+		}
+		return p;
+	};
+	const float calmPeak = peakFor(3.0f);
+	const float galePeak = peakFor(13.0f);
+	printf("    peak height: wind 3 -> %.2f, wind 13 -> %.2f\n", calmPeak, galePeak);
+	check(calmPeak > 0.1f && calmPeak < 0.5f, "a dead calm round has a sea a few tenths of a unit tall");
+	check(galePeak > 2.5f && galePeak < 6.0f, "a gale's is about four units");
+	check(galePeak > calmPeak * 5.0f, "the height grows with the wind, as upstream's does");
 }
 
 // M16: who the player is - the name, and now the tank model, colour and

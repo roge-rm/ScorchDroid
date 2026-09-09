@@ -17,6 +17,14 @@ namespace
 	// gravity is 10, not 9.81, and the surface repeats every 10.24s.
 	const float kGravity = 10.0f;
 	const float kCycleSeconds = 10.24f;
+	// Upstream's wave height scalar, "a" in the Phillips spectrum
+	// (Water2::generate passes wave_resolution * 1e-8). It only means
+	// anything against an unnormalised inverse transform, which is what
+	// both FFTW's c2r and the one below are - so with it in and nothing
+	// rescaled afterwards the heights come out in world units, and they
+	// grow with the wind exactly as upstream's do: a peak near 0.2 units
+	// at generator wind 3 (a dead calm round) and near 4 at wind 13.
+	const float kHeightScalar = (float) ScorchDroidOcean::kResolution * 1e-8f;
 
 	std::mutex g_mutex;
 	// h0(k), the fixed part of the spectrum. (N+1)^2 rather than N^2 because
@@ -65,7 +73,7 @@ namespace
 		const float damp = 1.0f / 100.0f;
 		const float l2 = v4 / g2 * damp * damp;
 
-		float result = eterm * kDotWhat * expf(-k2 * l2);
+		float result = kHeightScalar * eterm * kDotWhat * expf(-k2 * l2);
 		// Waves running against the wind are suppressed, not removed.
 		if (kDotW < 0.0f) result *= 0.25f;
 		return result;
@@ -199,23 +207,6 @@ namespace ScorchDroidOcean
 			}
 		}
 
-		// Upstream scales the spectrum by a constant tuned against FFTW's
-		// unnormalised transform (128 * 1e-8). Rather than inherit a number
-		// that only means anything next to that library, the tile is
-		// normalised to a unit peak here and scaled by the landscape's own
-		// wave amplitude at draw time - so the shape is upstream's and the
-		// size stays the one this port already reads from the landscape.
-		float peak = 0.0f;
-		for (size_t i = 0; i < out.height.size(); i++) {
-			peak = std::max(peak, fabsf(out.height[i]));
-		}
-		if (peak > 1e-12f) {
-			const float scale = 1.0f / peak;
-			for (size_t i = 0; i < out.height.size(); i++) {
-				out.height[i] *= scale;
-				out.slopeX[i] *= scale;
-				out.slopeZ[i] *= scale;
-			}
-		}
+		// Not normalised: the heights are world units, see kHeightScalar.
 	}
 }
