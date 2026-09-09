@@ -55,6 +55,16 @@ namespace ScorchDroidOcean
 		std::vector<float> normalX;
 		std::vector<float> normalY;
 		std::vector<float> normalZ;
+
+		// W10a: how much whitecap foam sits on each point, 0..1 - upstream's
+		// "amount of foam" (Water2::generateAOF). Foam is spawned where the
+		// horizontal displacement folds the surface over itself (the
+		// Jacobian of the displacement goes negative, which only happens on
+		// a sharp crest), spreads a little to its neighbours, and decays
+		// over the following second or so. It accumulates from one call to
+		// the next, so this is the sea's history, not a function of the
+		// moment - a calm round never makes any.
+		std::vector<float> foam;
 	};
 
 	// Builds the wave spectrum for a given wind. Deterministic for a given
@@ -72,7 +82,9 @@ namespace ScorchDroidOcean
 	// Advances to [seconds] and fills [out] with that moment's surface. The
 	// spectrum is fixed; time only rotates each wave's phase, which is why
 	// this can be called at whatever rate the device can afford without the
-	// sea changing character.
+	// sea changing character. The foam is the exception: it decays by the
+	// time elapsed since the previous call, measured in upstream's phases
+	// of 1/24 s, so a slower caller sees the same foam lifetime.
 	void generate(float seconds, Tile &out);
 }
 

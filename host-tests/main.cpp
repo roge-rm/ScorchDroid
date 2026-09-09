@@ -2770,6 +2770,51 @@ static void testOceanWaves()
 			"the normals lean away from the rising side of each wave");
 	}
 
+	// W10a: whitecaps. Foam comes only from the surface folding over
+	// itself, so a calm sea makes none and a gale makes some on its
+	// crests; and it is history, decaying over about a second of
+	// upstream's phases once the crest has passed.
+	{
+		ScorchDroidOcean::Tile calm, gale;
+		ScorchDroidOcean::reseed(3.0f, 0.7f, 12345u);
+		float calmFoam = 0.0f;
+		for (int step = 0; step < 24; step++)
+		{
+			ScorchDroidOcean::generate((float) step / 24.0f, calm);
+			for (size_t i = 0; i < calm.foam.size(); i++) calmFoam = std::max(calmFoam, calm.foam[i]);
+		}
+		check(calmFoam == 0.0f, "a dead calm round has no whitecaps");
+
+		ScorchDroidOcean::reseed(13.0f, 0.7f, 12345u);
+		float galeFoam = 0.0f;
+		int foamy = 0;
+		for (int step = 0; step < 48; step++)
+		{
+			ScorchDroidOcean::generate((float) step / 24.0f, gale);
+		}
+		for (size_t i = 0; i < gale.foam.size(); i++)
+		{
+			galeFoam = std::max(galeFoam, gale.foam[i]);
+			if (gale.foam[i] > 0.0f) foamy++;
+		}
+		printf("    gale foam: peak %.2f on %d of %d cells\n", galeFoam, foamy, (int) gale.foam.size());
+		check(galeFoam > 0.0f, "a gale breaks on its crests");
+		check(foamy < (int) gale.foam.size() / 2, "...but only on its crests, not everywhere");
+
+		// Decay: a foamy cell with no further spawning fades out in
+		// upstream's 4/256 per phase, i.e. within about 64 phases. Push the
+		// clock a full cycle on and the sea's fresh foam is all that is
+		// left - so the total must have fallen, not accumulated.
+		float before = 0.0f, after = 0.0f;
+		for (size_t i = 0; i < gale.foam.size(); i++) before += gale.foam[i];
+		ScorchDroidOcean::Tile later;
+		ScorchDroidOcean::generate(48.0f / 24.0f + 10.24f, later);
+		for (size_t i = 0; i < later.foam.size(); i++) after += later.foam[i];
+		check(after < before, "foam decays rather than piling up");
+
+		ScorchDroidOcean::reseed(10.0f, 0.7f, 12345u);   // as the checks above expect
+	}
+
 	// Time only rotates each wave's phase, so the sea moves but keeps its
 	// character - and it repeats on upstream's own cycle.
 	ScorchDroidOcean::Tile later;

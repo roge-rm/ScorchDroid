@@ -33,6 +33,16 @@ namespace
 	std::vector<Complex> g_h0;
 	bool g_seeded = false;
 
+	// W10a: the foam's memory between calls, and the clock it decays by.
+	// Upstream steps 256 phases across its 10.24 s cycle at 24 a second;
+	// its spawn and decay rates are per phase, so elapsed time is turned
+	// into phases here and both scaled by it.
+	std::vector<float> g_aof;
+	float g_aofRandom[37];
+	float g_lastSeconds = -1.0f;
+	const float kPhasesPerSecond = 24.0f;
+	const float kPhases = 256.0f;
+
 	// Box-Muller, as upstream's gaussrand: a complex Gaussian per wave.
 	Complex gaussianPair(unsigned int &state)
 	{
@@ -146,6 +156,14 @@ namespace ScorchDroidOcean
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_h0.swap(h0);
 		g_seeded = true;
+		// A new sea starts with no foam. Upstream's rndtab: 37 random
+		// values that stagger the decay so it does not fade uniformly.
+		g_aof.assign((size_t) N * N, 0.0f);
+		for (int i = 0; i < 37; i++) {
+			state = state * 1664525u + 1013904223u;
+			g_aofRandom[i] = (float) ((state >> 8) & 0xffffffu) / (float) 0x1000000u;
+		}
+		g_lastSeconds = -1.0f;
 	}
 
 	void generate(float seconds, Tile &out)
@@ -157,13 +175,26 @@ namespace ScorchDroidOcean
 		out.normalX.assign(count, 0.0f);
 		out.normalY.assign(count, 1.0f);
 		out.normalZ.assign(count, 0.0f);
+		out.foam.assign(count, 0.0f);
 
 		std::vector<Complex> h0;
+		std::vector<float> aof;
+		float aofRandom[37];
+		float phases;
 		{
 			std::lock_guard<std::mutex> lock(g_mutex);
 			if (!g_seeded) return;
 			h0 = g_h0;
+			aof.swap(g_aof);
+			for (int i = 0; i < 37; i++) aofRandom[i] = g_aofRandom[i];
+			// Phases elapsed since the last call: one on the first, and
+			// never more than a cycle's worth, so a long pause does not
+			// run the decay to absurd values.
+			phases = (g_lastSeconds < 0.0f) ? 1.0f
+				: std::min(std::max((seconds - g_lastSeconds) * kPhasesPerSecond, 0.0f), kPhases);
+			g_lastSeconds = seconds;
 		}
+		if (aof.size() != count) aof.assign(count, 0.0f);
 
 		// Every wave's frequency is rounded down to a multiple of the base
 		// frequency, exactly as upstream does, so the whole surface repeats
@@ -265,6 +296,63 @@ namespace ScorchDroidOcean
 					out.normalZ[i] = n[1] / len;
 				}
 			}
+		}
+
+		// Whitecaps, transcribed from Water2::generateAOF. The Jacobian of
+		// the horizontal displacement says how much a cell has been
+		// squeezed: below zero the surface has folded over itself, which
+		// is a breaking crest, and that much foam is spawned there and
+		// half as much on its four neighbours. Then everything decays.
+		// Upstream's numbers throughout; its derivative factor is
+		// wave_resolution / wavetile_length, and it takes the difference
+		// across the two neighbours as it stands, so that is kept too.
+		{
+			const float derivFac = (float) N / kL;
+			const float lambda = 1.0f;   // already in the displacements
+			const float decay = 4.0f / kPhases;
+			const float decayRnd = 0.25f / kPhases;
+			const float spawnFac = 0.25f;
+			for (int y = 0; y < N; y++) {
+				const int ym1 = (y + N - 1) & (N - 1), yp1 = (y + 1) & (N - 1);
+				for (int x = 0; x < N; x++) {
+					const int xm1 = (x + N - 1) & (N - 1), xp1 = (x + 1) & (N - 1);
+					const size_t iXp = (size_t) y * N + xp1, iXm = (size_t) y * N + xm1;
+					const size_t iYp = (size_t) yp1 * N + x, iYm = (size_t) ym1 * N + x;
+					const float dxdx = (out.dispX[iXp] - out.dispX[iXm]) * derivFac;
+					const float dxdy = (out.dispX[iYp] - out.dispX[iYm]) * derivFac;
+					const float dydx = (out.dispZ[iXp] - out.dispZ[iXm]) * derivFac;
+					const float dydy = (out.dispZ[iYp] - out.dispZ[iYm]) * derivFac;
+					const float jxx = 1.0f + lambda * dxdx;
+					const float jyy = 1.0f + lambda * dydy;
+					const float jxy = lambda * dydx;
+					const float jyx = lambda * dxdy;
+					const float jac = jxx * jyy - jxy * jyx;
+					const float foamAdd = (jac < 0.0f) ? ((jac < -1.0f) ? 1.0f : -jac) : 0.0f;
+					if (foamAdd <= 0.0f) continue;
+					const float spawn = foamAdd * spawnFac * phases;
+					aof[(size_t) y * N + x] += spawn;
+					aof[iYm] += spawn * 0.5f;
+					aof[iYp] += spawn * 0.5f;
+					aof[iXm] += spawn * 0.5f;
+					aof[iXp] += spawn * 0.5f;
+				}
+			}
+			for (int y = 0; y < N; y++) {
+				for (int x = 0; x < N; x++) {
+					const size_t i = (size_t) y * N + x;
+					const float fade = (decay + decayRnd * aofRandom[(3 * x + 5 * y) % 37]) * phases;
+					aof[i] = std::max(std::min(aof[i], 1.0f) - fade, 0.0f);
+					out.foam[i] = aof[i];
+				}
+			}
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(g_mutex);
+			// Hand the history back - unless a reseed happened meanwhile,
+			// which leaves a fresh, empty-of-foam vector in place; a new
+			// sea keeps its clean start.
+			if (g_aof.empty()) g_aof.swap(aof);
 		}
 	}
 }
