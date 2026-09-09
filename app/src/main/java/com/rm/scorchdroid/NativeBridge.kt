@@ -286,6 +286,9 @@ object NativeBridge {
      */
     external fun setOceanStyle(style: Int)
 
+    /** 0 low, 1 normal, 2 high - upstream's own effects detail levels. */
+    external fun setEffectsDetail(level: Int)
+
     /**
      * W3: how much the water reflects - 0 for the sky's own colours, 1 for
      * the sky and the land, 2 for the tanks and scenery as well. Above 0 the

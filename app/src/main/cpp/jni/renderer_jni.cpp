@@ -313,9 +313,16 @@ namespace
 	// When the camera last updated, for the occlusion ease-out's timestep.
 	double lastCameraSeconds = 0.0;
 
-	// Plenty for several simultaneous blasts, and a hard stop so a napalm
-	// field can't grow the buffer without limit on a slow device.
-	const size_t kMaxParticles = 4000;
+	// A hard stop so a napalm field can't grow the buffer without limit.
+	//
+	// Upstream's own budget, and upstream's own setting: ScorchedClient sizes
+	// its particle engine from OptionsDisplay's effects detail - 100 at low,
+	// 6000 at normal, 10000 at high - and once the pool is full its emitters
+	// simply get nothing back, which is exactly what addParticle does here.
+	// So capping the pool is upstream's throttle, not an approximation of it.
+	// This was a fixed 4000, below upstream's ordinary setting, which is one
+	// of the reasons a big fire thinned out.
+	std::atomic<int> g_maxParticles{6000};
 	const size_t kMaxBeams = 512;
 	int    sightVertexCount = 0;
 
@@ -2845,7 +2852,7 @@ namespace
 
 	void addParticle(const Particle &particle)
 	{
-		if (particles.size() >= kMaxParticles) return;
+		if (particles.size() >= (size_t) g_maxParticles.load()) return;
 		particles.push_back(particle);
 	}
 
@@ -2853,48 +2860,127 @@ namespace
 	// hangs a flame emitter and a smoke emitter off each shot, both enabled
 	// by default (WeaponProjectile's createFlame_/createSmoke_ start true and
 	// are only turned off by an explicit <nocreateflame>/<nocreatesmoke>).
-	// Emission is rate-limited by elapsed time rather than by frame, so the
-	// trail has the same density whatever the frame rate.
-	double lastTrailSeconds = 0.0;
-	bool   trailDueThisFrame = false;
+	//
+	// The rates below are upstream's, and they are much higher than what this
+	// used to emit. MissileActionRenderer::simulate runs from the simulator,
+	// which steps at a fixed 1/50s whatever the frame rate (Simulator.cpp's
+	// StepSize), and every step it calls emitLinear(2, ...) on the flame -
+	// 100 flame particles a second, unthrottled - while the smoke is gated by
+	// its own 0.05s counter and emits 3 at a time, so 60 a second. This port
+	// emitted one of each every 40ms: 25 a second, a quarter of the flame.
+	//
+	// Size mattered even more than rate. Upstream's flame is born between
+	// half and all of flamestartsize and grows to between half and all of
+	// flameendsize, whose defaults are 0.5 and *3.0* - each puff expands
+	// sixfold over its life, so seventy-odd overlapping ones merge into a
+	// continuous jet. This port used the start size and never grew it, so it
+	// drew twenty-five small dots in a line.
+	const float kTrailStepSeconds = 1.0f / 50.0f;   // upstream's StepSize
+	const float kSmokeIntervalSeconds = 0.05f;      // its smoke counter
+	// A stall must not spend the whole particle budget catching up: eight
+	// steps is 160ms of trail, well past anything a running frame misses.
+	const int   kMaxTrailStepsPerFrame = 8;
+	float trailStepAccumulator = 0.0f;
+	float smokeAccumulator = 0.0f;
+	int   trailStepsThisFrame = 0;
+	int   smokeEmitsThisFrame = 0;
 
-	void emitProjectileTrail(WeaponProjectile *weapon, float x, float y, float z)
+	// [vx, vy, vz] is the shot's world-space velocity. Upstream does not need
+	// it: its emitter runs inside the fixed-rate simulation, so each step's
+	// particles land where the shot actually was. This runs on the render
+	// thread instead, so a frame owes several steps at once - and dropping
+	// them all at the shot's current position would bunch the trail into
+	// blobs. Walking back along the velocity puts each step's puff where the
+	// shot was at that step, which is the same trail at any frame rate.
+	void emitProjectileTrail(WeaponProjectile *weapon, float x, float y, float z,
+							 float vx, float vy, float vz)
 	{
-		if (!weapon || !trailDueThisFrame) return;
+		if (!weapon) return;
 
-		if (weapon->getCreateFlame()) {
-			// Upstream randomises between two start colours and two end
-			// colours; one sample per puff gives the same mottled look.
+		if (weapon->getCreateFlame() && trailStepsThisFrame > 0) {
+			// Upstream's own ranges, from the emitter it builds in
+			// MissileActionRenderer::simulate.
+			const float startSize = std::max(weapon->getFlameStartSize(), 0.05f);
+			const float endSize = std::max(weapon->getFlameEndSize(), startSize);
+			const float life = std::max(weapon->getFlameLife(), 0.1f);
 			Vector &c1 = weapon->getFlameStartColor1();
 			Vector &c2 = weapon->getFlameStartColor2();
-			const float mix = randomUnit();
-			Particle flame = {};
-			flame.x = x; flame.y = y; flame.z = z;
-			flame.vy = 0.6f;
-			flame.r = c1[0] + (c2[0] - c1[0]) * mix;
-			flame.g = c1[1] + (c2[1] - c1[1]) * mix;
-			flame.b = c1[2] + (c2[2] - c1[2]) * mix;
-			flame.worldSize = std::max(weapon->getFlameStartSize(), 0.05f);
-			flame.life = std::max(weapon->getFlameLife(), 0.1f);
-			flame.drag = 0.2f;
-			addParticle(flame);
+
+			for (int step = 0; step < trailStepsThisFrame; step++) {
+				const float back = (float) step * kTrailStepSeconds;
+				for (int n = 0; n < 2; n++) {   // upstream's emitLinear(2, ...)
+					// Upstream randomises the position inside a 0.5-unit box
+					// about the shot, which is what gives the jet width.
+					Particle flame = {};
+					flame.x = x - vx * back + randomSigned() * 0.25f;
+					flame.y = y - vy * back + randomSigned() * 0.25f;
+					flame.z = z - vz * back + randomSigned() * 0.25f;
+					// Upstream's velocity range, mapped out of its Z-up world,
+					// and multiplied by the particle's own mass the way its
+					// integrator does (position += velocity * mass * time).
+					const float mass = 0.5f + randomUnit() * 0.5f;
+					flame.vx = randomSigned() * 0.05f * mass;
+					flame.vy = (0.3f + randomUnit() * 0.6f) * mass;
+					flame.vz = randomSigned() * 0.1f * mass;
+					const float mix = randomUnit();
+					flame.r = c1[0] + (c2[0] - c1[0]) * mix;
+					flame.g = c1[1] + (c2[1] - c1[1]) * mix;
+					flame.b = c1[2] + (c2[2] - c1[2]) * mix;
+					// Half to full, as upstream's start/end size pairs read.
+					const float born = startSize * (0.5f + randomUnit() * 0.5f);
+					const float dies = endSize * (0.5f + randomUnit() * 0.5f);
+					flame.worldSize = born;
+					flame.growth = std::max(dies / born - 1.0f, 0.0f);
+					flame.life = life * (0.5f + randomUnit() * 0.5f);
+					// Upstream's gravity is applied as `gravity * time * time`,
+					// which at a 1/50s step is four ten-thousandths of it - so
+					// a flame effectively coasts on the velocity it was born
+					// with. Its friction (0.01-0.02) is just as slight.
+					flame.gravityScale = 0.0f;
+					flame.drag = 0.98f;
+					flame.peakAlpha = 0.9f + randomUnit() * 0.1f;
+					addParticle(flame);
+				}
+			}
 		}
 
-		if (weapon->getCreateSmoke()) {
-			Particle smoke = {};
-			smoke.x = x + randomSigned() * 0.15f;
-			smoke.y = y + randomSigned() * 0.15f;
-			smoke.z = z + randomSigned() * 0.15f;
-			smoke.vy = 0.9f;
-			// Upstream's smoke is a grey particle texture; additive blending
-			// makes pure grey glow, so it is kept dim and cool rather than
-			// bright white.
-			const float grey = 0.25f + randomUnit() * 0.15f;
-			smoke.r = grey; smoke.g = grey; smoke.b = grey * 1.1f;
-			smoke.worldSize = std::max(weapon->getSmokeStartSize(), 0.05f);
-			smoke.life = std::max(weapon->getSmokeLife(), 0.1f);
-			smoke.drag = 0.5f;
-			addParticle(smoke);
+		if (weapon->getCreateSmoke() && smokeEmitsThisFrame > 0) {
+			const float startSize = std::max(weapon->getSmokeStartSize(), 0.05f);
+			const float endSize = std::max(weapon->getSmokeEndSize(), startSize);
+			const float life = std::max(weapon->getSmokeLife(), 0.1f);
+
+			for (int emit = 0; emit < smokeEmitsThisFrame; emit++) {
+				const float back = (float) emit * kSmokeIntervalSeconds;
+				for (int n = 0; n < 3; n++) {   // upstream's emitLinear(3, ...)
+					Particle smoke = {};
+					// Upstream drops the smoke a fifth of a second's travel
+					// behind the shot, so it leaves the tail rather than the nose.
+					smoke.x = x - vx * (back + 0.2f) + randomSigned() * 0.25f;
+					smoke.y = y - vy * (back + 0.2f) + randomSigned() * 0.25f;
+					smoke.z = z - vz * (back + 0.2f) + randomSigned() * 0.25f;
+					// And gives it 28-40% of the shot's speed *backwards*,
+					// which is what makes a rocket's smoke stream away from it.
+					const float mass = 0.2f + randomUnit() * 0.3f;
+					const float kick = -(0.28f + randomUnit() * 0.12f) * mass;
+					smoke.vx = vx * kick;
+					smoke.vy = vy * kick;
+					smoke.vz = vz * kick;
+					// Upstream's smoke is a grey particle texture; additive
+					// blending makes pure grey glow, so it is kept dim and cool
+					// rather than bright white.
+					const float grey = 0.25f + randomUnit() * 0.15f;
+					smoke.r = grey; smoke.g = grey; smoke.b = grey * 1.1f;
+					const float born = startSize * (0.5f + randomUnit() * 0.5f);
+					const float dies = endSize * (0.5f + randomUnit() * 0.5f);
+					smoke.worldSize = born;
+					smoke.growth = std::max(dies / born - 1.0f, 0.0f);
+					smoke.life = life * (0.5f + randomUnit() * 0.5f);
+					smoke.gravityScale = 0.0f;
+					smoke.drag = 0.9f;
+					smoke.peakAlpha = 0.3f;
+					addParticle(smoke);
+				}
+			}
 		}
 	}
 
@@ -2968,6 +3054,8 @@ namespace
 				break;
 			}
 			case ScorchDroidEffects::eNapalm: {
+				// The flicker over the fire, not the fire - one of these is
+				// raised per draw tick at a randomly chosen burning point.
 				Particle flame = {};
 				flame.x = x + randomSigned() * 0.5f;
 				flame.y = y + 0.3f;
@@ -2978,6 +3066,37 @@ namespace
 				flame.life = 0.9f + randomUnit() * 0.6f;
 				flame.drag = 0.6f;
 				addParticle(flame);
+				break;
+			}
+			case ScorchDroidEffects::eNapalmFire: {
+				// The fire itself, as upstream's emitter builds it: no
+				// velocity, no gravity, no growth, and a life of the whole
+				// napalmtime rather than a second - so the points that are
+				// alight stay alight and the field fills in.
+				Particle fire = {};
+				fire.x = x;
+				// Upstream's NapalmRenderer re-pins each particle to the
+				// ground height plus twice its size every frame, which lifts
+				// the sprite so it sits on the ground rather than half in it.
+				// Pinned once at birth here; the ground under a fire does
+				// move as it burns, but not by enough to see against a flame
+				// three units tall.
+				fire.y = y + event.size * 2.0f;
+				fire.z = z;
+				fire.r = event.r; fire.g = event.g; fire.b = event.b;
+				// A little spread so three hundred sprites at one size don't
+				// read as a repeated stamp; upstream gets that variety from
+				// its animated texture instead.
+				fire.worldSize = event.size * (0.8f + randomUnit() * 0.4f);
+				fire.growth = 0.0f;
+				fire.gravityScale = 0.0f;
+				fire.drag = 1.0f;
+				// Upstream's start alpha is 0.6-0.9, fading to 0-0.1.
+				fire.peakAlpha = 0.6f + randomUnit() * 0.3f;
+				// Staggered either side of the burn time so the field does
+				// not pulse in step with itself.
+				fire.life = std::max(event.value, 0.5f) * (0.7f + randomUnit() * 0.6f);
+				addParticle(fire);
 				break;
 			}
 			case ScorchDroidEffects::eSkyFlash: {
@@ -4267,10 +4386,18 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				: (smoothedFps * 0.9f + instant * 0.1f);
 		}
 
-		// One puff per shot per ~40ms rather than per frame, so a fast
-		// device doesn't lay down a denser trail than a slow one.
-		trailDueThisFrame = (nowSeconds - lastTrailSeconds) >= 0.04;
-		if (trailDueThisFrame) lastTrailSeconds = nowSeconds;
+		// How many of upstream's fixed simulation steps this frame is worth,
+		// so the trail has its density rather than the frame rate's (see
+		// emitProjectileTrail). Whole steps only; the remainder carries.
+		trailStepAccumulator += delta;
+		trailStepsThisFrame = (int) (trailStepAccumulator / kTrailStepSeconds);
+		trailStepAccumulator -= (float) trailStepsThisFrame * kTrailStepSeconds;
+		trailStepsThisFrame = std::min(trailStepsThisFrame, kMaxTrailStepsPerFrame);
+
+		smokeAccumulator += delta;
+		smokeEmitsThisFrame = (int) (smokeAccumulator / kSmokeIntervalSeconds);
+		smokeAccumulator -= (float) smokeEmitsThisFrame * kSmokeIntervalSeconds;
+		smokeEmitsThisFrame = std::min(smokeEmitsThisFrame, kMaxTrailStepsPerFrame);
 
 		spawnEffects();
 		updateEffects(delta);
@@ -5528,7 +5655,21 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					// Only from the real view: this raises particles rather
 					// than drawing them, and a second call from the mirrored
 					// pass would emit every rocket's trail twice a frame.
-					if (primary) emitProjectileTrail(projectile, wx, wy, wz);
+					//
+					// The velocity goes with it so the trail can be laid along
+					// the path the shot took since the last frame rather than
+					// bunched at where it is now. Engine (x, y, height) maps to
+					// world (x, height, -y), the same remap the positions take.
+					if (primary) {
+						float wvx = 0.0f, wvy = 0.0f, wvz = 0.0f;
+						if (i < shotVelocities.size()) {
+							FixedVector &v = shotVelocities[i];
+							wvx = v[0].asFloat();
+							wvy = v[2].asFloat();
+							wvz = -v[1].asFloat();
+						}
+						emitProjectileTrail(projectile, wx, wy, wz, wvx, wvy, wvz);
+					}
 				}
 			}
 			if (!projectileModel && i < shotPlayerIds.size()) {
@@ -6488,6 +6629,15 @@ Java_com_rm_scorchdroid_NativeBridge_setReflectionStyle(JNIEnv *env, jobject, ji
     // Logged because the failure above was invisible: the setting moved, the
     // renderer did nothing, and there was no way to tell which end was wrong.
     LOGI("Water reflections: level %d (asked for %d)", level, (int) style);
+}
+
+// How many particles may be alight at once, as upstream's effects detail
+// setting - its own three sizes, from ScorchedClient's particle engine.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setEffectsDetail(JNIEnv *env, jobject, jint level) {
+    const int budget = (level <= 0) ? 100 : (level == 1 ? 6000 : 10000);
+    g_maxParticles.store(budget);
+    LOGI("Effects detail: level %d, %d particles", (int) level, budget);
 }
 
 // W4: which sea to draw - 0 for this port's two sine waves, 1 for
