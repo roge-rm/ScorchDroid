@@ -234,17 +234,18 @@ class GameSettings(context: Context) {
     }
 
     /**
-     * W3: what the water reflects. False is a Fresnel-weighted sky colour;
-     * true is the scene itself, drawn a second time from a camera mirrored
-     * in the water, which is what Scorched3D does.
+     * W3: how much the water reflects. 0 is a Fresnel-weighted sky colour -
+     * this port's own; 1 adds the land, drawn a second time from a camera
+     * mirrored in the water; 2 adds the tanks and scenery, which is what
+     * Scorched3D reflects short of its effects.
      */
-    var originalReflection by mutableStateOf(prefs.getBoolean(KEY_REFLECT, false))
+    var reflectionLevel by mutableIntStateOf(prefs.getInt(KEY_REFLECT, 0))
         private set
 
-    fun updateOriginalReflection(value: Boolean) {
-        originalReflection = value
-        prefs.edit().putBoolean(KEY_REFLECT, value).apply()
-        NativeBridge.setReflectionStyle(if (value) 1 else 0)
+    fun updateReflectionLevel(value: Int) {
+        reflectionLevel = value.coerceIn(0, 2)
+        prefs.edit().putInt(KEY_REFLECT, reflectionLevel).apply()
+        NativeBridge.setReflectionStyle(reflectionLevel)
     }
 
     /**
@@ -300,7 +301,7 @@ class GameSettings(context: Context) {
         NativeBridge.setSightStyle(if (originalSight) 1 else 0)
         NativeBridge.setTerrainDetail(terrainDetail)
         NativeBridge.setOceanStyle(if (originalOcean) 1 else 0)
-        NativeBridge.setReflectionStyle(if (originalReflection) 1 else 0)
+        NativeBridge.setReflectionStyle(reflectionLevel)
     }
 
     private companion object {
@@ -325,7 +326,11 @@ class GameSettings(context: Context) {
         const val KEY_SIGHT = "graphics.originalSight"
         const val KEY_DETAIL = "graphics.terrainDetail"
         const val KEY_OCEAN = "graphics.originalOcean"
-        const val KEY_REFLECT = "graphics.originalReflection"
+        // A new key, not the old boolean one: this started as an on/off
+        // switch, and reading an existing Boolean with getInt throws
+        // ClassCastException on the first launch after the upgrade - which
+        // is exactly what it did here. The old key is simply left behind.
+        const val KEY_REFLECT = "graphics.reflectionLevel"
         // The maximum the renderer allows - see kTerrainGridMax.
         const val DEFAULT_DETAIL = 256
     }

@@ -254,14 +254,28 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateOriginalOcean(it)
                         }
 
-                        SwitchRow(
-                            "Scorched3D's reflections",
-                            "The land and sky mirrored in the water, instead of the sky's " +
-                                "colours alone. Draws the scene a second time",
-                            settings.originalReflection,
+                        // Three positions rather than a switch: the middle one
+                        // is a real answer for a device that cannot afford
+                        // reflecting everything but can afford the land.
+                        SliderRow(
+                            "Water reflections",
+                            when (settings.reflectionLevel) {
+                                0 -> "Sky"
+                                1 -> "Land"
+                                else -> "Everything"
+                            },
+                            settings.reflectionLevel.toFloat(),
+                            0f..2f,
                         ) {
-                            settings.updateOriginalReflection(it)
+                            settings.updateReflectionLevel(it.roundToInt())
                         }
+                        Text(
+                            "Sky is this port's own colour reflection. Land and Everything " +
+                                "draw the scene a second time, mirrored in the water, as " +
+                                "Scorched3D does.",
+                            color = Color.White.copy(alpha = 0.55f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
 
                         SwitchRow(
                             "Scorched3D's aim sight",

@@ -216,7 +216,9 @@ namespace
 	// rendered into a half-size target and sampled by the water shader.
 	GLuint reflectionFbo = 0, reflectionTexture = 0, reflectionDepth = 0;
 	int    reflectionWidth = 0, reflectionHeight = 0;
-	std::atomic<int> g_reflectionStyle{0};   // 0 = sky colour only, 1 = the scene
+	// 0 = this port's sky colour, 1 = the sky and the land, 2 = everything
+	// solid in the scene, which is what upstream reflects.
+	std::atomic<int> g_reflectionStyle{0};
 	GLint  waterReflectTexLoc = -1, waterUseReflectLoc = -1, waterViewportLoc = -1;
 
 	GLuint oceanTexture = 0;
@@ -5069,6 +5071,294 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 	};
 
+	// Filled by the tank pass below: the markers for tanks with no model,
+	// and where the aim sight goes once the tanks are drawn.
+	std::vector<float> unmodelledMine, unmodelledOther;
+	bool haveSight = false;
+	Mat4 sightTransform = Mat4::identity();
+	Mat4 sightBaseTransform = Mat4::identity();
+	Mat4 sightBearingTransform = Mat4::identity();
+
+	// W3: the scenery, as one callable pass, so the reflection can draw
+	// it too. The instance buckets are rebuilt on each call rather than
+	// hoisted and shared: it is a few hundred microseconds of vector
+	// filling, it only happens twice when reflections are at their
+	// fullest, and hoisting would have meant moving the whole block
+	// above the water and changing the order the frame has always been
+	// drawn in.
+	auto drawSceneryPass = [&](const Mat4 &vp) {
+	glUseProgram(meshProgram);
+		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+		glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+		glUniform1f(meshFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
+
+		// Landscape targets first: they are scenery, so they should be behind
+		// everything that matters, and drawing them before the tanks keeps the
+		// per-target colour uniform out of the tank loop's way.
+		{
+			// M6 performance: scenery is drawn instanced - one call per distinct
+			// mesh rather than one per target. A landscape scatters up to ~2,000
+			// of these and, measured, uses a single model between them, so this
+			// is the one pass in the renderer where instancing was worth having
+			// (see InstanceBuffer.hpp).
+			//
+			// Bucketed by the source geometry's VBO rather than by Model*,
+			// because the procedural trees have no Model at all and share this
+			// path - they are simply another bucket.
+			struct Bucket {
+				int vertexCount = 0;
+				std::vector<ScorchDroidInstances::Instance> instances;
+			};
+			std::map<GLuint, Bucket> buckets;
+			// Trees are bucketed by type rather than by VBO, because each type
+			// has its own geometry *and* its own atlas cell.
+			std::map<int, std::vector<ScorchDroidInstances::Instance> > treeBuckets;
+
+			for (TargetInstance &inst : targetInstances) {
+				GLuint sourceVbo = 0;
+				int vertexCount = 0;
+				ScorchDroidInstances::Instance packed;
+				packed.x = inst.x;
+				packed.z = inst.z;
+				packed.scale = inst.scale;
+				packed.rotationRadians = inst.rotationRadians;
+
+				if (inst.isTree) {
+					// Trees have their own pass below - textured and alpha-cut,
+					// which the flat scenery program cannot do.
+					treeBuckets[(int) inst.treeType].push_back(packed);
+					std::vector<ScorchDroidInstances::Instance> &treeBucket =
+						treeBuckets[(int) inst.treeType];
+					treeBucket.back().y = inst.y;
+					treeBucket.back().r = inst.treeR * inst.brightness;
+					treeBucket.back().g = inst.treeG * inst.brightness;
+					treeBucket.back().b = inst.treeB * inst.brightness;
+					continue;
+				} else {
+					GpuModel *gpu = uploadModel(inst.model);
+					if (!gpu || gpu->hull.vertexCount == 0 || gpu->hull.vbo == 0) continue;
+					sourceVbo = gpu->hull.vbo;
+					vertexCount = gpu->hull.vertexCount;
+					// The model's base lift, scaled by the definition's own
+					// scale - folded into the instance here because the shader
+					// has no idea which model it is drawing.
+					packed.y = inst.y + gpu->baseOffset * inst.scale;
+					// Upstream's "color" for a target is a grey multiplier,
+					// randomised per target when the definition doesn't fix one,
+					// so a stand of identical objects doesn't look stamped out.
+					packed.r = packed.g = packed.b = inst.brightness;
+				}
+
+				Bucket &bucket = buckets[sourceVbo];
+				bucket.vertexCount = vertexCount;
+				bucket.instances.push_back(packed);
+			}
+
+			if (!buckets.empty() && instancedMeshProgram != 0) {
+				glUseProgram(instancedMeshProgram);
+				glUniformMatrix4fv(instancedViewProjLoc, 1, GL_FALSE, vp.m);
+				glUniform3f(instancedLightDirLoc, 0.4f, 0.82f, 0.35f);
+				glUniform3f(instancedFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+				glUniform1f(instancedFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
+
+				for (auto &entry : buckets) {
+					const GLuint sourceVbo = entry.first;
+					Bucket &bucket = entry.second;
+
+					InstancedDraw &draw = g_instancedDraws[sourceVbo];
+					if (draw.vao == 0) {
+						glGenVertexArrays(1, &draw.vao);
+						glGenBuffers(1, &draw.instanceVbo);
+						glBindVertexArray(draw.vao);
+						// The mesh's own vertices, same layout uploadMeshGroup
+						// wrote them in.
+						glBindBuffer(GL_ARRAY_BUFFER, sourceVbo);
+						glEnableVertexAttribArray(0);
+						glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+						glEnableVertexAttribArray(1);
+						glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+						// ...then the per-instance attributes, advancing once
+						// per instance rather than once per vertex.
+						const GLsizei stride = ScorchDroidInstances::kFloatsPerInstance * sizeof(float);
+						glBindBuffer(GL_ARRAY_BUFFER, draw.instanceVbo);
+						glEnableVertexAttribArray(2);
+						glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, (void *) 0);
+						glVertexAttribDivisor(2, 1);
+						glEnableVertexAttribArray(3);
+						glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void *) (4 * sizeof(float)));
+						glVertexAttribDivisor(3, 1);
+						glBindVertexArray(0);
+					}
+
+					std::vector<float> packed;
+					ScorchDroidInstances::pack(bucket.instances, packed);
+
+					// Upload only when something actually changed. Scenery is
+					// static until a target is destroyed or the ground under it
+					// gives way and it falls, so in the steady state this
+					// uploads nothing - and comparing 30KB is far cheaper than
+					// re-sending it every frame.
+					if (packed != draw.uploaded) {
+						glBindBuffer(GL_ARRAY_BUFFER, draw.instanceVbo);
+						glBufferData(GL_ARRAY_BUFFER, packed.size() * sizeof(float),
+									 packed.data(), GL_DYNAMIC_DRAW);
+						draw.uploaded = packed;
+					}
+					draw.instanceCount = (int) bucket.instances.size();
+
+					glBindVertexArray(draw.vao);
+					frameDrawCalls++;
+					glDrawArraysInstanced(GL_TRIANGLES, 0, bucket.vertexCount, draw.instanceCount);
+				}
+				glBindVertexArray(0);
+			}
+
+			// M6: the trees, in their own textured alpha-cut pass - one draw per
+			// species present, which is a handful.
+			//
+			// M11: skipping the pass is the whole of "trees off". The geometry
+			// stays built, so turning them back on costs nothing and does not
+			// wait for a new round - and a landscape scatters up to two thousand
+			// of them, so this is the setting most likely to buy a weak device
+			// its frame rate back.
+			if (g_showTrees && !treeBuckets.empty() && treeProgram != 0) {
+				glUseProgram(treeProgram);
+				glUniformMatrix4fv(treeViewProjLoc, 1, GL_FALSE, mvp.m);
+				glUniform3f(treeLightDirLoc, 0.4f, 0.82f, 0.35f);
+				glUniform3f(treeFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+				glUniform1f(treeFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
+				glUniform1i(treeAtlasLoc, 0);
+				glActiveTexture(GL_TEXTURE0);
+				// Foliage is a one-sided shell built from fans; seen from the
+				// other side a branch layer would simply vanish, so both faces
+				// are drawn. The alpha test, not the winding, is what shapes it.
+				glDisable(GL_CULL_FACE);
+
+				for (auto &entry : treeBuckets) {
+					TreeKind *kind = treeKindFor((TreeModelFactory::TreeType) entry.first);
+					if (!kind || kind->atlas == 0) continue;
+
+					std::vector<float> packed;
+					ScorchDroidInstances::pack(entry.second, packed);
+					if (packed != kind->uploaded) {
+						glBindBuffer(GL_ARRAY_BUFFER, kind->instanceVbo);
+						glBufferData(GL_ARRAY_BUFFER, packed.size() * sizeof(float),
+									 packed.data(), GL_DYNAMIC_DRAW);
+						kind->uploaded = packed;
+					}
+
+					glBindTexture(GL_TEXTURE_2D, kind->atlas);
+					glBindVertexArray(kind->vao);
+					frameDrawCalls++;
+					glDrawArraysInstanced(GL_TRIANGLES, 0, kind->vertexCount,
+										  (GLsizei) entry.second.size());
+				}
+				glEnable(GL_CULL_FACE);
+				glBindVertexArray(0);
+			}
+
+			// The tank loop below expects the ordinary mesh program bound.
+			glUseProgram(meshProgram);
+		}
+	};
+
+
+	// W3: the tanks, as one callable pass. The reflection draws them too
+	// at its fullest setting - a tank at the water's edge with nothing
+	// under it is the thing that gives a fake reflection away.
+	//
+	// The sight is bookkeeping for the real view: it records where to
+	// draw the aim blade afterwards, and the mirrored pass must not
+	// overwrite that with its own mirrored frames.
+	auto drawTanksPass = [&](const Mat4 &vp, bool collectSight) {
+	for (TankInstance &inst : tankInstances) {
+			// Upstream's rule, verbatim: TargetRendererImplTank::render() opens
+			// with `if (tank_->getState().getState() != TankState::sNormal)
+			// return;`, so a tank is drawn only while it is alive and playing -
+			// not while dead, loading, spectating or buying. Its drawParticle()
+			// does the same, falling through to just an off-screen arrow and a
+			// name plate for a non-normal tank (neither of which exists here
+			// yet), so nothing else is drawn for it either.
+			//
+			// The instance is still built for a dead tank, deliberately: the
+			// follow camera reads its position, and losing that mid-round would
+			// snap the view away the moment you died.
+			if (!inst.alive) continue;
+
+			GpuModel *gpu = uploadModel(inst.model);
+			if (!gpu) {
+				auto &bucket = inst.mine ? unmodelledMine : unmodelledOther;
+				bucket.push_back(inst.x); bucket.push_back(inst.y + 1.5f); bucket.push_back(inst.z);
+				continue;
+			}
+
+			// The engine's own per-tank colour, as upstream tints tanks and
+			// draws their names with. Was a hardcoded cyan/red "mine vs theirs"
+			// split, which contradicted the name plates the moment those
+			// started showing the real colour - a red "Player" label over a
+			// cyan tank. Your own tank is identifiable by the aim sight and the
+			// follow camera; it doesn't need to lie about its colour too.
+			glUniform4f(meshColorLoc, inst.colorR, inst.colorG, inst.colorB, 1.0f);
+
+			// The hull faces the way the tank last drove; the turret swings to
+			// the firing bearing and the gun additionally lifts to the
+			// elevation, each about its own pivot (see uploadModel) - the same
+			// articulation upstream does. The turret's bearing is a world
+			// angle, not one relative to the hull, so it is deliberately built
+			// from `base` rather than off the hull's transform.
+			Mat4 base = Mat4::multiply(
+				Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
+				Mat4::scale(gpu->scale));
+			// The hull, and only the hull, leans onto the ground - the turret
+			// and gun below stay in world axes so the barrel keeps agreeing
+			// with the shot (see where groundTilt is built).
+			// Tilt first, then yaw inside it, so a tank driving across a slope
+			// turns about its own up axis rather than the world's - the same
+			// order the ground tilt was added under.
+			Mat4 hullMvp = Mat4::multiply(vp, Mat4::multiply(
+				Mat4::multiply(
+					Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
+					Mat4::multiply(inst.groundTilt, Mat4::rotateY(inst.hullYawRadians))),
+				Mat4::scale(gpu->scale)));
+			drawMeshGroup(gpu->hull, meshMvpLoc, hullMvp);
+
+			Mat4 turret = Mat4::multiply(base, Mat4::rotateY(inst.headingRadians));
+			drawMeshGroup(gpu->turret, meshMvpLoc, Mat4::multiply(vp, turret));
+
+			Mat4 gun = Mat4::multiply(
+				turret,
+				Mat4::multiply(
+					Mat4::translate(gpu->gunOffsetX, gpu->gunOffsetY, gpu->gunOffsetZ),
+					// Not negated: the barrel points along world -Z after the
+					// upload's remap, and rotateX(+e) lifts -Z towards +Y.
+					Mat4::rotateX(inst.elevationRadians)));
+			drawMeshGroup(gpu->gun, meshMvpLoc, Mat4::multiply(vp, gun));
+
+			// Upstream draws the sight on the player's own tank while it's
+			// playing (TargetRendererImplTank::drawParticle: currentTank &&
+			// StatePlaying, and it bails entirely unless the tank is sNormal).
+			// Our nearest equivalent is "my tank, alive" - this config has no
+			// strict turn order, so every live moment is your turn.
+			if (inst.mine && inst.alive) {
+				haveSight = true;
+				// M22: upstream's sight needs three frames, not one - see
+				// buildOriginalSightGeometry.
+				sightBaseTransform = Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z);
+				sightBearingTransform = Mat4::multiply(
+					sightBaseTransform, Mat4::rotateY(inst.headingRadians));
+				// The blade lives in the gun's own frame, so it inherits the
+				// bearing and elevation for free - but not the model scale,
+				// since its radii are already in world units.
+				sightTransform = Mat4::multiply(
+					Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
+					Mat4::multiply(
+						Mat4::rotateY(inst.headingRadians),
+						Mat4::rotateX(inst.elevationRadians)));
+			}
+		}
+	};
+
+
 	// W3: the reflection, when upstream's own is the one asked for.
 	//
 	// Upstream renders the scene a second time into a texture with the
@@ -5077,8 +5367,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// screen's resolution and with the land and sky only - the tanks, trees
 	// and effects are left out, which is a real difference from upstream and
 	// the reason this is a switch rather than the only behaviour.
+	const int reflectionLevel = g_reflectionStyle.load();
 	const bool wantReflection =
-		(g_reflectionStyle.load() == 1) && waterVisible && surfaceWidth > 0 && surfaceHeight > 0;
+		reflectionLevel > 0 && waterVisible && surfaceWidth > 0 && surfaceHeight > 0;
 	if (wantReflection) {
 		const int rw = std::max(surfaceWidth / 2, 1), rh = std::max(surfaceHeight / 2, 1);
 		if (reflectionFbo == 0 || rw != reflectionWidth || rh != reflectionHeight) {
@@ -5132,6 +5423,16 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				reflView.m[1], reflView.m[5], reflView.m[9],
 				tanf(kFovYRadians * 0.5f), aspect);
 		drawLandPass(reflMvp, true);
+		if (reflectionLevel >= 2) {
+			// Everything else solid: the scenery and the tanks. Not the
+			// shots, explosions or smoke - those are additive sprites drawn
+			// after the water in this renderer, and a mirrored copy of them
+			// under the surface reads as a second explosion rather than as a
+			// reflection. Upstream reflects them; this is where the two
+			// differ, and it is a deliberate stop rather than an oversight.
+			drawSceneryPass(reflMvp);
+			drawTanksPass(reflMvp, false);
+		}
 		glFrontFace(GL_CCW);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glViewport(0, 0, surfaceWidth, surfaceHeight);
@@ -5452,179 +5753,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// Real tank models where we have one; a point sprite is kept as the
 	// fallback for any tank whose model wouldn't load, so a tank is never
 	// simply invisible.
-	glUseProgram(meshProgram);
-	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
-	glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-	glUniform1f(meshFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 
-	// Landscape targets first: they are scenery, so they should be behind
-	// everything that matters, and drawing them before the tanks keeps the
-	// per-target colour uniform out of the tank loop's way.
-	{
-		// M6 performance: scenery is drawn instanced - one call per distinct
-		// mesh rather than one per target. A landscape scatters up to ~2,000
-		// of these and, measured, uses a single model between them, so this
-		// is the one pass in the renderer where instancing was worth having
-		// (see InstanceBuffer.hpp).
-		//
-		// Bucketed by the source geometry's VBO rather than by Model*,
-		// because the procedural trees have no Model at all and share this
-		// path - they are simply another bucket.
-		struct Bucket {
-			int vertexCount = 0;
-			std::vector<ScorchDroidInstances::Instance> instances;
-		};
-		std::map<GLuint, Bucket> buckets;
-		// Trees are bucketed by type rather than by VBO, because each type
-		// has its own geometry *and* its own atlas cell.
-		std::map<int, std::vector<ScorchDroidInstances::Instance> > treeBuckets;
+	drawSceneryPass(mvp);
 
-		for (TargetInstance &inst : targetInstances) {
-			GLuint sourceVbo = 0;
-			int vertexCount = 0;
-			ScorchDroidInstances::Instance packed;
-			packed.x = inst.x;
-			packed.z = inst.z;
-			packed.scale = inst.scale;
-			packed.rotationRadians = inst.rotationRadians;
-
-			if (inst.isTree) {
-				// Trees have their own pass below - textured and alpha-cut,
-				// which the flat scenery program cannot do.
-				treeBuckets[(int) inst.treeType].push_back(packed);
-				std::vector<ScorchDroidInstances::Instance> &treeBucket =
-					treeBuckets[(int) inst.treeType];
-				treeBucket.back().y = inst.y;
-				treeBucket.back().r = inst.treeR * inst.brightness;
-				treeBucket.back().g = inst.treeG * inst.brightness;
-				treeBucket.back().b = inst.treeB * inst.brightness;
-				continue;
-			} else {
-				GpuModel *gpu = uploadModel(inst.model);
-				if (!gpu || gpu->hull.vertexCount == 0 || gpu->hull.vbo == 0) continue;
-				sourceVbo = gpu->hull.vbo;
-				vertexCount = gpu->hull.vertexCount;
-				// The model's base lift, scaled by the definition's own
-				// scale - folded into the instance here because the shader
-				// has no idea which model it is drawing.
-				packed.y = inst.y + gpu->baseOffset * inst.scale;
-				// Upstream's "color" for a target is a grey multiplier,
-				// randomised per target when the definition doesn't fix one,
-				// so a stand of identical objects doesn't look stamped out.
-				packed.r = packed.g = packed.b = inst.brightness;
-			}
-
-			Bucket &bucket = buckets[sourceVbo];
-			bucket.vertexCount = vertexCount;
-			bucket.instances.push_back(packed);
-		}
-
-		if (!buckets.empty() && instancedMeshProgram != 0) {
-			glUseProgram(instancedMeshProgram);
-			glUniformMatrix4fv(instancedViewProjLoc, 1, GL_FALSE, mvp.m);
-			glUniform3f(instancedLightDirLoc, 0.4f, 0.82f, 0.35f);
-			glUniform3f(instancedFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-			glUniform1f(instancedFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
-
-			for (auto &entry : buckets) {
-				const GLuint sourceVbo = entry.first;
-				Bucket &bucket = entry.second;
-
-				InstancedDraw &draw = g_instancedDraws[sourceVbo];
-				if (draw.vao == 0) {
-					glGenVertexArrays(1, &draw.vao);
-					glGenBuffers(1, &draw.instanceVbo);
-					glBindVertexArray(draw.vao);
-					// The mesh's own vertices, same layout uploadMeshGroup
-					// wrote them in.
-					glBindBuffer(GL_ARRAY_BUFFER, sourceVbo);
-					glEnableVertexAttribArray(0);
-					glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
-					glEnableVertexAttribArray(1);
-					glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
-					// ...then the per-instance attributes, advancing once
-					// per instance rather than once per vertex.
-					const GLsizei stride = ScorchDroidInstances::kFloatsPerInstance * sizeof(float);
-					glBindBuffer(GL_ARRAY_BUFFER, draw.instanceVbo);
-					glEnableVertexAttribArray(2);
-					glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, (void *) 0);
-					glVertexAttribDivisor(2, 1);
-					glEnableVertexAttribArray(3);
-					glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void *) (4 * sizeof(float)));
-					glVertexAttribDivisor(3, 1);
-					glBindVertexArray(0);
-				}
-
-				std::vector<float> packed;
-				ScorchDroidInstances::pack(bucket.instances, packed);
-
-				// Upload only when something actually changed. Scenery is
-				// static until a target is destroyed or the ground under it
-				// gives way and it falls, so in the steady state this
-				// uploads nothing - and comparing 30KB is far cheaper than
-				// re-sending it every frame.
-				if (packed != draw.uploaded) {
-					glBindBuffer(GL_ARRAY_BUFFER, draw.instanceVbo);
-					glBufferData(GL_ARRAY_BUFFER, packed.size() * sizeof(float),
-								 packed.data(), GL_DYNAMIC_DRAW);
-					draw.uploaded = packed;
-				}
-				draw.instanceCount = (int) bucket.instances.size();
-
-				glBindVertexArray(draw.vao);
-				frameDrawCalls++;
-				glDrawArraysInstanced(GL_TRIANGLES, 0, bucket.vertexCount, draw.instanceCount);
-			}
-			glBindVertexArray(0);
-		}
-
-		// M6: the trees, in their own textured alpha-cut pass - one draw per
-		// species present, which is a handful.
-		//
-		// M11: skipping the pass is the whole of "trees off". The geometry
-		// stays built, so turning them back on costs nothing and does not
-		// wait for a new round - and a landscape scatters up to two thousand
-		// of them, so this is the setting most likely to buy a weak device
-		// its frame rate back.
-		if (g_showTrees && !treeBuckets.empty() && treeProgram != 0) {
-			glUseProgram(treeProgram);
-			glUniformMatrix4fv(treeViewProjLoc, 1, GL_FALSE, mvp.m);
-			glUniform3f(treeLightDirLoc, 0.4f, 0.82f, 0.35f);
-			glUniform3f(treeFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-			glUniform1f(treeFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
-			glUniform1i(treeAtlasLoc, 0);
-			glActiveTexture(GL_TEXTURE0);
-			// Foliage is a one-sided shell built from fans; seen from the
-			// other side a branch layer would simply vanish, so both faces
-			// are drawn. The alpha test, not the winding, is what shapes it.
-			glDisable(GL_CULL_FACE);
-
-			for (auto &entry : treeBuckets) {
-				TreeKind *kind = treeKindFor((TreeModelFactory::TreeType) entry.first);
-				if (!kind || kind->atlas == 0) continue;
-
-				std::vector<float> packed;
-				ScorchDroidInstances::pack(entry.second, packed);
-				if (packed != kind->uploaded) {
-					glBindBuffer(GL_ARRAY_BUFFER, kind->instanceVbo);
-					glBufferData(GL_ARRAY_BUFFER, packed.size() * sizeof(float),
-								 packed.data(), GL_DYNAMIC_DRAW);
-					kind->uploaded = packed;
-				}
-
-				glBindTexture(GL_TEXTURE_2D, kind->atlas);
-				glBindVertexArray(kind->vao);
-				frameDrawCalls++;
-				glDrawArraysInstanced(GL_TRIANGLES, 0, kind->vertexCount,
-									  (GLsizei) entry.second.size());
-			}
-			glEnable(GL_CULL_FACE);
-			glBindVertexArray(0);
-		}
-
-		// The tank loop below expects the ordinary mesh program bound.
-		glUseProgram(meshProgram);
-	}
 	// M6: the thrown rocks. Upstream picks between rock1 and rock2 per chunk
 	// and draws them opaque in a flat dark grey-green, untextured.
 	if (!debrisChunks.empty()) {
@@ -5646,96 +5777,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 	}
 
-	std::vector<float> unmodelledMine, unmodelledOther;
-	bool haveSight = false;
-	Mat4 sightTransform = Mat4::identity();
-	Mat4 sightBaseTransform = Mat4::identity();
-	Mat4 sightBearingTransform = Mat4::identity();
-	for (TankInstance &inst : tankInstances) {
-		// Upstream's rule, verbatim: TargetRendererImplTank::render() opens
-		// with `if (tank_->getState().getState() != TankState::sNormal)
-		// return;`, so a tank is drawn only while it is alive and playing -
-		// not while dead, loading, spectating or buying. Its drawParticle()
-		// does the same, falling through to just an off-screen arrow and a
-		// name plate for a non-normal tank (neither of which exists here
-		// yet), so nothing else is drawn for it either.
-		//
-		// The instance is still built for a dead tank, deliberately: the
-		// follow camera reads its position, and losing that mid-round would
-		// snap the view away the moment you died.
-		if (!inst.alive) continue;
 
-		GpuModel *gpu = uploadModel(inst.model);
-		if (!gpu) {
-			auto &bucket = inst.mine ? unmodelledMine : unmodelledOther;
-			bucket.push_back(inst.x); bucket.push_back(inst.y + 1.5f); bucket.push_back(inst.z);
-			continue;
-		}
-
-		// The engine's own per-tank colour, as upstream tints tanks and
-		// draws their names with. Was a hardcoded cyan/red "mine vs theirs"
-		// split, which contradicted the name plates the moment those
-		// started showing the real colour - a red "Player" label over a
-		// cyan tank. Your own tank is identifiable by the aim sight and the
-		// follow camera; it doesn't need to lie about its colour too.
-		glUniform4f(meshColorLoc, inst.colorR, inst.colorG, inst.colorB, 1.0f);
-
-		// The hull faces the way the tank last drove; the turret swings to
-		// the firing bearing and the gun additionally lifts to the
-		// elevation, each about its own pivot (see uploadModel) - the same
-		// articulation upstream does. The turret's bearing is a world
-		// angle, not one relative to the hull, so it is deliberately built
-		// from `base` rather than off the hull's transform.
-		Mat4 base = Mat4::multiply(
-			Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
-			Mat4::scale(gpu->scale));
-		// The hull, and only the hull, leans onto the ground - the turret
-		// and gun below stay in world axes so the barrel keeps agreeing
-		// with the shot (see where groundTilt is built).
-		// Tilt first, then yaw inside it, so a tank driving across a slope
-		// turns about its own up axis rather than the world's - the same
-		// order the ground tilt was added under.
-		Mat4 hullMvp = Mat4::multiply(mvp, Mat4::multiply(
-			Mat4::multiply(
-				Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
-				Mat4::multiply(inst.groundTilt, Mat4::rotateY(inst.hullYawRadians))),
-			Mat4::scale(gpu->scale)));
-		drawMeshGroup(gpu->hull, meshMvpLoc, hullMvp);
-
-		Mat4 turret = Mat4::multiply(base, Mat4::rotateY(inst.headingRadians));
-		drawMeshGroup(gpu->turret, meshMvpLoc, Mat4::multiply(mvp, turret));
-
-		Mat4 gun = Mat4::multiply(
-			turret,
-			Mat4::multiply(
-				Mat4::translate(gpu->gunOffsetX, gpu->gunOffsetY, gpu->gunOffsetZ),
-				// Not negated: the barrel points along world -Z after the
-				// upload's remap, and rotateX(+e) lifts -Z towards +Y.
-				Mat4::rotateX(inst.elevationRadians)));
-		drawMeshGroup(gpu->gun, meshMvpLoc, Mat4::multiply(mvp, gun));
-
-		// Upstream draws the sight on the player's own tank while it's
-		// playing (TargetRendererImplTank::drawParticle: currentTank &&
-		// StatePlaying, and it bails entirely unless the tank is sNormal).
-		// Our nearest equivalent is "my tank, alive" - this config has no
-		// strict turn order, so every live moment is your turn.
-		if (inst.mine && inst.alive) {
-			haveSight = true;
-			// M22: upstream's sight needs three frames, not one - see
-			// buildOriginalSightGeometry.
-			sightBaseTransform = Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z);
-			sightBearingTransform = Mat4::multiply(
-				sightBaseTransform, Mat4::rotateY(inst.headingRadians));
-			// The blade lives in the gun's own frame, so it inherits the
-			// bearing and elevation for free - but not the model scale,
-			// since its radii are already in world units.
-			sightTransform = Mat4::multiply(
-				Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
-				Mat4::multiply(
-					Mat4::rotateY(inst.headingRadians),
-					Mat4::rotateX(inst.elevationRadians)));
-		}
-	}
+	drawTanksPass(mvp, true);
 
 	if (haveSight && g_sightStyle.load() == 1) {
 		// M22: upstream's own arrangement - a protractor ring flat under the
@@ -6332,8 +6375,9 @@ Java_com_rm_scorchdroid_NativeBridge_setRenderOptions(
 // M23: how finely the landscape is drawn, as a grid resolution. Takes
 // effect on the next landscape build, which the renderer forces as soon as
 // it sees the value change.
-// W3: which reflection the water shows - 0 for the sky's own colours, 1
-// for the scene, mirrored into a texture as upstream does it.
+// W3: how much the water reflects - 0 for the sky's own colours, 1 for the
+// sky and the land, 2 for the tanks and scenery as well, which is upstream's
+// own reflection short of its effects.
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_setReflectionStyle(JNIEnv *env, jobject, jint style) {
     g_reflectionStyle.store(style == 1 ? 1 : 0);

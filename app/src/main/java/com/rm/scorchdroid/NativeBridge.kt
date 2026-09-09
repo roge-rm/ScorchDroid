@@ -287,9 +287,9 @@ object NativeBridge {
     external fun setOceanStyle(style: Int)
 
     /**
-     * W3: what the water reflects - 0 for the sky's own colours, 1 for the
-     * scene, mirrored into a texture as Scorched3D does it. Costs a second
-     * pass over the land and sky.
+     * W3: how much the water reflects - 0 for the sky's own colours, 1 for
+     * the sky and the land, 2 for the tanks and scenery as well. Above 0 the
+     * scene is drawn a second time from a mirrored camera.
      */
     external fun setReflectionStyle(style: Int)
 
