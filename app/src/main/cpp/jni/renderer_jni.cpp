@@ -4069,20 +4069,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	ctx->getActionController().getShotAndExplosionPositions(
 		shotPositionsRaw, explosionPositionsRaw, &shotPlayerIds, &shotVelocities, &shotWeapons);
 
-	// The first shot in flight, in world space, for the shot camera. Upstream
-	// tracks the local tank's own projectile view points; this port has one
-	// human player, so the first live shot is that shot in every practical
-	// case and picking it needs no extra plumbing.
-	bool haveShot = false;
-	float shotWorldX = 0.0f, shotWorldY = 0.0f, shotWorldZ = 0.0f;
-	if (!shotPositionsRaw.empty()) {
-		FixedVector &shot = shotPositionsRaw[0];
-		shotWorldX = shot[0].asFloat();
-		shotWorldY = shot[2].asFloat();
-		shotWorldZ = worldZFromEngineY(shot[1].asFloat());
-		haveShot = true;
-	}
-
 	bool haveMyTank = false;
 	bool myTankAlive = false;
 	unsigned int myPlayerId = 0;
@@ -4248,6 +4234,117 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 	}
 
+	// M20: the shot camera's framing, upstream's own (TargetCamera::CamShot
+	// with TankViewPoints::getValues).
+	//
+	// Upstream builds this out of view points: each projectile registers one
+	// carrying its position and a "look from" vector, and the camera averages
+	// the positions into what it looks at and sums the vectors into where it
+	// looks from. The arithmetic is reproduced here rather than the plumbing,
+	// because this port already reads every live shot off the action
+	// controller each frame - the view-point machinery exists to carry that
+	// information from the simulation to a camera that cannot see it, and
+	// this one can.
+	//
+	// The look-from vector is the shot's own velocity reversed with its
+	// vertical component forced to a constant +10, which is what puts the
+	// camera behind and above the shell looking along its flight - and what
+	// stops it flipping over the top of the arc, where the real vertical
+	// velocity changes sign.
+	bool haveShot = false;
+	float shotCamTargetX = 0.0f, shotCamTargetY = 0.0f, shotCamTargetZ = 0.0f;
+	float shotCamOffsetX = 0.0f, shotCamOffsetY = 1.0f, shotCamOffsetZ = 0.0f;
+	// Upstream watches *your* shots and only borrows someone else's when you
+	// have none in the air (TargetCamera::CamShot's fallback through
+	// TankViewPointsTanks). Without that a bot firing at the same moment -
+	// which in a simultaneous game is every moment - drags the camera off
+	// your own shell.
+	for (int pass = 0; pass < 2 && !haveShot; pass++) {
+		const bool mineOnly = (pass == 0);
+		if (mineOnly && !haveMyTank) continue;
+		float sumX = 0.0f, sumY = 0.0f, sumZ = 0.0f;
+		float fromX = 0.0f, fromY = 0.0f, fromZ = 0.0f;
+		float minX = 0.0f, minY = 0.0f, minZ = 0.0f;
+		float maxX = 0.0f, maxY = 0.0f, maxZ = 0.0f;
+		int tracked = 0;
+		for (size_t i = 0; i < shotPositionsRaw.size(); i++) {
+			// Upstream's own opt-out: a weapon with <nocameratrack> registers
+			// no view point, so the camera never follows it.
+			if (i < shotWeapons.size() && shotWeapons[i] &&
+				shotWeapons[i]->getNoCameraTrack()) {
+				continue;
+			}
+			if (mineOnly &&
+				(i >= shotPlayerIds.size() || shotPlayerIds[i] != myPlayerId)) {
+				continue;
+			}
+			FixedVector &p = shotPositionsRaw[i];
+			const float wx = p[0].asFloat();
+			const float wy = p[2].asFloat();
+			const float wz = worldZFromEngineY(p[1].asFloat());
+			sumX += wx; sumY += wy; sumZ += wz;
+			if (tracked == 0) {
+				minX = maxX = wx; minY = maxY = wy; minZ = maxZ = wz;
+			} else {
+				minX = std::min(minX, wx); maxX = std::max(maxX, wx);
+				minY = std::min(minY, wy); maxY = std::max(maxY, wy);
+				minZ = std::min(minZ, wz); maxZ = std::max(maxZ, wz);
+			}
+			if (i < shotVelocities.size()) {
+				FixedVector &v = shotVelocities[i];
+				// Engine (x, y, up) to world (x, up, -y), reversed
+				// horizontally, with the vertical pinned as upstream pins it.
+				fromX += -v[0].asFloat();
+				fromY += 10.0f;
+				fromZ += v[1].asFloat();
+			}
+			tracked++;
+		}
+
+		if (tracked > 0) {
+			haveShot = true;
+			shotCamTargetX = sumX / (float) tracked;
+			shotCamTargetY = sumY / (float) tracked;
+			shotCamTargetZ = sumZ / (float) tracked;
+
+			// Upstream's distance: far enough back to hold everything it is
+			// watching, which for a cluster weapon spreads with the cluster.
+			// The radius of one is 1, so the box is inflated by that first.
+			const float spanX = (maxX - minX) + 2.0f;
+			const float spanY = (maxY - minY) + 2.0f;
+			const float spanZ = (maxZ - minZ) + 2.0f;
+			const float span = sqrtf(spanX * spanX + spanY * spanY + spanZ * spanZ);
+			const float distance = span > 0.0f ? span + 25.0f : 25.0f;
+
+			const float length = sqrtf(fromX * fromX + fromY * fromY + fromZ * fromZ);
+			if (length > 0.0001f) {
+				shotCamOffsetX = fromX / length * distance;
+				shotCamOffsetY = fromY / length * distance;
+				shotCamOffsetZ = fromZ / length * distance;
+			} else {
+				shotCamOffsetX = 0.0f;
+				shotCamOffsetY = distance;
+				shotCamOffsetZ = 0.0f;
+			}
+		} else if (!mineOnly && !explosionPositionsRaw.empty()) {
+			// Nothing in the air, but something is going off: upstream keeps
+			// the camera on it, because the explosion registers a view point
+			// of its own and the action outlives the shell that caused it.
+			// This is what stops the view cutting away at the exact moment
+			// the shot arrives.
+			FixedVector &p = explosionPositionsRaw[0];
+			haveShot = true;
+			shotCamTargetX = p[0].asFloat();
+			shotCamTargetY = p[2].asFloat();
+			shotCamTargetZ = worldZFromEngineY(p[1].asFloat());
+			// No velocity to look along, so keep the bearing the shot left
+			// behind and simply stand off it.
+			shotCamOffsetX = sinf(g_camera.shotYaw) * 30.0f;
+			shotCamOffsetY = 20.0f;
+			shotCamOffsetZ = cosf(g_camera.shotYaw) * 30.0f;
+		}
+	}
+
 	// Camera: free-fly orbits the map center; follow mode retargets to "my
 	// tank"'s live position every frame instead (falling back to free-fly
 	// framing if there's no tank yet - e.g. still spectating/loading) - see
@@ -4312,15 +4409,25 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					// Upstream's CamShot watches the shot itself and drops
 					// back to the behind-the-tank view when there is none.
 					if (haveShot) {
-						targetX = shotWorldX;
-						targetY = shotWorldY;
-						targetZ = shotWorldZ;
-						pitch = 0.400f;
-						distance = 45.0f;
-						// Keep the previous bearing while a shot is in the
-						// air: recomputing it per frame from a moving
-						// projectile makes the camera spin around it.
-						presetYaw = g_camera.shotYaw;
+						targetX = shotCamTargetX;
+						targetY = shotCamTargetY;
+						targetZ = shotCamTargetZ;
+						// The framing is an offset from the shell, not an
+						// orbit around it, so it is converted into the
+						// yaw/pitch/distance the eye is built from below.
+						// Chasing along the flight is the whole point: an
+						// orbit at a fixed bearing shows the shell from the
+						// side and tells you nothing about where it is going.
+						distance = sqrtf(
+							shotCamOffsetX * shotCamOffsetX +
+							shotCamOffsetY * shotCamOffsetY +
+							shotCamOffsetZ * shotCamOffsetZ);
+						if (distance > 0.0001f) {
+							pitch = asinf(std::min(1.0f, std::max(-1.0f,
+								shotCamOffsetY / distance)));
+							presetYaw = atan2f(shotCamOffsetX, shotCamOffsetZ);
+						}
+						g_camera.shotYaw = presetYaw;
 					} else {
 						pitch = 0.571f;
 						distance = 60.0f;
