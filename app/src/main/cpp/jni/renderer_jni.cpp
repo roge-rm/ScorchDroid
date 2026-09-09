@@ -290,10 +290,11 @@ namespace
 	float  breakerTime = 0.0f;         // upstream's totalTime_, 0..6
 	bool   breakersDirty = false;      // a crater moved the shoreline
 	double breakersRebuiltAt = 0.0;
-	// Water detail, the one water setting: 0 = Full (upstream's 2-unit grid,
+	// Water detail, the one water setting: 2 = Full (upstream's 2-unit grid,
 	// 24 tile updates a second - its own phase rate), 1 = Half (4 units,
-	// 12/s), 2 = Quarter (8 units, 6/s). The grid part lands with W11.
-	std::atomic<int> g_waterDetail{0};
+	// 12/s), 0 = Quarter (8 units, 6/s). Low is the low number, as with
+	// every setting slider.
+	std::atomic<int> g_waterDetail{2};
 	std::thread oceanThread;
 	std::atomic<bool> oceanRunning{false};
 	std::mutex oceanMutex;
@@ -2655,7 +2656,7 @@ namespace
 				// and Quarter detail halve and quarter that, which is the
 				// CPU side of the one water setting.
 				const int detail = g_waterDetail.load();
-				const int millis = detail <= 0 ? 41 : (detail == 1 ? 83 : 166);
+				const int millis = detail >= 2 ? 41 : (detail == 1 ? 83 : 166);
 				std::this_thread::sleep_for(std::chrono::milliseconds(millis));
 			}
 		});
@@ -2888,8 +2889,8 @@ namespace
 	// waterGridEbo for the shape of it.
 	void buildWaterGrid(int detail)
 	{
-		const float cell = (detail <= 0) ? 2.0f : (detail == 1 ? 4.0f : 8.0f);
-		waterInnerLod = (detail <= 0) ? 0.0f : (detail == 1 ? 1.0f : 2.0f);
+		const float cell = (detail >= 2) ? 2.0f : (detail == 1 ? 4.0f : 8.0f);
+		waterInnerLod = (detail >= 2) ? 0.0f : (detail == 1 ? 1.0f : 2.0f);
 		const float outerCell = 16.0f;
 
 		// The inner rectangle: the map and 64 units around it, on the
@@ -7402,8 +7403,8 @@ Java_com_rm_scorchdroid_NativeBridge_setEffectsDetail(JNIEnv *env, jobject, jint
     LOGI("Effects detail: level %d, %d particles", (int) level, budget);
 }
 
-// Water detail: 0 Full (upstream's own grid and phase rate), 1 Half,
-// 2 Quarter. See g_waterDetail.
+// Water detail: 2 Full (upstream's own grid and phase rate), 1 Half,
+// 0 Quarter. See g_waterDetail.
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_setWaterDetail(JNIEnv *env, jobject, jint level) {
     g_waterDetail.store(level < 0 ? 0 : (level > 2 ? 2 : level));

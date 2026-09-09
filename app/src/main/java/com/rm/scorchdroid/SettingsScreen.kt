@@ -248,12 +248,15 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                         // The one water setting. The sea is Scorched3D's own
                         // at every position; this is how finely it is drawn
                         // and how often it moves, which are its only costs.
+                        // Low on the left, high on the right - every slider
+                        // on this screen runs that way, so a value's meaning
+                        // is fixed by its position before its label is read.
                         SliderRow(
                             "Water detail",
                             when (settings.waterDetail) {
-                                0 -> "Full"
+                                0 -> "Quarter"
                                 1 -> "Half"
-                                else -> "Quarter"
+                                else -> "Full"
                             },
                             settings.waterDetail.toFloat(),
                             0f..2f,

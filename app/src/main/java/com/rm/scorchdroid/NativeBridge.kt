@@ -281,8 +281,8 @@ object NativeBridge {
     external fun setTerrainDetail(grid: Int)
 
     /**
-     * Water detail: 0 Full (upstream's 2-unit grid, 24 wave phases a
-     * second), 1 Half, 2 Quarter.
+     * Water detail: 2 Full (upstream's 2-unit grid, 24 wave phases a
+     * second), 1 Half, 0 Quarter.
      */
     external fun setWaterDetail(level: Int)
 
