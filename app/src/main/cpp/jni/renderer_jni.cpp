@@ -68,6 +68,7 @@
 #include <TargetModelStore.h>
 #include <SkyDescription.hpp>
 #include <OceanWaves.h>
+#include <ShoreBreakers.h>
 #include <InstanceBuffer.hpp>
 #include <TreeGeometry.hpp>
 #include <3dsparse/TreeModelFactory.hpp>
@@ -273,6 +274,21 @@ namespace
 	// foam amount up into flecks (water.fshader's tex_foamamount.z).
 	GLuint waterFoamMaskTexture = 0;
 	GLint  waterFoamMaskLoc = -1;
+	// W10c: upstream's breakers (WaterWaves.cpp) - sprite quads along
+	// every shoreline, three phases of each of two images on a six-second
+	// cycle, additively blended, riding the wave height. The segments
+	// come from porting/ShoreBreakers; here they are one VBO (set 0's
+	// quads then set 1's), a shader that slides each quad seaward and
+	// back by the phase, and the two images.
+	GLuint breakerProgram = 0, breakerVao = 0, breakerVbo = 0;
+	GLuint breakerTexture[2] = { 0, 0 };
+	int    breakerVertexCount[2] = { 0, 0 };
+	GLint  breakerMvpLoc = -1, breakerFrontLoc = -1, breakerEndLoc = -1, breakerAlphaLoc = -1;
+	GLint  breakerWaterHeightLoc = -1, breakerTileLoc = -1, breakerWindLoc = -1;
+	GLint  breakerWaveTexLoc = -1, breakerTextureLoc = -1, breakerMapHeightLoc = -1;
+	float  breakerTime = 0.0f;         // upstream's totalTime_, 0..6
+	bool   breakersDirty = false;      // a crater moved the shoreline
+	double breakersRebuiltAt = 0.0;
 	// Water detail, the one water setting: 0 = Full (upstream's 2-unit grid,
 	// 24 tile updates a second - its own phase rate), 1 = Half (4 units,
 	// 12/s), 2 = Quarter (8 units, 6/s). The grid part lands with W11.
@@ -1452,6 +1468,50 @@ namespace
 			water = mix(water, uSunDiffuse, foam);
 
 			fragColor = vec4(mix(uFogColor, water, fogFactor), uAlpha);
+		}
+	)";
+
+	// W10c: the breakers. Each quad is four corners of a segment's home
+	// position; the phase slides it seaward along the segment's
+	// perpendicular by upstream's frontlen (the two shore-side corners)
+	// and endlen (the seaward two), and it rides the sea's height at
+	// wherever it lands. Segments whose perpendicular runs with the wind
+	// are upstream's skip (their sea faces away), done here by clipping.
+	const char *kBreakerVertexShader = R"(#version 300 es
+		layout(location = 0) in vec2 aBase;   // world x, z of this corner's home
+		layout(location = 1) in vec2 aPerp;   // seaward, world x, z
+		layout(location = 2) in vec2 aUv;
+		uniform mat4 uMVP;
+		uniform float uFront;
+		uniform float uEnd;
+		uniform float uWaterHeight;
+		uniform float uWaveTileLength;
+		uniform vec2 uWind;
+		uniform sampler2D uWaveTex;
+		out vec2 vUv;
+		void main() {
+			vUv = aUv;
+			if (dot(aPerp, uWind) > 0.0) {
+				gl_Position = vec4(0.0, 0.0, 2.0, 1.0);   // clipped away
+				return;
+			}
+			vec2 p = aBase - aPerp * (aUv.y > 0.5 ? uFront : uEnd);
+			float h = uWaterHeight
+				+ textureLod(uWaveTex, p / uWaveTileLength, 0.0).r + 0.05;
+			gl_Position = uMVP * vec4(p.x, h, p.y, 1.0);
+		}
+	)";
+
+	const char *kBreakerFragmentShader = R"(#version 300 es
+		precision mediump float;
+		in vec2 vUv;
+		out vec4 fragColor;
+		uniform sampler2D uTexture;
+		uniform float uAlpha;
+		void main() {
+			vec4 c = texture(uTexture, vUv);
+			// White at alpha * 0.3, upstream's glColor4f, times the image.
+			fragColor = vec4(c.rgb, c.a * uAlpha * 0.3);
 		}
 	)";
 
@@ -2692,6 +2752,92 @@ namespace
 		}
 	}
 
+	// W10c: (re)builds the breaker quads from the current heightmap. Called
+	// with the water, and again after a crater has moved the shoreline.
+	// Engine landscape coordinates become world ones here: world z runs
+	// the other way to engine y, and so does the perpendicular's y.
+	void buildBreakers(ScorchedContext &ctx)
+	{
+		static unsigned int seed = 0x9e3779b9u;
+		std::vector<ScorchDroidBreakers::Segment> segments =
+			ScorchDroidBreakers::build(ctx, waterHeight, seed);
+
+		// Two triangles per segment, corners A(1,1) B(0,1) C(0,0) D(1,0)
+		// as upstream's glTexCoord/glVertex order has them; A and D share
+		// the "current" end, B and C the "point" end. The vertex shader
+		// picks the corner's home from its uv: y > 0.5 is a shore-side
+		// corner (A, B), which upstream slides by frontlen, and the
+		// seaward pair (C, D) by endlen - so the home stored for A is D's
+		// position and for B is C's, exactly as drawBoxes computes them.
+		std::vector<float> verts;
+		verts.reserve(segments.size() * 6 * 6);
+		auto push = [&](float ex, float ey, float px, float py, float u, float v) {
+			verts.push_back(ex);
+			verts.push_back(worldZFromEngineY(ey));
+			verts.push_back(px);
+			verts.push_back(-py);
+			verts.push_back(u);
+			verts.push_back(v);
+		};
+		for (int set = 0; set < 2; set++) {
+			const size_t start = verts.size();
+			for (const ScorchDroidBreakers::Segment &sg : segments) {
+				if (sg.set != set) continue;
+				// A = D - perp*front, B = C - perp*front, C' = C - perp*end, D' = D - perp*end.
+				push(sg.dx, sg.dy, sg.perpX, sg.perpY, 1.0f, 1.0f);   // A
+				push(sg.cx, sg.cy, sg.perpX, sg.perpY, 0.0f, 1.0f);   // B
+				push(sg.cx, sg.cy, sg.perpX, sg.perpY, 0.0f, 0.0f);   // C
+				push(sg.dx, sg.dy, sg.perpX, sg.perpY, 1.0f, 1.0f);   // A
+				push(sg.cx, sg.cy, sg.perpX, sg.perpY, 0.0f, 0.0f);   // C
+				push(sg.dx, sg.dy, sg.perpX, sg.perpY, 1.0f, 0.0f);   // D
+			}
+			breakerVertexCount[set] = (int) ((verts.size() - start) / 6);
+		}
+
+		if (breakerVao == 0) glGenVertexArrays(1, &breakerVao);
+		if (breakerVbo == 0) glGenBuffers(1, &breakerVbo);
+		glBindVertexArray(breakerVao);
+		glBindBuffer(GL_ARRAY_BUFFER, breakerVbo);
+		glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr) (verts.size() * sizeof(float)),
+					 verts.empty() ? nullptr : verts.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (2 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (4 * sizeof(float)));
+		glBindVertexArray(0);
+
+		// Upstream's two images, loaded as alpha images: the bitmap's own
+		// colour, opaque wherever it is not black (ImageBitmapFactory).
+		if (breakerTexture[0] == 0) {
+			const char *files[2] = { "data/textures/waves.bmp", "data/textures/waves2.bmp" };
+			for (int i = 0; i < 2; i++) {
+				Image image = ImageFactory::loadAlphaImage(S3D::eModLocation, files[i]);
+				if (!image.getBits() || image.getComponents() != 4) {
+					LOGI("Breakers: could not load %s", files[i]);
+					continue;
+				}
+				glGenTextures(1, &breakerTexture[i]);
+				glBindTexture(GL_TEXTURE_2D, breakerTexture[i]);
+				glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.getWidth(), image.getHeight(), 0,
+							 GL_RGBA, GL_UNSIGNED_BYTE, image.getBits());
+				glGenerateMipmap(GL_TEXTURE_2D);
+				glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+				glBindTexture(GL_TEXTURE_2D, 0);
+			}
+		}
+		breakersDirty = false;
+		breakersRebuiltAt = lastFrameSeconds;
+		LOGI("Breakers: %d segments (%d + %d quads)", (int) segments.size(),
+			 breakerVertexCount[0] / 6, breakerVertexCount[1] / 6);
+	}
+
 	// M6 water: reads the landscape's own water definition and builds the
 	// surface quad. Called each frame; does nothing after the first attempt
 	// for a given landscape (waterBuilt is cleared when one is thrown away,
@@ -2859,6 +3005,7 @@ namespace
 
 		waterVisible = true;
 		LOGI("Water surface at height %.1f, alpha %.2f", waterHeight, waterAlpha);
+		buildBreakers(ctx);
 		LOGI("Water upwelling: bottom (%.2f, %.2f, %.2f), top (%.2f, %.2f, %.2f)",
 			 waterUpwellBot[0], waterUpwellBot[1], waterUpwellBot[2],
 			 waterUpwellTop[0], waterUpwellTop[1], waterUpwellTop[2]);
@@ -2880,6 +3027,10 @@ namespace
 
 		int minX, minY, maxX, maxY;
 		if (!ScorchDroidLandscape::takeDirtyRegion(minX, minY, maxX, maxY)) return;
+		// A crater at the waterline moves the shore, and the breakers with
+		// it (W10c). Rebuilt lazily by the water draw, at most twice a
+		// second, since a sustained weapon deforms every step.
+		breakersDirty = true;
 
 		HeightMap &heightMap = ctx.getLandscapeMaps().getGroundMaps().getHeightMap();
 		const int w = heightMap.getMapWidth();
@@ -4356,6 +4507,17 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (2 * sizeof(float)));
 	glBindVertexArray(0);
 
+	breakerProgram = linkProgram(kBreakerVertexShader, kBreakerFragmentShader);
+	breakerMvpLoc = glGetUniformLocation(breakerProgram, "uMVP");
+	breakerFrontLoc = glGetUniformLocation(breakerProgram, "uFront");
+	breakerEndLoc = glGetUniformLocation(breakerProgram, "uEnd");
+	breakerAlphaLoc = glGetUniformLocation(breakerProgram, "uAlpha");
+	breakerWaterHeightLoc = glGetUniformLocation(breakerProgram, "uWaterHeight");
+	breakerTileLoc = glGetUniformLocation(breakerProgram, "uWaveTileLength");
+	breakerWindLoc = glGetUniformLocation(breakerProgram, "uWind");
+	breakerWaveTexLoc = glGetUniformLocation(breakerProgram, "uWaveTex");
+	breakerTextureLoc = glGetUniformLocation(breakerProgram, "uTexture");
+
 	waterProgram = linkProgram(kWaterVertexShader, kWaterFragmentShader);
 	waterMvpLoc = glGetUniformLocation(waterProgram, "uMVP");
 	waterUpwellTopLoc = glGetUniformLocation(waterProgram, "uUpwellTop");
@@ -4492,6 +4654,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterBuilt = false;
 	waterVisible = false;
 	waterVao = waterVbo = waterGridVao = waterGridVbo = waterFoamMaskTexture = 0;
+	breakerVao = breakerVbo = breakerTexture[0] = breakerTexture[1] = 0;
+	breakerVertexCount[0] = breakerVertexCount[1] = 0;
 
 	skyBuilt = false;
 	skyVao = skyVbo = 0;
@@ -4596,6 +4760,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		if (delta < 0.0f) delta = 0.0f;
 		if (delta > 0.1f) delta = 0.1f;
 		advanceClouds(*ctx, delta);
+		// WaterWaves::simulate: half speed, wrapping at 6 - a 12 s cycle.
+		breakerTime += delta / 2.0f;
+		if (breakerTime > 6.0f) breakerTime = 0.0f;
 		if (skyFlashRemaining > 0.0f) {
 			skyFlashRemaining = std::max(0.0f, skyFlashRemaining - delta);
 		}
@@ -6505,6 +6672,76 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 		glDisable(GL_BLEND);
 		glEnable(GL_CULL_FACE);
+
+		// W10c: the breakers, upstream's WaterWaves::draw. Additive, no
+		// depth write, three phases of each image two seconds apart.
+		if (breakersDirty && lastFrameSeconds - breakersRebuiltAt > 0.5) buildBreakers(*ctx);
+		if (breakerProgram != 0 && oceanTexture != 0 &&
+			(breakerVertexCount[0] > 0 || breakerVertexCount[1] > 0)) {
+			glUseProgram(breakerProgram);
+			glUniformMatrix4fv(breakerMvpLoc, 1, GL_FALSE, mvp.m);
+			glUniform1f(breakerWaterHeightLoc, waterHeight);
+			glUniform1f(breakerTileLoc, ScorchDroidOcean::kTileLength);
+			{
+				// Upstream filters against the round's *starting* wind
+				// direction, normalised; mirrored in y into the world frame
+				// as the perpendiculars were.
+				FixedVector w = ctx->getSimulator().getWind().getWindStartingDirection();
+				float wx = w[0].asFloat(), wz = -w[1].asFloat();
+				const float len = sqrtf(wx * wx + wz * wz);
+				if (len > 0.001f) { wx /= len; wz /= len; }
+				glUniform2f(breakerWindLoc, wx, wz);
+			}
+			glActiveTexture(GL_TEXTURE3);
+			glBindTexture(GL_TEXTURE_2D, oceanTexture);
+			glUniform1i(breakerWaveTexLoc, 3);
+			glActiveTexture(GL_TEXTURE0);
+			glUniform1i(breakerTextureLoc, 0);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+			glDepthMask(GL_FALSE);
+			glDisable(GL_CULL_FACE);
+			glBindVertexArray(breakerVao);
+
+			// WaterWaves::drawBoxes, its own "magic to try to get it look
+			// kind of ok": the front slides out for four seconds and back
+			// for two, fading in over the first second and out over the
+			// last two.
+			auto drawPhase = [&](int set, float time) {
+				if (breakerVertexCount[set] == 0 || breakerTexture[set] == 0) return;
+				float t = time;
+				if (t > 6.0f) t -= 6.0f;
+				float alpha = 1.0f;
+				float front = t + 0.2f;
+				float end = t / 2.0f;
+				if (t < 1.0f) alpha = t;
+				if (t > 4.0f) {
+					front = 4.2f - (t - 4.0f) / 3.0f;
+					end = 2.0f - (t - 4.0f) / 3.0f;
+					alpha = (2.0f - (t - 4.0f)) / 2.0f;
+				}
+				front *= 2.0f;
+				end *= 2.0f;
+				glUniform1f(breakerFrontLoc, front);
+				glUniform1f(breakerEndLoc, end);
+				glUniform1f(breakerAlphaLoc, alpha);
+				glBindTexture(GL_TEXTURE_2D, breakerTexture[set]);
+				frameDrawCalls++;
+				glDrawArrays(GL_TRIANGLES, set == 0 ? 0 : breakerVertexCount[0], breakerVertexCount[set]);
+			};
+			drawPhase(0, breakerTime + 0.0f);
+			drawPhase(0, breakerTime + 2.0f);
+			drawPhase(0, breakerTime + 4.0f);
+			drawPhase(1, breakerTime + 1.0f);
+			drawPhase(1, breakerTime + 3.0f);
+			drawPhase(1, breakerTime + 5.0f);
+
+			glBindVertexArray(0);
+			glEnable(GL_CULL_FACE);
+			glDepthMask(GL_TRUE);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDisable(GL_BLEND);
+		}
 	}
 
 	glUseProgram(pointProgram);
