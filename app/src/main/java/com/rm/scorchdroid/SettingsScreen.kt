@@ -245,14 +245,29 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             style = MaterialTheme.typography.bodySmall,
                         )
 
-                        SwitchRow(
-                            "Scorched3D's ocean",
-                            "Its own wave spectrum, driven by the round's wind, instead of " +
-                                "this port's two rolling waves. Costs a little CPU",
-                            settings.originalOcean,
+                        // The one water setting. The sea is Scorched3D's own
+                        // at every position; this is how finely it is drawn
+                        // and how often it moves, which are its only costs.
+                        SliderRow(
+                            "Water detail",
+                            when (settings.waterDetail) {
+                                0 -> "Full"
+                                1 -> "Half"
+                                else -> "Quarter"
+                            },
+                            settings.waterDetail.toFloat(),
+                            0f..2f,
                         ) {
-                            settings.updateOriginalOcean(it)
+                            settings.updateWaterDetail(it.roundToInt())
                         }
+                        Text(
+                            "How finely Scorched3D's sea is drawn: its own wave spectrum, " +
+                                "driven by the round's wind, at its own 2-unit grid and 24 " +
+                                "wave steps a second, or at half or a quarter of each for a " +
+                                "slower device.",
+                            color = Color.White.copy(alpha = 0.55f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
 
                         // The sun's shadow map. Its own row rather than folded
                         // into another setting because it is the one here that

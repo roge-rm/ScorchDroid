@@ -2698,33 +2698,77 @@ static void testOceanWaves()
 	check(neighbourDiff * 2.0f < randomDiff,
 		"neighbouring points are much closer than distant ones - it is a surface, not noise");
 
-	// The slopes have to agree with the heights they came from, or the
-	// lighting will not match the shape. Compared by correlation rather than
-	// by magnitude: the slopes are exact (the spectrum is differentiated
-	// analytically, by multiplying by ik) while a central difference across
-	// one cell badly understates any wave near the grid's own resolution, so
-	// the two agree in direction far better than in size. Measured: 0.89 in
-	// the shortest-wave case and 0.98 in the longest.
-	const float cell = ScorchDroidOcean::kTileLength / (float) n;
-	double sumA = 0.0, sumB = 0.0, sumAA = 0.0, sumBB = 0.0, sumAB = 0.0;
-	int samples = 0;
-	for (int y = 1; y < n - 1; y++)
+	// W6: the horizontal displacement, upstream's compute_displacements(-2).
+	// It is a real, zero-mean field like the height, and its size is set
+	// by upstream's own lambda of 2 - a point moves sideways by about
+	// twice what it rises. A wrong sign in the -i*k/|k| term gives a field
+	// the same size that pushes points *away* from the crests, so the
+	// direction is checked too. For one wave A cos(kx) the displacement
+	// comes out as -2A sin(kx) and the gradient as -Ak sin(kx): the same
+	// sign, so where the surface falls away along +x the point is pulled
+	// back towards -x, where the crest is. Positively correlated, then.
 	{
-		for (int x = 1; x < n - 1; x++)
+		float dispPeak = 0.0f, meanX = 0.0f, meanZ = 0.0f;
+		for (size_t i = 0; i < tile.dispX.size(); i++)
 		{
-			const double fd =
-				(tile.height[y * n + x + 1] - tile.height[y * n + x - 1]) / (2.0 * cell);
-			const double analytic = tile.slopeX[y * n + x];
-			sumA += fd; sumB += analytic;
-			sumAA += fd * fd; sumBB += analytic * analytic; sumAB += fd * analytic;
-			samples++;
+			dispPeak = std::max(dispPeak, std::max(fabsf(tile.dispX[i]), fabsf(tile.dispZ[i])));
+			meanX += tile.dispX[i];
+			meanZ += tile.dispZ[i];
 		}
+		meanX /= (float) tile.dispX.size();
+		meanZ /= (float) tile.dispZ.size();
+		printf("    peak height %.2f, peak displacement %.2f\n", peak, dispPeak);
+		check(dispPeak > peak * 1.0f && dispPeak < peak * 4.0f,
+			"the choppy displacement is about twice the height, upstream's lambda of 2");
+		check(fabsf(meanX) < 0.05f && fabsf(meanZ) < 0.05f,
+			"...and has no net drift");
+
+		const float cell = ScorchDroidOcean::kTileLength / (float) n;
+		double sumAB = 0.0, sumAA = 0.0, sumBB = 0.0;
+		for (int y = 0; y < n; y++)
+		{
+			for (int x = 1; x < n - 1; x++)
+			{
+				const double grad =
+					(tile.height[y * n + x + 1] - tile.height[y * n + x - 1]) / (2.0 * cell);
+				const double d = tile.dispX[y * n + x];
+				sumAB += grad * d; sumAA += grad * grad; sumBB += d * d;
+			}
+		}
+		const double towardsCrest = sumAB / sqrt(sumAA * sumBB);
+		printf("    displacement/gradient correlation %.2f\n", towardsCrest);
+		check(towardsCrest > 0.3,
+			"...and pulls points towards the crests, not away from them");
 	}
-	const double numerator = samples * sumAB - sumA * sumB;
-	const double denominator =
-		sqrt((samples * sumAA - sumA * sumA) * (samples * sumBB - sumB * sumB));
-	check(denominator > 0.0 && numerator / denominator > 0.8,
-		"the slopes agree with a finite difference of the heights they came from");
+
+	// The normals have to be those of the surface the points actually
+	// make. They are built from the displaced neighbours as Water2Patch
+	// builds them, so the check is against the same construction done
+	// the long way: a flat tile gives straight-up normals, and on the real
+	// tile the normal's x component runs against the height gradient
+	// (a surface rising along +x leans its normal towards -x).
+	{
+		int upright = 0;
+		double sumAB = 0.0, sumAA = 0.0, sumBB = 0.0;
+		const float cell = ScorchDroidOcean::kTileLength / (float) n;
+		for (int y = 0; y < n; y++)
+		{
+			for (int x = 1; x < n - 1; x++)
+			{
+				const size_t i = (size_t) y * n + x;
+				const float len = sqrtf(tile.normalX[i] * tile.normalX[i] +
+					tile.normalY[i] * tile.normalY[i] + tile.normalZ[i] * tile.normalZ[i]);
+				if (fabsf(len - 1.0f) < 0.01f && tile.normalY[i] > 0.0f) upright++;
+				const double grad =
+					(tile.height[y * n + x + 1] - tile.height[y * n + x - 1]) / (2.0 * cell);
+				const double nx = tile.normalX[i];
+				sumAB += grad * nx; sumAA += grad * grad; sumBB += nx * nx;
+			}
+		}
+		check(upright == n * (n - 2), "every normal is unit length and points up");
+		check(sumAB / sqrt(sumAA * sumBB) < -0.7,
+			"the normals lean away from the rising side of each wave");
+	}
 
 	// Time only rotates each wave's phase, so the sea moves but keeps its
 	// character - and it repeats on upstream's own cycle.

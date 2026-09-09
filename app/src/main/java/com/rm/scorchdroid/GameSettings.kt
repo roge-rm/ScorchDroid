@@ -249,17 +249,19 @@ class GameSettings(context: Context) {
     }
 
     /**
-     * W4: which sea to draw. False is this port's two sine waves; true is
-     * Scorched3D's own ocean - a Tessendorf spectrum inverse-FFTed into a
-     * tile, which is what gives it wind-driven, irregular crests.
+     * Water detail: how finely Scorched3D's sea is drawn. 0 is Full - its
+     * own 2-unit grid and its own 24 wave phases a second; 1 is Half (4
+     * units, 12/s); 2 is Quarter (8 units, 6/s). The sea itself is the same
+     * at every position - the Tessendorf spectrum upstream generates, driven
+     * by the round's wind - only its cost changes.
      */
-    var originalOcean by mutableStateOf(prefs.getBoolean(KEY_OCEAN, false))
+    var waterDetail by mutableIntStateOf(prefs.getInt(KEY_WATER_DETAIL, 0))
         private set
 
-    fun updateOriginalOcean(value: Boolean) {
-        originalOcean = value
-        prefs.edit().putBoolean(KEY_OCEAN, value).apply()
-        NativeBridge.setOceanStyle(if (value) 1 else 0)
+    fun updateWaterDetail(value: Int) {
+        waterDetail = value.coerceIn(0, 2)
+        prefs.edit().putInt(KEY_WATER_DETAIL, waterDetail).apply()
+        NativeBridge.setWaterDetail(waterDetail)
     }
 
     /**
@@ -336,7 +338,7 @@ class GameSettings(context: Context) {
         NativeBridge.setRenderOptions(showTrees, showFog)
         NativeBridge.setSightStyle(if (originalSight) 1 else 0)
         NativeBridge.setTerrainDetail(terrainDetail)
-        NativeBridge.setOceanStyle(if (originalOcean) 1 else 0)
+        NativeBridge.setWaterDetail(waterDetail)
         NativeBridge.setReflectionStyle(reflectionLevel)
         NativeBridge.setEffectsDetail(effectsDetail)
         NativeBridge.setShadowDetail(shadowDetail)
@@ -363,7 +365,7 @@ class GameSettings(context: Context) {
         const val KEY_FOG = "graphics.fog"
         const val KEY_SIGHT = "graphics.originalSight"
         const val KEY_DETAIL = "graphics.terrainDetail"
-        const val KEY_OCEAN = "graphics.originalOcean"
+        const val KEY_WATER_DETAIL = "graphics.waterDetail"
         // A new key, not the old boolean one: this started as an on/off
         // switch, and reading an existing Boolean with getInt throws
         // ClassCastException on the first launch after the upgrade - which
