@@ -13,6 +13,14 @@ plus the settings screen.
 Steps are ordered so that each one is visible on its own and can be verified
 before the next. W5-W12 continue the W-numbering of the earlier water work.
 
+**Status (2026-09-09): all steps done**, one commit each - W5 05aa08c, W9
+674e130, W8 00a33d5, W6+W7 46bddea (which also retired the sine sea and its
+switch, since the fine detail needs the tile's normal texture from that step
+on), W10a 3a2de54, W10c 9000467, W11 the commit after. W12 needed nothing
+beyond the update rate following the slider. Verified on the emulator per
+step: shader compiles, the "Ocean tile uploaded" and "Water grid" log lines
+carry the expected numbers, screenshots at each stage.
+
 ## Settings
 
 Two controls, both under "Scorched3D's ocean" in Settings.
@@ -236,11 +244,13 @@ half way to the shore, and 8 units drops every wavelength under 16.
 
 - Inner grid over the map plus 64 units at the Water-detail cell size. Sizes:
 
-  | Cell | Triangles, 256-unit map |
+  | Cell | Triangles, 256-unit map (inner grid 384 units square) |
   |---|---|
-  | 2 | ~295k |
-  | 4 | ~74k |
-  | 8 | ~18k |
+  | 2 | ~74k |
+  | 4 | ~18k |
+  | 8 | ~4.6k |
+
+  The 16-unit outer ring to the far plane adds about 36k at any setting.
 
 - Outer ring to the far plane at 16-unit cells, also displaced (the tile
   repeats, so it needs no fade). The inner extent is a multiple of 16 and the

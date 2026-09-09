@@ -192,8 +192,9 @@ namespace
 	bool   skyBuilt = false;
 	ScorchDroidSky::Description skyDescription;
 
-	// M6 water surface: one quad at the landscape's own water height.
-	GLuint waterProgram = 0, waterVao = 0, waterVbo = 0;
+	// The water surface: upstream's sea, see the notes at oceanTexture and
+	// waterGridEbo below.
+	GLuint waterProgram = 0;
 	GLint  waterMvpLoc = -1, waterUpwellTopLoc = -1, waterUpwellBotLoc = -1;
 	GLint  waterHeightLoc = -1, waterSunDiffuseLoc = -1;
 	GLint  waterNoise0Loc = -1, waterNoise1Loc = -1;
@@ -307,10 +308,22 @@ namespace
 	// landscape so it holds for a round.
 	float  waterWind2SpeedOffset = 0.0f, waterWind2JitterX = 0.0f, waterWind2JitterZ = 0.0f;
 	int oceanUploadLogsLeft = 3;
-	int    waterGridVertexCount = 0;
-	int    waterSkirtVertexCount = 0;
-	float  waveCentreX = 0.0f, waveCentreZ = 0.0f, waveReach = 1.0f;
-	GLint  waterWaveAmpLoc = -1, waterWaveCentreLoc = -1, waterWaveReachLoc = -1;
+	// W11: the surface is one indexed mesh in two parts. The inner grid
+	// covers the map and 64 units around it at the Water detail cell size
+	// (2 units at Full - upstream's own vertex spacing - 4 at Half, 8 at
+	// Quarter). The outer ring runs from there to the far plane at 16-unit
+	// cells. Both are displaced by the tile; the seam between them is
+	// closed with stitch fans (each 16-unit outer edge fanned to the inner
+	// vertices along it) so that every triangle edge is shared exactly and
+	// a wave cannot open a crack. No amplitude fade anywhere - upstream
+	// never fades - and the far ring samples a coarser mip of the tile so
+	// that its 16-unit vertices see a smoothed sea rather than every
+	// eighth texel of a rough one.
+	GLuint waterGridEbo = 0;
+	int    waterInnerIndexCount = 0, waterOuterIndexCount = 0;
+	int    waterGridBuiltForDetail = -1;
+	float  waterInnerLod = 0.0f;
+	GLint  waterWaveAmpLoc = -1, waterWaveLodLoc = -1;
 	GLint  waterSunDirLoc = -1;
 	GLint  waterMapSizeLoc = -1;
 
@@ -1255,8 +1268,10 @@ namespace
 		// of about 4 and the waves would stop moving.
 		uniform highp float uTime;
 		uniform float uWaveAmplitude;
-		uniform vec2  uWaveCentre;
-		uniform float uWaveReach;
+		// Which mip of the tile this draw's vertices read: 0 for a 2-unit
+		// grid, one more for each doubling of the cell, so a coarse grid
+		// sees a sea smoothed to what it can carry.
+		uniform float uWaveLod;
 		out vec2 vWorld;
 		out vec3 vWorldPos;
 		out float vViewDepth;
@@ -1287,19 +1302,14 @@ namespace
 
 		void main() {
 			vWorld = aPosition.xz;
-
-			// Amplitude falls to nothing at the edge of the displaced grid,
-			// so it meets the flat skirt beyond it without a seam - the
-			// skirt is one big quad and could never match a moved edge.
-			float edge = distance(vWorld, uWaveCentre) / uWaveReach;
-			float amp = uWaveAmplitude * (1.0 - clamp(edge, 0.0, 1.0));
+			float amp = uWaveAmplitude;
 
 			vec3 world = aPosition;
 			// textureLod, not texture: a vertex shader has no derivatives
 			// to pick a mip level from, and ES3 requires the level to be
 			// given explicitly here.
 			vec2 tile = vWorld / uWaveTileLength;
-			vec3 wave = textureLod(uWaveTex, tile, 0.0).rgb;
+			vec3 wave = textureLod(uWaveTex, tile, uWaveLod).rgb;
 			// Up by the height and sideways by the choppy displacement -
 			// upstream's Water2Patch places each vertex at exactly this
 			// sum, which is what makes crests sharp and troughs broad.
@@ -1308,7 +1318,7 @@ namespace
 			// The normal of the displaced surface, built on the CPU from
 			// the displaced neighbours as Water2Patch builds it; leaned
 			// back towards straight up by the same fade the height takes.
-			vec3 n0 = textureLod(uWaveNormalTex, tile, 0.0).rgb * 2.0 - 1.0;
+			vec3 n0 = textureLod(uWaveNormalTex, tile, uWaveLod).rgb * 2.0 - 1.0;
 			vNormal = normalize(vec3(n0.x * amp, n0.y, n0.z * amp));
 
 			vWorldPos = world;
@@ -2708,6 +2718,35 @@ namespace
 		if (!haveNew) return;
 
 		const int n = ScorchDroidOcean::kResolution;
+		// Mip levels 1-3 of the height tile (64, 32, 16 square), by box
+		// filter on the CPU. Not glGenerateMipmap: that needs a
+		// colour-renderable format, which RGB16F is not guaranteed to be on
+		// ES3. The outer ring's 16-unit vertices read level 3 (W11).
+		const int kHeightMips = 3;
+		static std::vector<float> mipLevels[kHeightMips];
+		{
+			const float *src = oceanUpload.data();
+			int size = n;
+			for (int level = 0; level < kHeightMips; level++) {
+				const int half = size / 2;
+				std::vector<float> &dst = mipLevels[level];
+				dst.resize((size_t) half * half * 3);
+				for (int y = 0; y < half; y++) {
+					for (int x = 0; x < half; x++) {
+						for (int c = 0; c < 3; c++) {
+							const float sum =
+								src[((size_t) (2 * y) * size + 2 * x) * 3 + c] +
+								src[((size_t) (2 * y) * size + 2 * x + 1) * 3 + c] +
+								src[((size_t) (2 * y + 1) * size + 2 * x) * 3 + c] +
+								src[((size_t) (2 * y + 1) * size + 2 * x + 1) * 3 + c];
+							dst[((size_t) y * half + x) * 3 + c] = sum * 0.25f;
+						}
+					}
+				}
+				src = dst.data();
+				size = half;
+			}
+		}
 		if (oceanTexture == 0) {
 			glGenTextures(1, &oceanTexture);
 			glBindTexture(GL_TEXTURE_2D, oceanTexture);
@@ -2716,9 +2755,12 @@ namespace
 			// 32-bit float formats are not.
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, n, n, 0, GL_RGB, GL_FLOAT, nullptr);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, kHeightMips);
+			for (int level = 0, size = n; level <= kHeightMips; level++, size /= 2) {
+				glTexImage2D(GL_TEXTURE_2D, level, GL_RGB16F, size, size, 0, GL_RGB, GL_FLOAT, nullptr);
+			}
 		}
 		if (oceanNormalTexture == 0) {
 			glGenTextures(1, &oceanNormalTexture);
@@ -2735,6 +2777,10 @@ namespace
 		}
 		glBindTexture(GL_TEXTURE_2D, oceanTexture);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, GL_RGB, GL_FLOAT, oceanUpload.data());
+		for (int level = 1, size = n / 2; level <= kHeightMips; level++, size /= 2) {
+			glTexSubImage2D(GL_TEXTURE_2D, level, 0, 0, size, size, GL_RGB, GL_FLOAT,
+							mipLevels[level - 1].data());
+		}
 		glBindTexture(GL_TEXTURE_2D, oceanNormalTexture);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, GL_RGBA, GL_UNSIGNED_BYTE, oceanNormalUpload.data());
 		glGenerateMipmap(GL_TEXTURE_2D);
@@ -2838,6 +2884,134 @@ namespace
 			 breakerVertexCount[0] / 6, breakerVertexCount[1] / 6);
 	}
 
+	// W11: the surface mesh, at the given Water detail. See the note at
+	// waterGridEbo for the shape of it.
+	void buildWaterGrid(int detail)
+	{
+		const float cell = (detail <= 0) ? 2.0f : (detail == 1 ? 4.0f : 8.0f);
+		waterInnerLod = (detail <= 0) ? 0.0f : (detail == 1 ? 1.0f : 2.0f);
+		const float outerCell = 16.0f;
+
+		// The inner rectangle: the map and 64 units around it, on the
+		// 16-unit lattice so the outer ring's vertices land on its edge.
+		const float ix0 = -64.0f, iz0 = -64.0f;
+		const float ix1 = ceilf((mapWidthUnits + 64.0f) / outerCell) * outerCell;
+		const float iz1 = ceilf((mapHeightUnits + 64.0f) / outerCell) * outerCell;
+		const int inx = (int) ((ix1 - ix0) / cell), inz = (int) ((iz1 - iz0) / cell);
+		const int perOuter = (int) (outerCell / cell);   // inner vertices per outer edge
+
+		// The outer extent: out to the far clip plane on every side, as
+		// before - the horizon is where the far plane clips the sea, so
+		// the surface must reach it.
+		const float margin = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
+		const int outLeft = (int) ceilf((ix0 + margin) / outerCell);
+		const int outRight = (int) ceilf((margin + mapWidthUnits - ix1) / outerCell);
+		const int outNear = (int) ceilf((iz0 + margin) / outerCell);
+		const int outFar = (int) ceilf((margin + mapHeightUnits - iz1) / outerCell);
+		const float ox0 = ix0 - outLeft * outerCell, oz0 = iz0 - outNear * outerCell;
+		const int onx = outLeft + (int) ((ix1 - ix0) / outerCell) + outRight;
+		const int onz = outNear + (int) ((iz1 - iz0) / outerCell) + outFar;
+
+		std::vector<float> verts;
+		verts.reserve((size_t) (inx + 1) * (inz + 1) * 3 + (size_t) (onx + 1) * (onz + 1) * 3);
+		auto addVertex = [&](float x, float z) {
+			verts.push_back(x);
+			verts.push_back(waterHeight);
+			verts.push_back(z);
+			return (unsigned int) (verts.size() / 3 - 1);
+		};
+
+		// Inner vertices, row-major.
+		for (int gz = 0; gz <= inz; gz++) {
+			for (int gx = 0; gx <= inx; gx++) addVertex(ix0 + gx * cell, iz0 + gz * cell);
+		}
+		auto innerIndex = [&](int gx, int gz) { return (unsigned int) (gz * (inx + 1) + gx); };
+
+		// Outer lattice vertices: allocated on demand, and a lattice point
+		// on the inner rectangle's edge *is* the inner vertex there.
+		std::vector<int> outerTable((size_t) (onx + 1) * (onz + 1), -1);
+		auto outerIndex = [&](int ox, int oz) -> unsigned int {
+			const float x = ox0 + ox * outerCell, z = oz0 + oz * outerCell;
+			if (x >= ix0 && x <= ix1 && z >= iz0 && z <= iz1) {
+				return innerIndex((int) ((x - ix0) / cell), (int) ((z - iz0) / cell));
+			}
+			int &slot = outerTable[(size_t) oz * (onx + 1) + ox];
+			if (slot < 0) slot = (int) addVertex(x, z);
+			return (unsigned int) slot;
+		};
+
+		std::vector<unsigned int> indices;
+		indices.reserve((size_t) inx * inz * 6 + (size_t) onx * onz * 6);
+		for (int gz = 0; gz < inz; gz++) {
+			for (int gx = 0; gx < inx; gx++) {
+				const unsigned int a = innerIndex(gx, gz), b = innerIndex(gx + 1, gz);
+				const unsigned int c = innerIndex(gx, gz + 1), d = innerIndex(gx + 1, gz + 1);
+				indices.insert(indices.end(), { a, c, b, b, c, d });
+			}
+		}
+		waterInnerIndexCount = (int) indices.size();
+
+		// The outer ring. A cell strictly inside the inner rectangle is
+		// skipped; one with an edge on its boundary is a stitch fan; the
+		// rest are plain quads.
+		auto stitch = [&](unsigned int f0, unsigned int f1, int sx, int sz, int dx, int dz) {
+			// Seam vertices s_0..s_k run from inner (sx, sz) in steps of
+			// (dx, dz); f0 sits beside s_0 and f1 beside s_k.
+			const int k = perOuter;
+			std::vector<unsigned int> seam;
+			for (int j = 0; j <= k; j++) seam.push_back(innerIndex(sx + j * dx, sz + j * dz));
+			for (int j = 0; j < k; j++) {
+				const unsigned int far = (j < k / 2) ? f0 : f1;
+				indices.insert(indices.end(), { seam[j], seam[j + 1], far });
+			}
+			indices.insert(indices.end(), { f0, seam[k / 2], f1 });
+		};
+		for (int oz = 0; oz < onz; oz++) {
+			for (int ox = 0; ox < onx; ox++) {
+				const float x0 = ox0 + ox * outerCell, x1 = x0 + outerCell;
+				const float z0 = oz0 + oz * outerCell, z1 = z0 + outerCell;
+				const bool inside = x0 >= ix0 && x1 <= ix1 && z0 >= iz0 && z1 <= iz1;
+				if (inside) continue;
+				const unsigned int a = outerIndex(ox, oz), b = outerIndex(ox + 1, oz);
+				const unsigned int c = outerIndex(ox, oz + 1), d = outerIndex(ox + 1, oz + 1);
+				// An edge on the seam: both of its ends on the inner
+				// boundary and the cell outside it.
+				const bool onLeft = (x1 == ix0) && z0 >= iz0 && z1 <= iz1;    // cell's right edge is the seam
+				const bool onRight = (x0 == ix1) && z0 >= iz0 && z1 <= iz1;   // left edge
+				const bool onNear = (z1 == iz0) && x0 >= ix0 && x1 <= ix1;    // far edge (z1)
+				const bool onFar = (z0 == iz1) && x0 >= ix0 && x1 <= ix1;     // near edge (z0)
+				if (onLeft) {
+					stitch(a, c, (int) ((x1 - ix0) / cell), (int) ((z0 - iz0) / cell), 0, 1);
+				} else if (onRight) {
+					stitch(b, d, (int) ((x0 - ix0) / cell), (int) ((z0 - iz0) / cell), 0, 1);
+				} else if (onNear) {
+					stitch(a, b, (int) ((x0 - ix0) / cell), (int) ((z1 - iz0) / cell), 1, 0);
+				} else if (onFar) {
+					stitch(c, d, (int) ((x0 - ix0) / cell), (int) ((z0 - iz0) / cell), 1, 0);
+				} else {
+					indices.insert(indices.end(), { a, c, b, b, c, d });
+				}
+			}
+		}
+		waterOuterIndexCount = (int) indices.size() - waterInnerIndexCount;
+
+		if (waterGridVao == 0) glGenVertexArrays(1, &waterGridVao);
+		if (waterGridVbo == 0) glGenBuffers(1, &waterGridVbo);
+		if (waterGridEbo == 0) glGenBuffers(1, &waterGridEbo);
+		glBindVertexArray(waterGridVao);
+		glBindBuffer(GL_ARRAY_BUFFER, waterGridVbo);
+		glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr) (verts.size() * sizeof(float)), verts.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, waterGridEbo);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr) (indices.size() * sizeof(unsigned int)),
+					 indices.data(), GL_STATIC_DRAW);
+		glBindVertexArray(0);
+		waterGridBuiltForDetail = detail;
+		LOGI("Water grid: detail %d, cell %.0f, %d vertices, %d + %d triangles",
+			 detail, cell, (int) (verts.size() / 3), waterInnerIndexCount / 3, waterOuterIndexCount / 3);
+	}
+
 	// M6 water: reads the landscape's own water definition and builds the
 	// surface quad. Called each frame; does nothing after the first attempt
 	// for a given landscape (waterBuilt is cleared when one is thrown away,
@@ -2886,98 +3060,7 @@ namespace
 		// port drew at showed the drowned terrain through the whole sea.
 		waterAlpha = std::min(1.0f, std::max(0.0f, water->waterTransparency));
 
-		// The surface runs well past the landscape on every side. Upstream
-		// does the same (its water plane is far larger than the map), and
-		// it doubles as the fix for the terrain patch's visible edge at low
-		// camera angles - past the shore there is now sea rather than a
-		// cliff into nothing.
-		// Out as far as the far clip plane (see nativeOnDrawFrame). Two map
-		// widths was not enough: the surface simply stopped mid-view and
-		// read as "the sea ends there". Taken out to the far plane the edge
-		// is clipped rather than seen, which is what a sea horizon looks
-		// like.
-		const float margin = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
-		const float x0 = -margin, x1 = mapWidthUnits + margin;
-		const float z0 = -margin, z1 = mapHeightUnits + margin;
-
-		// The skirt is a *ring* around the displaced grid, not a sheet
-		// under it. Drawn as one quad underneath, the two surfaces are
-		// coplanar wherever the wave amplitude has faded to zero - they
-		// z-fight, and being translucent they also blend twice and come out
-		// too dark. Leaving a hole for the grid avoids both by construction.
-		waveCentreX = mapWidthUnits * 0.5f;
-		waveCentreZ = mapHeightUnits * 0.5f;
-		waveReach = std::max(mapWidthUnits, mapHeightUnits) * 0.5f + 400.0f;
-		const float ix0 = waveCentreX - waveReach, ix1 = waveCentreX + waveReach;
-		const float iz0 = waveCentreZ - waveReach, iz1 = waveCentreZ + waveReach;
-
-		std::vector<float> quad;
-		auto addSkirtQuad = [&](float ax, float az, float bx, float bz) {
-			const float corner[6][2] = {
-				{ ax, az }, { ax, bz }, { bx, az },
-				{ bx, az }, { ax, bz }, { bx, bz },
-			};
-			for (int i = 0; i < 6; i++) {
-				quad.push_back(corner[i][0]);
-				quad.push_back(waterHeight);
-				quad.push_back(corner[i][1]);
-			}
-		};
-		addSkirtQuad(x0, z0, x1, iz0);   // near side
-		addSkirtQuad(x0, iz1, x1, z1);   // far side
-		addSkirtQuad(x0, iz0, ix0, iz1); // left
-		addSkirtQuad(ix1, iz0, x1, iz1); // right
-		waterSkirtVertexCount = (int) (quad.size() / 3);
-
-		if (waterVao == 0) glGenVertexArrays(1, &waterVao);
-		if (waterVbo == 0) glGenBuffers(1, &waterVbo);
-		glBindVertexArray(waterVao);
-		glBindBuffer(GL_ARRAY_BUFFER, waterVbo);
-		glBufferData(GL_ARRAY_BUFFER, quad.size() * sizeof(float), quad.data(), GL_STATIC_DRAW);
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
-		glBindVertexArray(0);
-
-		// The displaced part of the surface: a grid over the map and a
-		// margin, which is everywhere the waves can be read anyway - past
-		// that the distance fade has already flattened them.
-		//
-		// Cell size is chosen against the wave, not picked: the longer of
-		// the two has a wavelength near 125 units and the shorter near 70,
-		// so 8 units per cell puts ~9 vertices across the tighter one. Much
-		// coarser and the crests turn into facets.
-		const float cell = 8.0f;
-		const int cells = std::min((int) ((waveReach * 2.0f) / cell), 200);
-		const float step = (waveReach * 2.0f) / (float) cells;
-		const float gx0 = ix0, gz0 = iz0;
-
-		std::vector<float> grid;
-		grid.reserve((size_t) cells * cells * 6 * 3);
-		for (int gz = 0; gz < cells; gz++) {
-			for (int gx = 0; gx < cells; gx++) {
-				const float x0 = gx0 + gx * step, x1 = x0 + step;
-				const float z0 = gz0 + gz * step, z1 = z0 + step;
-				const float corner[6][2] = {
-					{ x0, z0 }, { x0, z1 }, { x1, z0 },
-					{ x1, z0 }, { x0, z1 }, { x1, z1 },
-				};
-				for (int i = 0; i < 6; i++) {
-					grid.push_back(corner[i][0]);
-					grid.push_back(waterHeight);
-					grid.push_back(corner[i][1]);
-				}
-			}
-		}
-		waterGridVertexCount = (int) (grid.size() / 3);
-
-		if (waterGridVao == 0) glGenVertexArrays(1, &waterGridVao);
-		if (waterGridVbo == 0) glGenBuffers(1, &waterGridVbo);
-		glBindVertexArray(waterGridVao);
-		glBindBuffer(GL_ARRAY_BUFFER, waterGridVbo);
-		glBufferData(GL_ARRAY_BUFFER, grid.size() * sizeof(float), grid.data(), GL_STATIC_DRAW);
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
-		glBindVertexArray(0);
+		buildWaterGrid(g_waterDetail.load());
 
 		// The landscape's foam bitmap (texdefault.xml: data/textures/foam.png,
 		// 128 square - upstream insists on exactly that size, since it also
@@ -4544,8 +4627,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterFogColorLoc = glGetUniformLocation(waterProgram, "uFogColor");
 	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
 	waterWaveAmpLoc = glGetUniformLocation(waterProgram, "uWaveAmplitude");
-	waterWaveCentreLoc = glGetUniformLocation(waterProgram, "uWaveCentre");
-	waterWaveReachLoc = glGetUniformLocation(waterProgram, "uWaveReach");
+	waterWaveLodLoc = glGetUniformLocation(waterProgram, "uWaveLod");
 	waterSunDirLoc = glGetUniformLocation(waterProgram, "uSunDir");
 	waterMapSizeLoc = glGetUniformLocation(waterProgram, "uMapSize");
 
@@ -4653,7 +4735,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 
 	waterBuilt = false;
 	waterVisible = false;
-	waterVao = waterVbo = waterGridVao = waterGridVbo = waterFoamMaskTexture = 0;
+	waterGridVao = waterGridVbo = waterGridEbo = waterFoamMaskTexture = 0;
+	waterGridBuiltForDetail = -1;
 	breakerVao = breakerVbo = breakerTexture[0] = breakerTexture[1] = 0;
 	breakerVertexCount[0] = breakerVertexCount[1] = 0;
 
@@ -6647,27 +6730,28 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// to look up through it from a valley floor is worth more than the
 		// culling.
 		glDisable(GL_CULL_FACE);
-		glUniform2f(waterWaveCentreLoc, waveCentreX, waveCentreZ);
-		glUniform1f(waterWaveReachLoc, waveReach);
 		glUniform3f(waterSunDirLoc,
 					skyDescription.sunDirection[0],
 					skyDescription.sunDirection[2],
 					-skyDescription.sunDirection[1]);
 
-		// The skirt first, undisplaced - it is one quad, so a wave on it
-		// would tilt the whole sea.
-		glUniform1f(waterWaveAmpLoc, 0.0f);
-		glBindVertexArray(waterVao);
-		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, waterSkirtVertexCount);
-
-		// Then the grid inside the ring, which does move. Its amplitude
-		// fades to zero at its own edge, so it meets the skirt flush.
-		// The ocean tile is already in world units at upstream's own
-		// scale (OceanWaves.h), so it is drawn at 1.
-		if (waterGridVertexCount > 0 && oceanTexture != 0) {
+		// The mesh, rebuilt if the Water detail has changed since. The
+		// ocean tile is already in world units at upstream's own scale
+		// (OceanWaves.h), so it is drawn at 1. Two draws from one index
+		// buffer: the inner grid at its own mip, the outer ring at the
+		// 16-unit one.
+		if (waterGridBuiltForDetail != g_waterDetail.load()) buildWaterGrid(g_waterDetail.load());
+		if (waterInnerIndexCount > 0 && oceanTexture != 0) {
 			glUniform1f(waterWaveAmpLoc, 1.0f);
 			glBindVertexArray(waterGridVao);
-			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, waterGridVertexCount);
+			glUniform1f(waterWaveLodLoc, waterInnerLod);
+			frameDrawCalls++;
+			glDrawElements(GL_TRIANGLES, waterInnerIndexCount, GL_UNSIGNED_INT, (void *) 0);
+			glUniform1f(waterWaveLodLoc, 3.0f);
+			frameDrawCalls++;
+			glDrawElements(GL_TRIANGLES, waterOuterIndexCount, GL_UNSIGNED_INT,
+						   (void *) (waterInnerIndexCount * sizeof(unsigned int)));
+			glBindVertexArray(0);
 		}
 
 		glDisable(GL_BLEND);
