@@ -3051,35 +3051,6 @@ namespace
 		if (!haveNew) return;
 
 		const int n = ScorchDroidOcean::kResolution;
-		// Mip levels 1-3 of the height tile (64, 32, 16 square), by box
-		// filter on the CPU. Not glGenerateMipmap: that needs a
-		// colour-renderable format, which RGB16F is not guaranteed to be on
-		// ES3. The outer ring's 16-unit vertices read level 3 (W11).
-		const int kHeightMips = 3;
-		static std::vector<float> mipLevels[kHeightMips];
-		{
-			const float *src = oceanUpload.data();
-			int size = n;
-			for (int level = 0; level < kHeightMips; level++) {
-				const int half = size / 2;
-				std::vector<float> &dst = mipLevels[level];
-				dst.resize((size_t) half * half * 3);
-				for (int y = 0; y < half; y++) {
-					for (int x = 0; x < half; x++) {
-						for (int c = 0; c < 3; c++) {
-							const float sum =
-								src[((size_t) (2 * y) * size + 2 * x) * 3 + c] +
-								src[((size_t) (2 * y) * size + 2 * x + 1) * 3 + c] +
-								src[((size_t) (2 * y + 1) * size + 2 * x) * 3 + c] +
-								src[((size_t) (2 * y + 1) * size + 2 * x + 1) * 3 + c];
-							dst[((size_t) y * half + x) * 3 + c] = sum * 0.25f;
-						}
-					}
-				}
-				src = dst.data();
-				size = half;
-			}
-		}
 		if (oceanTexture == 0) {
 			glGenTextures(1, &oceanTexture);
 			glBindTexture(GL_TEXTURE_2D, oceanTexture);
@@ -3088,12 +3059,13 @@ namespace
 			// 32-bit float formats are not.
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			// No mip chain: this texture is only ever read at level 0. A
+			// CPU-built chain read at level 3 by the far ring came out as
+			// a white sea on a phone (the emulator's software GL accepted
+			// it), so the ring reads level 0 like the inner grid.
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, kHeightMips);
-			for (int level = 0, size = n; level <= kHeightMips; level++, size /= 2) {
-				glTexImage2D(GL_TEXTURE_2D, level, GL_RGB16F, size, size, 0, GL_RGB, GL_FLOAT, nullptr);
-			}
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, n, n, 0, GL_RGB, GL_FLOAT, nullptr);
 		}
 		if (oceanNormalTexture == 0) {
 			glGenTextures(1, &oceanNormalTexture);
@@ -3110,10 +3082,6 @@ namespace
 		}
 		glBindTexture(GL_TEXTURE_2D, oceanTexture);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, GL_RGB, GL_FLOAT, oceanUpload.data());
-		for (int level = 1, size = n / 2; level <= kHeightMips; level++, size /= 2) {
-			glTexSubImage2D(GL_TEXTURE_2D, level, 0, 0, size, size, GL_RGB, GL_FLOAT,
-							mipLevels[level - 1].data());
-		}
 		glBindTexture(GL_TEXTURE_2D, oceanNormalTexture);
 		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, GL_RGBA, GL_UNSIGNED_BYTE, oceanNormalUpload.data());
 		glGenerateMipmap(GL_TEXTURE_2D);
@@ -7519,7 +7487,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glUniform1f(waterWaveLodLoc, waterInnerLod);
 			frameDrawCalls++;
 			glDrawElements(GL_TRIANGLES, waterInnerIndexCount, GL_UNSIGNED_INT, (void *) 0);
-			glUniform1f(waterWaveLodLoc, 3.0f);
+			// Level 0 for the ring as well - see the height texture's
+			// creation for why its mip chain is gone.
+			glUniform1f(waterWaveLodLoc, 0.0f);
 			frameDrawCalls++;
 			glDrawElements(GL_TRIANGLES, waterOuterIndexCount, GL_UNSIGNED_INT,
 						   (void *) (waterInnerIndexCount * sizeof(unsigned int)));
