@@ -24,6 +24,7 @@ std::mutex g_engineMutex;
 #include <target/TargetContainer.hpp>
 #include <engine/Simulator.hpp>
 #include <net/NetInterface.hpp>
+#include <RenderState.hpp>
 #include <common/Defines.hpp>
 #include <common/Clock.hpp>
 #include <common/Logger.hpp>
@@ -1575,16 +1576,31 @@ Java_com_rm_scorchdroid_NativeBridge_getGameStateDebugString(JNIEnv *env, jobjec
 
 // M3: drains sound events queued by SoundAction::simulate() (see
 // SoundEventQueue.h) since the last call, returning each as an absolute
-// file path the Kotlin side can hand straight to a MediaPlayer/SoundPool -
-// no vendored OGG/Vorbis/Oboe needed, since Android's own media stack
-// already decodes the .ogg files bundled in data/ (see the porting plan's
-// note on the audio-approach revisit).
+// file path the Kotlin side can hand straight to a SoundPool - no vendored
+// OGG/Vorbis/Oboe needed, since Android's own media stack already decodes
+// the files bundled in data/ (see the porting plan's note on the
+// audio-approach revisit).
+//
+// Each row is "path|gain", the same pipe-delimited convention getWeaponShop
+// and getScores use. The gain is not a preference - it is upstream's own
+// inverse-distance attenuation, computed against the live listener, and the
+// batch has already been cut to the channel budget with the nearest sounds
+// winning. That arbitration is what stops a weapon with dozens of
+// detonations turning into a wall of identical samples at full volume; see
+// SoundEventQueue.h for why it belongs there and not in the player.
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* this */) {
-    std::vector<std::string> events;
+    // The camera lives on the GL thread and has its own mutex, so it is read
+    // before g_engineMutex is taken rather than inside it - two locks held at
+    // once between these threads is exactly the shape a deadlock needs.
+    float listenerX = 0.0f, listenerY = 0.0f, listenerZ = 0.0f;
+    const bool haveListener = renderListenerEnginePosition(listenerX, listenerY, listenerZ);
+
+    std::vector<ScorchDroidAudio::SelectedSound> events;
     {
         std::lock_guard<std::mutex> lock(g_engineMutex);
-        events = ScorchDroidAudio::drainSoundEvents();
+        events = ScorchDroidAudio::drainSoundEvents(
+            haveListener, listenerX, listenerY, listenerZ);
     }
     // M13: one line per batch, naming the files, so "is that sound wired"
     // can be answered from logcat rather than by listening. Quiet when there
@@ -1592,20 +1608,26 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
     if (!events.empty()) {
         std::ostringstream names;
         for (size_t i = 0; i < events.size(); i++) {
-            const std::string &path = events[i];
+            const std::string &path = events[i].file;
             // Directory kept: upstream reuses basenames across categories
             // (shoot/small.wav and explosions/small.wav), and the difference
             // is exactly what this line exists to show.
             size_t slash = path.find_last_of('/');
             if (slash != std::string::npos && slash > 0) slash = path.find_last_of('/', slash - 1);
             names << (i ? ", " : "") << (slash == std::string::npos ? path : path.substr(slash + 1));
+            // The gain too, since "why was that quiet" and "why did that not
+            // play at all" are the two questions this mix raises, and both
+            // are answered by the number rather than by listening.
+            names << S3D::formatStringBuffer("(%.2f)", events[i].gain);
         }
         LOGI("Sound events: %s", names.str().c_str());
     }
 
     jobjectArray result = env->NewObjectArray((jsize) events.size(), env->FindClass("java/lang/String"), nullptr);
     for (size_t i = 0; i < events.size(); i++) {
-        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(events[i].c_str()));
+        const std::string row = events[i].file +
+            S3D::formatStringBuffer("|%.4f", events[i].gain);
+        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(row.c_str()));
     }
     return result;
 }
@@ -1744,7 +1766,9 @@ Java_com_rm_scorchdroid_NativeBridge_stopGame(JNIEnv *env, jobject /* this */) {
     // Drained rather than cleared: these are queues with no clear() of their
     // own, and draining is exactly as complete.
     ScorchDroidEffects::drain();
-    ScorchDroidAudio::drainSoundEvents();
+    // Flushed on teardown so a queued sound cannot arrive over the next
+    // game. No listener needed: nothing is played from here.
+    ScorchDroidAudio::drainSoundEvents(false, 0.0f, 0.0f, 0.0f);
     int a = 0, b = 0, c = 0, d = 0;
     ScorchDroidLandscape::takeDirtyRegion(a, b, c, d);
 

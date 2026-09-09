@@ -37,7 +37,7 @@ index 58e3c6d6..a7ea4f43 100644
  #include <engine/ActionController.hpp>
  #include <weapons/AccessoryStore.hpp>
  #include <tanket/TanketAccessories.hpp>
-@@ -243,6 +247,17 @@ void PlayMovesSimAction::tankFired(ScorchedContext &context,
+@@ -243,6 +247,19 @@ void PlayMovesSimAction::tankFired(ScorchedContext &context,
  				firedSound, tanket->getLife().getTargetPosition().asVector());
  		}
  	}
@@ -49,8 +49,10 @@ index 58e3c6d6..a7ea4f43 100644
 +	if (weapon->getParent()->getActivationSound() &&
 +		0 != strcmp("none", weapon->getParent()->getActivationSound()))
 +	{
-+		ScorchDroidAudio::pushSoundEvent(S3D::getModFile(S3D::formatStringBuffer(
-+			"data/wav/%s", weapon->getParent()->getActivationSound())));
++		Vector soundPosition = tanket->getLife().getTargetPosition().asVector();
++		ScorchDroidAudio::pushSoundEventAt(S3D::getModFile(S3D::formatStringBuffer(
++			"data/wav/%s", weapon->getParent()->getActivationSound())),
++			soundPosition[0], soundPosition[1], soundPosition[2]);
 +	}
  #endif // #ifndef S3D_SERVER
  
@@ -70,7 +72,7 @@ index 282c180d..8d056d90 100644
  #include <target/TargetContainer.hpp>
  #include <tanket/Tanket.hpp>
  #include <tanket/TanketAccessories.hpp>
-@@ -83,6 +87,14 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
+@@ -83,6 +87,16 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
  							batSound, tanket->getLife().getTargetPosition().asVector());
  					}
  				}
@@ -79,13 +81,15 @@ index 282c180d..8d056d90 100644
 +				if (battery->getActivationSound() &&
 +					0 != strcmp("none", battery->getActivationSound()))
 +				{
-+					ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
-+						S3D::formatStringBuffer("data/wav/%s", battery->getActivationSound())));
++					Vector soundPosition = tanket->getLife().getTargetPosition().asVector();
++					ScorchDroidAudio::pushSoundEventAt(S3D::getModFile(
++						S3D::formatStringBuffer("data/wav/%s", battery->getActivationSound())),
++						soundPosition[0], soundPosition[1], soundPosition[2]);
 +				}
  #endif
  			}
  		}
-@@ -112,6 +124,14 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
+@@ -112,6 +126,16 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
  								activateSound, tanket->getLife().getTargetPosition().asVector());
  						}
  					}
@@ -94,13 +98,15 @@ index 282c180d..8d056d90 100644
 +					if (accessory->getActivationSound() &&
 +						0 != strcmp("none", accessory->getActivationSound()))
 +					{
-+						ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
-+							S3D::formatStringBuffer("data/wav/%s", accessory->getActivationSound())));
++						Vector soundPosition = tanket->getLife().getTargetPosition().asVector();
++						ScorchDroidAudio::pushSoundEventAt(S3D::getModFile(
++							S3D::formatStringBuffer("data/wav/%s", accessory->getActivationSound())),
++							soundPosition[0], soundPosition[1], soundPosition[2]);
 +					}
  #endif
  				}
  			}
-@@ -150,6 +170,14 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
+@@ -150,6 +174,16 @@ bool TankDefenseSimAction::invokeAction(ScorchedContext &context)
  								paraSound, tanket->getLife().getTargetPosition().asVector());
  						}
  					}
@@ -109,8 +115,10 @@ index 282c180d..8d056d90 100644
 +					if (parachute->getActivationSound() &&
 +						0 != strcmp("none", parachute->getActivationSound()))
 +					{
-+						ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
-+							S3D::formatStringBuffer("data/wav/%s", parachute->getActivationSound())));
++						Vector soundPosition = tanket->getLife().getTargetPosition().asVector();
++						ScorchDroidAudio::pushSoundEventAt(S3D::getModFile(
++							S3D::formatStringBuffer("data/wav/%s", parachute->getActivationSound())),
++							soundPosition[0], soundPosition[1], soundPosition[2]);
 +					}
  #endif
  				}
@@ -130,7 +138,7 @@ index 93945c27..08c1ec69 100644
  #include <actions/Napalm.hpp>
  #include <common/Defines.hpp>
  #ifndef S3D_SERVER
-@@ -101,6 +105,14 @@ void WeaponNapalm::fireWeapon(ScorchedContext &context,
+@@ -101,6 +105,16 @@ void WeaponNapalm::fireWeapon(ScorchedContext &context,
  				expSound, position.asVector());
  		}
  	}
@@ -139,8 +147,10 @@ index 93945c27..08c1ec69 100644
 +	if (napalmSound_.c_str()[0] &&
 +		0 != strcmp(napalmSound_.c_str(), "none"))
 +	{
-+		ScorchDroidAudio::pushSoundEvent(S3D::getModFile(
-+			S3D::formatStringBuffer("data/wav/%s", napalmSound_.c_str())));
++		Vector soundPosition = position.asVector();
++		ScorchDroidAudio::pushSoundEventAt(S3D::getModFile(
++			S3D::formatStringBuffer("data/wav/%s", napalmSound_.c_str())),
++			soundPosition[0], soundPosition[1], soundPosition[2]);
 +	}
  #endif
  }

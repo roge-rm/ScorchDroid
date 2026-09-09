@@ -641,6 +641,7 @@ class MainActivity : AppCompatActivity() {
         // well as stopped, so the next game reloads rather than assuming the
         // same landscape came back.
         ambient?.stop()
+        SoundPlayer.release()
         lastLandscapeTex = ""
         if (::gameSurface.isInitialized) {
             surfaceHost.removeView(gameSurface)
@@ -730,8 +731,16 @@ class MainActivity : AppCompatActivity() {
                 // M3: SoundAction events queued this tick (see
                 // SoundEventQueue.h) - played via Android's own media
                 // stack, not vendored OpenAL/OGG (see the porting plan).
-                for (soundPath in NativeBridge.pollSoundEvents()) {
-                    SoundPlayer.play(soundPath)
+                //
+                // "path|gain", where the gain is upstream's own
+                // inverse-distance attenuation against the live listener and
+                // the batch has already been cut to the channel budget - so
+                // this loop plays what won a channel, it does not decide.
+                for (event in NativeBridge.pollSoundEvents()) {
+                    val separator = event.lastIndexOf('|')
+                    if (separator <= 0) continue
+                    val gain = event.substring(separator + 1).toFloatOrNull() ?: 1.0f
+                    SoundPlayer.play(event.substring(0, separator), gain)
                 }
             }
             // M5: a plain-language "what's happening / can I fire" label

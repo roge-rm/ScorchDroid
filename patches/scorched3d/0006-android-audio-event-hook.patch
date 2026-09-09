@@ -14,7 +14,7 @@ index 43451de2..f0c46f4e 100644
  #endif
  #include <landscapemap/DeformLandscape.hpp>
  #include <landscapemap/LandscapeMaps.hpp>
-@@ -298,6 +303,13 @@ void Explosion::simulate(fixed frameTime, bool &remove)
+@@ -298,6 +303,18 @@ void Explosion::simulate(fixed frameTime, bool &remove)
  					expSound, position_.asVector());
  			}
  		}
@@ -22,8 +22,13 @@ index 43451de2..f0c46f4e 100644
 +		if (params_->getExplosionSound() &&
 +			0 != strcmp("none", params_->getExplosionSound()))
 +		{
-+			ScorchDroidAudio::pushSoundEvent(
-+				S3D::getModFile(S3D::formatStringBuffer("data/wav/%s", params_->getExplosionSound())));
++			// Positioned, as upstream positions it: a burst of explosions is
++			// arbitrated by distance, and attenuated by it - see
++			// SoundEventQueue.h.
++			Vector soundPosition = position_.asVector();
++			ScorchDroidAudio::pushSoundEventAt(
++				S3D::getModFile(S3D::formatStringBuffer("data/wav/%s", params_->getExplosionSound())),
++				soundPosition[0], soundPosition[1], soundPosition[2]);
 +		}
  #endif // #ifndef S3D_SERVER
  
@@ -44,12 +49,28 @@ index c298c6da..8469afd5 100644
  #endif
  #include <common/Defines.hpp>
  
-@@ -59,6 +64,8 @@ void SoundAction::simulate(fixed frameTime, bool &remove)
+@@ -59,6 +64,24 @@ void SoundAction::simulate(fixed frameTime, bool &remove)
  		source->setRolloff(weapon_->getRolloff().asFloat());
  		source->play(activateSound);
  	}
 +#else
-+	ScorchDroidAudio::pushSoundEvent(S3D::getModFile(weapon_->getSound()));
++	// The only sound site upstream gives its own gain, reference distance and
++	// rolloff, rather than VirtualSoundSource's defaults - so this is the one
++	// hook that carries all three. Relative sounds have no position and play
++	// at full gain wherever the listener is, exactly as setRelative() does.
++	if (weapon_->getRelative())
++	{
++		ScorchDroidAudio::pushSoundEvent(S3D::getModFile(weapon_->getSound()));
++	}
++	else
++	{
++		Vector soundPosition = position_.asVector();
++		ScorchDroidAudio::pushSoundEventAt(S3D::getModFile(weapon_->getSound()),
++			soundPosition[0], soundPosition[1], soundPosition[2],
++			weapon_->getGain().asFloat(),
++			weapon_->getReferenceDistance().asFloat(),
++			weapon_->getRolloff().asFloat());
++	}
  #endif // #ifndef S3D_SERVER
  
  	remove = true;
