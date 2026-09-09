@@ -286,6 +286,13 @@ object NativeBridge {
      */
     external fun setOceanStyle(style: Int)
 
+    /**
+     * W3: what the water reflects - 0 for the sky's own colours, 1 for the
+     * scene, mirrored into a texture as Scorched3D does it. Costs a second
+     * pass over the land and sky.
+     */
+    external fun setReflectionStyle(style: Int)
+
     /** M23: the range [setTerrainDetail] accepts, as "min|max". */
     external fun getTerrainDetailRange(): String
 

@@ -210,6 +210,15 @@ namespace
 	// W4: the ocean tile, and the worker that keeps it up to date. The
 	// generator is a couple of milliseconds of FFT per update, which is
 	// fine off the GL thread and not fine on it.
+	GLint terrainClipEnabledLoc = -1, terrainClipBelowLoc = -1;
+	// W3: the reflection this port draws the water with when upstream's own
+	// reflection is asked for - the scene mirrored in the water plane,
+	// rendered into a half-size target and sampled by the water shader.
+	GLuint reflectionFbo = 0, reflectionTexture = 0, reflectionDepth = 0;
+	int    reflectionWidth = 0, reflectionHeight = 0;
+	std::atomic<int> g_reflectionStyle{0};   // 0 = sky colour only, 1 = the scene
+	GLint  waterReflectTexLoc = -1, waterUseReflectLoc = -1, waterViewportLoc = -1;
+
 	GLuint oceanTexture = 0;
 	GLint  waterWaveTexLoc = -1, waterUseWaveTexLoc = -1, waterWaveTileLoc = -1;
 	std::atomic<int> g_oceanStyle{0};     // 0 = this port's sine waves, 1 = upstream's
@@ -672,6 +681,10 @@ namespace
 		out float vHeight01;
 		out vec2 vTexCoord;
 		out float vViewDepth;
+		// W3: for the reflection pass, which has to drop everything below
+		// the waterline - GLES3 has no clip planes, so the fragment shader
+		// does it.
+		out float vWorldY;
 		void main() {
 			vNormal = aNormal;
 			vTexCoord = aTexCoord;
@@ -681,6 +694,7 @@ namespace
 			// the terrain silently stops fogging.
 			gl_Position = uMVP * vec4(aPosition, 1.0);
 			vViewDepth = gl_Position.w;
+			vWorldY = aPosition.y;
 		}
 	)";
 
@@ -696,7 +710,12 @@ namespace
 		in float vHeight01;
 		in vec2 vTexCoord;
 		in float vViewDepth;
+		in float vWorldY;
 		out vec4 fragColor;
+		// W3: when this pass is a reflection, anything under the water is
+		// not in it.
+		uniform int uClipEnabled;
+		uniform float uClipBelowY;
 		uniform vec3 uLightDir;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
@@ -710,6 +729,7 @@ namespace
 		// never zero), so this switches to the same curve for it.
 		uniform int uHalfLambert;
 		void main() {
+			if (uClipEnabled == 1 && vWorldY < uClipBelowY) discard;
 			vec3 baseColor;
 			if (uHasTexture == 1) {
 				baseColor = texture(uGroundTexture, vTexCoord).rgb;
@@ -1185,6 +1205,10 @@ namespace
 		uniform vec2 uEye;
 		uniform sampler2D uShore;
 		uniform vec2 uMapSize;
+		// W3: the mirrored scene, when it is being drawn.
+		uniform sampler2D uReflectionTex;
+		uniform float uUseReflection;
+		uniform vec2 uViewport;
 		void main() {
 			// Two waves at different angles and speeds, deliberately not
 			// harmonics of each other - a single sine reads as corduroy.
@@ -1233,6 +1257,16 @@ namespace
 			// colour rather than going dark.
 			float up = clamp(reflectDir.y, 0.0, 1.0);
 			vec3 sky = mix(uSkyHorizon, uSkyZenith, sqrt(up));
+			if (uUseReflection > 0.5) {
+				// Screen-space planar reflection: the mirrored pass shares
+				// this pass's projection, so the reflected image of a point
+				// on the water plane lands at that point's own screen
+				// position. Nudged by the wave slope, which is what makes a
+				// reflection wobble instead of looking like a mirror.
+				vec2 uv = gl_FragCoord.xy / uViewport;
+				uv += n.xz * 0.03;
+				sky = texture(uReflectionTex, clamp(uv, vec2(0.002), vec2(0.998))).rgb;
+			}
 			// Schlick, with water's real normal-incidence reflectance of
 			// about 2% - so looking straight down barely reflects and a low
 			// angle mostly does.
@@ -3903,6 +3937,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainHasTextureLoc = glGetUniformLocation(terrainProgram, "uHasTexture");
 	terrainLightBakedLoc = glGetUniformLocation(terrainProgram, "uLightBaked");
 	terrainHalfLambertLoc = glGetUniformLocation(terrainProgram, "uHalfLambert");
+	terrainClipEnabledLoc = glGetUniformLocation(terrainProgram, "uClipEnabled");
+	terrainClipBelowLoc = glGetUniformLocation(terrainProgram, "uClipBelowY");
 	terrainFogColorLoc = glGetUniformLocation(terrainProgram, "uFogColor");
 	terrainFogDensityLoc = glGetUniformLocation(terrainProgram, "uFogDensity");
 
@@ -3970,6 +4006,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterWaveTexLoc = glGetUniformLocation(waterProgram, "uWaveTex");
 	waterUseWaveTexLoc = glGetUniformLocation(waterProgram, "uUseWaveTex");
 	waterWaveTileLoc = glGetUniformLocation(waterProgram, "uWaveTileLength");
+	waterReflectTexLoc = glGetUniformLocation(waterProgram, "uReflectionTex");
+	waterUseReflectLoc = glGetUniformLocation(waterProgram, "uUseReflection");
+	waterViewportLoc = glGetUniformLocation(waterProgram, "uViewport");
 	waterEyePosLoc = glGetUniformLocation(waterProgram, "uEyePos");
 	waterFogColorLoc = glGetUniformLocation(waterProgram, "uFogColor");
 	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
@@ -4943,6 +4982,161 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		g_pickCamera.aspect = aspect;
 	}
 
+	// Shared with the passes after the land, which fog to the same colour.
+	float fogColor[3];
+	currentFogColor(fogColor);
+
+	auto drawLandPass = [&](const Mat4 &vp, bool clipUnderwater) {
+		glUseProgram(terrainProgram);
+		// Set after the program is bound, not before - a uniform written
+		// against whatever happened to be current goes nowhere.
+		glUniform1i(terrainClipEnabledLoc, clipUnderwater ? 1 : 0);
+		glUniform1f(terrainClipBelowLoc, waterHeight);
+		glUniformMatrix4fv(terrainMvpLoc, 1, GL_FALSE, vp.m);
+		glUniform1f(terrainMinHeightLoc, terrainMinHeight);
+		glUniform1f(terrainHeightRangeLoc, terrainMaxHeight - terrainMinHeight);
+		glUniform3f(terrainLightDirLoc, 0.4f, 0.82f, 0.35f);
+		glUniform1i(terrainHasTextureLoc, groundTexture != 0 ? 1 : 0);
+		glUniform1i(terrainLightBakedLoc, groundLightBaked ? 1 : 0);
+		glUniform1i(terrainHalfLambertLoc, 0);
+		glUniform3f(terrainFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+		glUniform1f(terrainFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
+		if (groundTexture != 0) {
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, groundTexture);
+			glUniform1i(terrainGroundTexLoc, 0);
+		}
+		glBindVertexArray(terrainVao);
+		frameDrawCalls++; glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
+
+		// The land surround, through the same program while it is still bound.
+		// Upstream lights it with the same half-lambert against the real sun it
+		// uses for the roof (LandSurround::generateList), and its own light map
+		// is never baked - it is flat ground at height 0, so there is nothing
+		// for hills to shadow.
+		if (surroundVisible) {
+			glUniform1f(terrainMinHeightLoc, 0.0f);
+			glUniform1f(terrainHeightRangeLoc, 1.0f);
+			glUniform1i(terrainHasTextureLoc, 1);
+			glUniform1i(terrainLightBakedLoc, 0);
+			glUniform1i(terrainHalfLambertLoc, 1);
+			glUniform3f(terrainLightDirLoc,
+						skyDescription.sunDirection[0],
+						skyDescription.sunDirection[2],
+						-skyDescription.sunDirection[1]);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, surroundTexture);
+			glUniform1i(terrainGroundTexLoc, 0);
+			glBindVertexArray(surroundVao);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, surroundVertexCount);
+		}
+
+		// S6: the cavern roof, through the same program while it is still bound.
+		// Its light map is never baked (the ground's is generated per landscape;
+		// there is no roof equivalent), so it takes the lit path - with the
+		// half-lambert, since every normal on a ceiling points away from the sun.
+		if (roofVisible) {
+			glUniform1f(terrainMinHeightLoc, roofMinHeight);
+			glUniform1f(terrainHeightRangeLoc, roofMaxHeight - roofMinHeight);
+			glUniform1i(terrainHasTextureLoc, roofTexture != 0 ? 1 : 0);
+			glUniform1i(terrainLightBakedLoc, 0);
+			glUniform1i(terrainHalfLambertLoc, 1);
+			// Upstream shades its roof against the real sun (SkyRoof::makeNormal
+			// takes the direction to Sun::getPosition), not the fixed light the
+			// terrain uses.
+			glUniform3f(terrainLightDirLoc,
+						skyDescription.sunDirection[0],
+						skyDescription.sunDirection[2],
+						-skyDescription.sunDirection[1]);
+			if (roofTexture != 0) {
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, roofTexture);
+				glUniform1i(terrainGroundTexLoc, 0);
+			}
+			glBindVertexArray(roofVao);
+			frameDrawCalls++; glDrawElements(GL_TRIANGLES, roofIndexCount, GL_UNSIGNED_INT, (void *) 0);
+
+			// The skirt that closes the cavern beyond the map edge. Culled, not
+			// double-sided: the camera can orbit out past the wall or above it
+			// where it has curved below the horizon, and a two-sided skirt then
+			// fills the screen with a solid grey slab. Single-sided, straying
+			// outside just makes it disappear, which degrades to the view
+			// without a skirt at all rather than to an opaque wall.
+			if (roofSkirtVertexCount > 0) {
+				glBindVertexArray(roofSkirtVao);
+				frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, roofSkirtVertexCount);
+			}
+		}
+	};
+
+	// W3: the reflection, when upstream's own is the one asked for.
+	//
+	// Upstream renders the scene a second time into a texture with the
+	// camera mirrored in the water plane (Water2Renderer), and samples that
+	// where this port samples a sky gradient. Same idea here, at half the
+	// screen's resolution and with the land and sky only - the tanks, trees
+	// and effects are left out, which is a real difference from upstream and
+	// the reason this is a switch rather than the only behaviour.
+	const bool wantReflection =
+		(g_reflectionStyle.load() == 1) && waterVisible && surfaceWidth > 0 && surfaceHeight > 0;
+	if (wantReflection) {
+		const int rw = std::max(surfaceWidth / 2, 1), rh = std::max(surfaceHeight / 2, 1);
+		if (reflectionFbo == 0 || rw != reflectionWidth || rh != reflectionHeight) {
+			if (reflectionTexture) glDeleteTextures(1, &reflectionTexture);
+			if (reflectionDepth) glDeleteRenderbuffers(1, &reflectionDepth);
+            if (reflectionFbo) glDeleteFramebuffers(1, &reflectionFbo);
+			glGenTextures(1, &reflectionTexture);
+			glBindTexture(GL_TEXTURE_2D, reflectionTexture);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, rw, rh, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			// Clamped: a wave can push the sample off the edge, and wrapping
+			// there would fold the far shore into the near one.
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glGenRenderbuffers(1, &reflectionDepth);
+			glBindRenderbuffer(GL_RENDERBUFFER, reflectionDepth);
+			glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, rw, rh);
+			glGenFramebuffers(1, &reflectionFbo);
+			glBindFramebuffer(GL_FRAMEBUFFER, reflectionFbo);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+								   GL_TEXTURE_2D, reflectionTexture, 0);
+			glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+									  GL_RENDERBUFFER, reflectionDepth);
+			reflectionWidth = rw;
+			reflectionHeight = rh;
+			LOGI("Reflection target: %dx%d, status 0x%x", rw, rh,
+				 glCheckFramebufferStatus(GL_FRAMEBUFFER));
+		}
+
+		// The camera, mirrored in the plane y = waterHeight: the eye goes
+		// under it by as much as it was over, and what it looks at does the
+		// same, so the reflected ray through any point of the surface is the
+		// one the real camera would have followed.
+		const float reflEyeY = 2.0f * waterHeight - eyeY;
+		const float reflTargetY = 2.0f * waterHeight - targetY;
+		Mat4 reflView = Mat4::lookAt(eyeX, reflEyeY, eyeZ,
+									 targetX, reflTargetY, targetZ, 0.0f, 1.0f, 0.0f);
+		Mat4 reflMvp = Mat4::multiply(proj, reflView);
+
+		glBindFramebuffer(GL_FRAMEBUFFER, reflectionFbo);
+		glViewport(0, 0, rw, rh);
+		glClearColor(fogColor[0], fogColor[1], fogColor[2], 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		// Mirroring turns every triangle inside out, so what was front-facing
+		// is now back-facing. Winding is flipped rather than culling turned
+		// off, to keep the same triangles visible as in the real view.
+		glFrontFace(GL_CW);
+		drawSky(-reflView.m[2], -reflView.m[6], -reflView.m[10],
+				reflView.m[0], reflView.m[4], reflView.m[8],
+				reflView.m[1], reflView.m[5], reflView.m[9],
+				tanf(kFovYRadians * 0.5f), aspect);
+		drawLandPass(reflMvp, true);
+		glFrontFace(GL_CCW);
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glViewport(0, 0, surfaceWidth, surfaceHeight);
+	}
+
 	// Sky first: it is the backdrop everything else is drawn in front of.
 	drawSky(-view.m[2], -view.m[6], -view.m[10],
 			view.m[0], view.m[4], view.m[8],
@@ -5007,84 +5201,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glBindVertexArray(0);
 	}
 
-	glUseProgram(terrainProgram);
-	glUniformMatrix4fv(terrainMvpLoc, 1, GL_FALSE, mvp.m);
-	glUniform1f(terrainMinHeightLoc, terrainMinHeight);
-	glUniform1f(terrainHeightRangeLoc, terrainMaxHeight - terrainMinHeight);
-	glUniform3f(terrainLightDirLoc, 0.4f, 0.82f, 0.35f);
-	glUniform1i(terrainHasTextureLoc, groundTexture != 0 ? 1 : 0);
-	glUniform1i(terrainLightBakedLoc, groundLightBaked ? 1 : 0);
-	glUniform1i(terrainHalfLambertLoc, 0);
-	float fogColor[3];
-	currentFogColor(fogColor);
-	glUniform3f(terrainFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-	glUniform1f(terrainFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
-	if (groundTexture != 0) {
-		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, groundTexture);
-		glUniform1i(terrainGroundTexLoc, 0);
-	}
-	glBindVertexArray(terrainVao);
-	frameDrawCalls++; glDrawElements(GL_TRIANGLES, terrainIndexCount, GL_UNSIGNED_INT, (void *) 0);
-
-	// The land surround, through the same program while it is still bound.
-	// Upstream lights it with the same half-lambert against the real sun it
-	// uses for the roof (LandSurround::generateList), and its own light map
-	// is never baked - it is flat ground at height 0, so there is nothing
-	// for hills to shadow.
-	if (surroundVisible) {
-		glUniform1f(terrainMinHeightLoc, 0.0f);
-		glUniform1f(terrainHeightRangeLoc, 1.0f);
-		glUniform1i(terrainHasTextureLoc, 1);
-		glUniform1i(terrainLightBakedLoc, 0);
-		glUniform1i(terrainHalfLambertLoc, 1);
-		glUniform3f(terrainLightDirLoc,
-					skyDescription.sunDirection[0],
-					skyDescription.sunDirection[2],
-					-skyDescription.sunDirection[1]);
-		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, surroundTexture);
-		glUniform1i(terrainGroundTexLoc, 0);
-		glBindVertexArray(surroundVao);
-		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, surroundVertexCount);
-	}
-
-	// S6: the cavern roof, through the same program while it is still bound.
-	// Its light map is never baked (the ground's is generated per landscape;
-	// there is no roof equivalent), so it takes the lit path - with the
-	// half-lambert, since every normal on a ceiling points away from the sun.
-	if (roofVisible) {
-		glUniform1f(terrainMinHeightLoc, roofMinHeight);
-		glUniform1f(terrainHeightRangeLoc, roofMaxHeight - roofMinHeight);
-		glUniform1i(terrainHasTextureLoc, roofTexture != 0 ? 1 : 0);
-		glUniform1i(terrainLightBakedLoc, 0);
-		glUniform1i(terrainHalfLambertLoc, 1);
-		// Upstream shades its roof against the real sun (SkyRoof::makeNormal
-		// takes the direction to Sun::getPosition), not the fixed light the
-		// terrain uses.
-		glUniform3f(terrainLightDirLoc,
-					skyDescription.sunDirection[0],
-					skyDescription.sunDirection[2],
-					-skyDescription.sunDirection[1]);
-		if (roofTexture != 0) {
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, roofTexture);
-			glUniform1i(terrainGroundTexLoc, 0);
-		}
-		glBindVertexArray(roofVao);
-		frameDrawCalls++; glDrawElements(GL_TRIANGLES, roofIndexCount, GL_UNSIGNED_INT, (void *) 0);
-
-		// The skirt that closes the cavern beyond the map edge. Culled, not
-		// double-sided: the camera can orbit out past the wall or above it
-		// where it has curved below the horizon, and a two-sided skirt then
-		// fills the screen with a solid grey slab. Single-sided, straying
-		// outside just makes it disappear, which degrades to the view
-		// without a skirt at all rather than to an opaque wall.
-		if (roofSkirtVertexCount > 0) {
-			glBindVertexArray(roofSkirtVao);
-			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, roofSkirtVertexCount);
-		}
-	}
+	// W3: the land, as one callable pass - the reflection draws it a
+	// second time from the mirrored camera, and duplicating seventy
+	// lines of uniform setting to do that would guarantee the two
+	// drift apart.
+	drawLandPass(mvp, false);
 
 	// Ground shadows, between the terrain and the water: they belong on the
 	// land, and a shadow showing through the sea would be worse than none.
@@ -5253,6 +5374,14 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		const bool useOcean = (g_oceanStyle.load() == 1) && oceanTexture != 0;
 		glUniform1f(waterUseWaveTexLoc, useOcean ? 1.0f : 0.0f);
 		glUniform1f(waterWaveTileLoc, ScorchDroidOcean::kTileLength);
+		const bool useReflection = wantReflection && reflectionTexture != 0;
+		glUniform1f(waterUseReflectLoc, useReflection ? 1.0f : 0.0f);
+		glUniform2f(waterViewportLoc, (float) surfaceWidth, (float) surfaceHeight);
+		if (useReflection) {
+			glActiveTexture(GL_TEXTURE4);
+			glBindTexture(GL_TEXTURE_2D, reflectionTexture);
+			glUniform1i(waterReflectTexLoc, 4);
+		}
 		if (useOcean) {
 			glActiveTexture(GL_TEXTURE3);
 			glBindTexture(GL_TEXTURE_2D, oceanTexture);
@@ -6203,6 +6332,13 @@ Java_com_rm_scorchdroid_NativeBridge_setRenderOptions(
 // M23: how finely the landscape is drawn, as a grid resolution. Takes
 // effect on the next landscape build, which the renderer forces as soon as
 // it sees the value change.
+// W3: which reflection the water shows - 0 for the sky's own colours, 1
+// for the scene, mirrored into a texture as upstream does it.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setReflectionStyle(JNIEnv *env, jobject, jint style) {
+    g_reflectionStyle.store(style == 1 ? 1 : 0);
+}
+
 // W4: which sea to draw - 0 for this port's two sine waves, 1 for
 // Scorched3D's own Tessendorf spectrum.
 extern "C" JNIEXPORT void JNICALL

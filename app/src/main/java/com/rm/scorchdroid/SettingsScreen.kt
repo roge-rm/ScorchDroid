@@ -255,6 +255,15 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                         }
 
                         SwitchRow(
+                            "Scorched3D's reflections",
+                            "The land and sky mirrored in the water, instead of the sky's " +
+                                "colours alone. Draws the scene a second time",
+                            settings.originalReflection,
+                        ) {
+                            settings.updateOriginalReflection(it)
+                        }
+
+                        SwitchRow(
                             "Scorched3D's aim sight",
                             "Its own: a protractor ring around the tank and a separate " +
                                 "bearing marker on the ground. Off is this port's single blade",

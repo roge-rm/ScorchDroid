@@ -234,6 +234,20 @@ class GameSettings(context: Context) {
     }
 
     /**
+     * W3: what the water reflects. False is a Fresnel-weighted sky colour;
+     * true is the scene itself, drawn a second time from a camera mirrored
+     * in the water, which is what Scorched3D does.
+     */
+    var originalReflection by mutableStateOf(prefs.getBoolean(KEY_REFLECT, false))
+        private set
+
+    fun updateOriginalReflection(value: Boolean) {
+        originalReflection = value
+        prefs.edit().putBoolean(KEY_REFLECT, value).apply()
+        NativeBridge.setReflectionStyle(if (value) 1 else 0)
+    }
+
+    /**
      * W4: which sea to draw. False is this port's two sine waves; true is
      * Scorched3D's own ocean - a Tessendorf spectrum inverse-FFTed into a
      * tile, which is what gives it wind-driven, irregular crests.
@@ -286,6 +300,7 @@ class GameSettings(context: Context) {
         NativeBridge.setSightStyle(if (originalSight) 1 else 0)
         NativeBridge.setTerrainDetail(terrainDetail)
         NativeBridge.setOceanStyle(if (originalOcean) 1 else 0)
+        NativeBridge.setReflectionStyle(if (originalReflection) 1 else 0)
     }
 
     private companion object {
@@ -310,6 +325,7 @@ class GameSettings(context: Context) {
         const val KEY_SIGHT = "graphics.originalSight"
         const val KEY_DETAIL = "graphics.terrainDetail"
         const val KEY_OCEAN = "graphics.originalOcean"
+        const val KEY_REFLECT = "graphics.originalReflection"
         // The maximum the renderer allows - see kTerrainGridMax.
         const val DEFAULT_DETAIL = 256
     }
