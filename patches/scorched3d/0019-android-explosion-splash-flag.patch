@@ -1,0 +1,24 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: carry the weapon's splash flag on the explosion event
+
+Water::explosion (client body of Explosion.cpp) sprays and plays the
+splash sound when a weapon with <createsplash> lands under the water.
+The port's explosion event now carries that flag in its `value` field;
+the renderer, which knows the water height, decides whether the blast
+was under it, exactly as Water::explosion does. One field, no logic.
+
+---
+diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
+--- a/src/common/actions/Explosion.cpp
++++ b/src/common/actions/Explosion.cpp
+@@ -96,6 +96,10 @@
+ 		effect.r = colour[0].asFloat();
+ 		effect.g = colour[1].asFloat();
+ 		effect.b = colour[2].asFloat();
++		// Whether this weapon splashes (Water::explosion's spray and its
++		// splash sound, in the client body below). The renderer decides if
++		// the blast is actually under the water, as Water::explosion does.
++		effect.value = params_->getCreateSplash() ? 1.0f : 0.0f;
+ 		ScorchDroidEffects::push(effect);
+ 	}
+ 	// The mushroom cloud, for nuke-class weapons. Upstream raises it on a

@@ -139,3 +139,7 @@ work in a new file under `porting/` rather than in the submodule.
   files 0011/0014/0015 already own carry their hooks there instead. Each
   mirrors upstream's own gate and reads the same accessory field, so mod
   sounds come through; the drive is one-shot where upstream loops.
+- `0019-android-explosion-splash-flag.patch` - the explosion event carries
+  the weapon's `<createsplash>` flag in its `value` field, so the renderer
+  can spray and play the splash sound for a blast under the water as
+  `Water::explosion` does. One field, no logic.

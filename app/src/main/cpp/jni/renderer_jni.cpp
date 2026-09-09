@@ -69,6 +69,10 @@
 #include <SkyDescription.hpp>
 #include <OceanWaves.h>
 #include <ShoreBreakers.h>
+#include <SoundEventQueue.h>
+#include <landscapedef/LandscapeTex.hpp>
+#include <target/TargetLife.hpp>
+#include <tank/TankState.hpp>
 #include <InstanceBuffer.hpp>
 #include <TreeGeometry.hpp>
 #include <3dsparse/TreeModelFactory.hpp>
@@ -386,7 +390,35 @@ namespace
 		float growth = 0.8f;         // fraction of its own size gained over its life
 		float peakAlpha = 1.0f;      // opacity at birth
 		bool  alphaBlend = false;    // false = additive
+		// X1: whether the wind pushes it. Upstream's emitters set this per
+		// effect: missile flame and smoke, landscape smoke, splash spray,
+		// rain and snow are blown; explosions, lasers, teleports are not.
+		bool  windAffect = false;
+		// Upstream integrates position += velocity * mass * time, so a
+		// heavier particle is moved less by the same velocity - including
+		// the wind's. The velocities here already have the mass folded in;
+		// this is kept so the wind term can fold it in too.
+		float mass = 1.0f;
+		// 0 = a round sprite; 1 = rain, drawn as a short vertical streak
+		// (upstream's ParticleRendererRain, a 0.1-wide quad about a unit
+		// tall); 2 = snow, a small sprite. Both fade with distance from
+		// the camera rather than with age, and die below the ground plane.
+		int   kind = 0;
 	};
+
+	// X4a: upstream's damaged-tank smoke (TargetRendererImplTank::simulate):
+	// a tank below full life puffs from its turret every
+	// (rand * life * 10 + 250) / 3000 seconds - the healthier, the rarer.
+	struct TankSmoke { float time = 0.0f, waitFor = 0.0f; };
+	std::map<unsigned int, TankSmoke> tankSmoke;
+
+	// X4c: precipitation, from the landscape's <precipitation>: 0 none,
+	// 1 rain, 2 snow, and how many particles per tenth of a second
+	// (upstream's TargetCamera::simulate emits `particles` every 0.1 s
+	// within 200 units of the camera at a height of 180).
+	int   precipitationKind = 0;
+	int   precipitationCount = 0;
+	float precipitationAccumulator = 0.0f;
 
 	struct Beam {
 		float x1, y1, z1, x2, y2, z2;  // render space
@@ -2114,6 +2146,25 @@ namespace
 		if (skyBuilt) return;
 		skyBuilt = true;
 		skyDescription = ScorchDroidSky::describe(ctx);
+
+		// X4c: the landscape's weather. Three shipped landscapes ask for
+		// it; the rest have none.
+		precipitationKind = 0;
+		precipitationCount = 0;
+		precipitationAccumulator = 0.0f;
+		{
+			LandscapeTex *tex = ctx.getLandscapeMaps().getDefinitions().getTex();
+			if (tex && tex->precipitation) {
+				const LandscapeTexType::TexType type = tex->precipitation->getType();
+				if (type == LandscapeTexType::ePrecipitationRain ||
+					type == LandscapeTexType::ePrecipitationSnow) {
+					precipitationKind = (type == LandscapeTexType::ePrecipitationRain) ? 1 : 2;
+					precipitationCount = ((LandscapeTexPrecipitation *) tex->precipitation)->particles;
+					LOGI("Precipitation: %s, %d particles per 0.1 s",
+						 precipitationKind == 1 ? "rain" : "snow", precipitationCount);
+				}
+			}
+		}
 		if (skyDescription.valid) {
 			LOGI("Sky: gradient loaded, sun towards (%.2f, %.2f, %.2f), glow %d",
 				 skyDescription.sunDirection[0], skyDescription.sunDirection[1],
@@ -3304,6 +3355,150 @@ namespace
 		particles.push_back(particle);
 	}
 
+	// One lingering puff, with upstream's own Smoke emitter numbers
+	// (src/client/landscape/Smoke.cpp): 2-4 seconds, grey, 0.6-0.8 opaque
+	// falling to nothing, growing from about 0.35 to about 1.35 units, and
+	// rising - its emitter gravity is +Z, unlike every other emitter in the
+	// game, which is what makes smoke drift up off a fire. Wind-affected,
+	// with upstream's mass of 0.2-0.5, so it streams downwind. Raised by
+	// the eSmoke event (muzzle, napalm, driving) and by a damaged tank.
+	void spawnSmokePuff(float x, float y, float z)
+	{
+		Particle puff = {};
+		puff.x = x; puff.y = y; puff.z = z;
+		puff.vx = randomSigned() * 0.3f;
+		puff.vy = 1.2f + randomUnit() * 0.8f;
+		puff.vz = randomSigned() * 0.3f;
+		puff.r = 0.8f; puff.g = 0.8f; puff.b = 0.8f;
+		puff.worldSize = 0.2f + randomUnit() * 0.3f;
+		puff.life = 2.0f + randomUnit() * 2.0f;
+		puff.drag = 0.6f;
+		// Rises instead of falling, and slowly - it is buoyant, not
+		// weightless, so the drag above still settles it.
+		puff.gravityScale = -0.15f;
+		// 0.35 -> 1.35 units over its life.
+		puff.growth = 2.9f;
+		puff.peakAlpha = 0.6f + randomUnit() * 0.2f;
+		puff.alphaBlend = true;
+		puff.windAffect = true;
+		puff.mass = 0.2f + randomUnit() * 0.3f;
+		addParticle(puff);
+	}
+
+	// X4a: upstream's damaged-tank smoke, TargetRendererImplTank::simulate
+	// step for step: a tank in its normal state with less than full life
+	// puffs from its turret, then waits (rand * life * 10 + 250) / 3000
+	// seconds - 0.08 s at death's door, 0.4 s barely scratched.
+	void emitTankSmoke(ScorchedContext &ctx, float deltaSeconds)
+	{
+		std::map<unsigned int, Tank *> &tanks = ctx.getTargetContainer().getTanks();
+		for (std::map<unsigned int, Tank *>::iterator it = tanks.begin(); it != tanks.end(); ++it) {
+			Tank *tank = it->second;
+			if (!tank || tank->getState().getState() != TankState::sNormal) continue;
+			const float life = tank->getLife().getLife().asFloat();
+			if (life >= tank->getLife().getMaxLife().asFloat()) continue;
+			TankSmoke &smoke = tankSmoke[it->first];
+			smoke.time += deltaSeconds;
+			if (smoke.time < smoke.waitFor) continue;
+			FixedVector &turret = tank->getLife().getTankTurretPosition();
+			const float randX = randomUnit() - 0.5f, randY = randomUnit() - 0.5f;
+			spawnSmokePuff(turret[0].asFloat() + randX,
+						   turret[2].asFloat(),
+						   worldZFromEngineY(turret[1].asFloat() + randY));
+			smoke.waitFor = (randomUnit() * life * 10.0f + 250.0f) / 3000.0f;
+			smoke.time = 0.0f;
+			static bool logged = false;
+			if (!logged) {
+				logged = true;
+				LOGI("Tank smoke: first puff, tank %u at life %.0f", it->first, life);
+			}
+		}
+	}
+
+	// X4b: upstream's splash spray (Water::explosion, its emitSpray): for a
+	// blast under the water, 6 + 2 * width white flecks scattered within
+	// `width` of the point, thrown up at 15-40 units a second and out a
+	// little, 3-4 units across, half opaque fading to nothing over 3-4
+	// seconds, wind-affected with a mass of 0.5-1. Its gravity of -800 on
+	// upstream's time-squared integrator is about 13 units per second
+	// squared per unit of mass at 60 fps; this port's integrator applies
+	// 3.15 * gravityScale, hence the factor.
+	void spawnSplash(float x, float y, float z, float width)
+	{
+		const int count = 6 + (int) std::max(width, 0.0f) * 2;
+		for (int i = 0; i < count; i++) {
+			const float rotation = randomUnit() * 6.2831853f;
+			const float sx = sinf(rotation), sy = cosf(rotation);
+			const float mass = 0.5f + randomUnit() * 0.5f;
+			Particle drop = {};
+			drop.x = x + sx * width * randomUnit();
+			drop.z = z - sy * width * randomUnit();
+			drop.y = y;
+			drop.vx = sx * randomUnit() / 10.0f * mass;
+			drop.vz = -sy * randomUnit() / 10.0f * mass;
+			drop.vy = (25.0f * randomUnit() + 15.0f) * mass;
+			const float shade = 0.9f + randomUnit() * 0.1f;
+			drop.r = shade; drop.g = shade; drop.b = shade;
+			drop.worldSize = 3.0f + randomUnit();
+			drop.growth = 0.0f;
+			drop.life = 3.0f + randomUnit();
+			drop.drag = 0.985f;
+			drop.gravityScale = 4.2f * mass;
+			drop.peakAlpha = 0.5f + randomUnit() * 0.2f;
+			drop.alphaBlend = true;
+			drop.windAffect = true;
+			drop.mass = mass;
+			addParticle(drop);
+		}
+	}
+
+	// X4c: upstream's rain and snow (TargetCamera's two emitters, emitted
+	// through ParticleEmitter::emitPrecipitation): every tenth of a second
+	// the landscape's `particles` count, placed within 200 units of the
+	// camera at a height of 180, falling from there. Rain lives 4 s under
+	// a gravity of -1600, snow 16 s under -600 with a sideways drift of up
+	// to 10 a second; both have a mass of 0.5 and are wind-affected. The
+	// gravity factors are the same 60 fps reading as the splash's.
+	void emitPrecipitation(float deltaSeconds)
+	{
+		if (precipitationKind == 0 || precipitationCount <= 0) return;
+		precipitationAccumulator += deltaSeconds;
+		int bursts = (int) (precipitationAccumulator / 0.1f);
+		if (bursts <= 0) return;
+		precipitationAccumulator -= (float) bursts * 0.1f;
+		bursts = std::min(bursts, 3);   // a long stall does not dump a cloudburst
+		const bool rain = precipitationKind == 1;
+		for (int b = 0; b < bursts; b++) {
+			for (int i = 0; i < precipitationCount; i++) {
+				const float mass = 0.5f;
+				Particle drop = {};
+				drop.x = g_pickCamera.eyeX + randomUnit() * 400.0f - 200.0f;
+				drop.z = g_pickCamera.eyeZ + randomUnit() * 400.0f - 200.0f;
+				drop.y = 180.0f;
+				if (rain) {
+					drop.life = 4.0f;
+					drop.gravityScale = 8.5f * mass;   // -1600
+					drop.kind = 1;
+				} else {
+					drop.life = 16.0f;
+					drop.gravityScale = 3.2f * mass;   // -600
+					drop.vx = (randomUnit() * 20.0f - 10.0f) * mass;
+					drop.vz = (randomUnit() * 20.0f - 10.0f) * mass;
+					drop.kind = 2;
+				}
+				drop.r = drop.g = drop.b = 1.0f;
+				drop.worldSize = 0.2f;
+				drop.growth = 0.0f;
+				drop.drag = 0.985f;
+				drop.peakAlpha = 0.7f;
+				drop.alphaBlend = true;
+				drop.windAffect = true;
+				drop.mass = mass;
+				addParticle(drop);
+			}
+		}
+	}
+
 	// Trail behind an in-flight projectile: upstream's MissileActionRenderer
 	// hangs a flame emitter and a smoke emitter off each shot, both enabled
 	// by default (WeaponProjectile's createFlame_/createSmoke_ start true and
@@ -3387,6 +3582,9 @@ namespace
 					flame.gravityScale = 0.0f;
 					flame.drag = 0.98f;
 					flame.peakAlpha = 0.9f + randomUnit() * 0.1f;
+					// Both of MissileActionRenderer's emitters are wind-affected.
+					flame.windAffect = true;
+					flame.mass = mass;
 					addParticle(flame);
 				}
 			}
@@ -3426,6 +3624,8 @@ namespace
 					smoke.gravityScale = 0.0f;
 					smoke.drag = 0.9f;
 					smoke.peakAlpha = 0.3f;
+					smoke.windAffect = true;
+					smoke.mass = mass;
 					addParticle(smoke);
 				}
 			}
@@ -3463,6 +3663,21 @@ namespace
 
 			switch (event.type) {
 			case ScorchDroidEffects::eExplosion: {
+				// X4b: a splashing weapon that went off under the water.
+				// Water::explosion: the spray, its width the blast size
+				// less two, and the splash sound. The flag rides in value
+				// (patch 0019); the under-water test is this side's, as it
+				// is upstream's.
+				if (event.value > 0.5f && waterVisible && event.z < waterHeight) {
+					spawnSplash(x, y, z, event.size - 2.0f);
+					ScorchDroidAudio::pushSoundEvent(S3D::getModFile("data/wav/misc/splash.wav"));
+					static bool logged = false;
+					if (!logged) {
+						logged = true;
+						LOGI("Splash: first spray, blast size %.1f at %.1f under water %.1f",
+							 event.size, event.z, waterHeight);
+					}
+				}
 				// A bright core plus an outward burst. Count scales with the
 				// blast so a small weapon doesn't look like a big one.
 				const float size = std::max(event.size, 0.5f);
@@ -3687,32 +3902,9 @@ namespace
 				}
 				break;
 			}
-			case ScorchDroidEffects::eSmoke: {
-				// One lingering puff, with upstream's own Smoke emitter
-				// numbers (src/client/landscape/Smoke.cpp): 2-4 seconds,
-				// grey, 0.6-0.8 opaque falling to nothing, growing from
-				// about 0.35 to about 1.35 units, and rising - its emitter
-				// gravity is +Z, unlike every other emitter in the game,
-				// which is what makes smoke drift up off a fire.
-				Particle puff = {};
-				puff.x = x; puff.y = y; puff.z = z;
-				puff.vx = randomSigned() * 0.3f;
-				puff.vy = 1.2f + randomUnit() * 0.8f;
-				puff.vz = randomSigned() * 0.3f;
-				puff.r = 0.8f; puff.g = 0.8f; puff.b = 0.8f;
-				puff.worldSize = 0.2f + randomUnit() * 0.3f;
-				puff.life = 2.0f + randomUnit() * 2.0f;
-				puff.drag = 0.6f;
-				// Rises instead of falling, and slowly - it is buoyant, not
-				// weightless, so the drag above still settles it.
-				puff.gravityScale = -0.15f;
-				// 0.35 -> 1.35 units over its life.
-				puff.growth = 2.9f;
-				puff.peakAlpha = 0.6f + randomUnit() * 0.2f;
-				puff.alphaBlend = true;
-				addParticle(puff);
+			case ScorchDroidEffects::eSmoke:
+				spawnSmokePuff(x, y, z);
 				break;
-			}
 			case ScorchDroidEffects::eTeleport: {
 				// A column of light where a tank leaves or arrives. Sent
 				// twice per teleport, once at each end.
@@ -3790,16 +3982,44 @@ namespace
 		}
 	}
 
-	void updateEffects(float deltaSeconds)
+	void updateEffects(ScorchedContext &ctx, float deltaSeconds)
 	{
 		const float kGravity = 9.0f;  // not the sim's gravity: this is smoke, not ballistics
+
+		// X1: the wind, as upstream's ParticleEngine::simulate applies it
+		// to every wind-affected particle:
+		//   velocity += windDir * windSpeed * 80 * time * time
+		// That is a frame-rate-dependent acceleration - twice as strong at
+		// 30 fps as at 60 - and copying it verbatim would make the same
+		// round drift differently on different phones. So it is taken as
+		// what it evaluates to at upstream's usual 60 fps, a fixed
+		// acceleration of dir * speed * 80 / 60 per second squared, and
+		// applied per second. Engine (x, y) -> render (x, 0, -y).
+		float windAx = 0.0f, windAz = 0.0f;
+		{
+			Wind &wind = ctx.getSimulator().getWind();
+			const float speed = wind.getWindSpeed().asFloat();
+			if (speed > 0.0f) {
+				FixedVector &dir = wind.getWindDirection();
+				const float strength = speed * 80.0f / 60.0f;
+				windAx = dir[0].asFloat() * strength;
+				windAz = -dir[1].asFloat() * strength;
+			}
+		}
 
 		size_t live = 0;
 		for (size_t i = 0; i < particles.size(); i++) {
 			Particle &particle = particles[i];
 			particle.age += deltaSeconds;
 			if (particle.age >= particle.life) continue;
+			// Rain and snow end at the ground plane, as upstream's
+			// renderers end them (position z < 0 -> life 0).
+			if (particle.kind != 0 && particle.y < 0.0f) continue;
 
+			if (particle.windAffect) {
+				particle.vx += windAx * particle.mass * deltaSeconds;
+				particle.vz += windAz * particle.mass * deltaSeconds;
+			}
 			particle.vy -= kGravity * deltaSeconds * 0.35f * particle.gravityScale;
 			const float retain = powf(particle.drag, deltaSeconds);
 			particle.vx *= retain; particle.vy *= retain; particle.vz *= retain;
@@ -3895,6 +4115,7 @@ namespace
 			for (size_t i = 0; i < particles.size(); i++) {
 				const Particle &particle = particles[i];
 				if (particle.y < clipBelowY) continue;
+				if (particle.kind == 1) continue;   // rain is drawn as streaks below
 				const float remaining = 1.0f - particle.age / particle.life;
 
 				const float dx = particle.x - eyeX, dy = particle.y - eyeY, dz = particle.z - eyeZ;
@@ -3904,6 +4125,14 @@ namespace
 				pixels *= 1.0f + (1.0f - remaining) * particle.growth;
 				pixels = std::min(std::max(pixels, 1.0f), 256.0f);
 
+				// Fade out, weighted late - except snow, which upstream
+				// fades by distance alone: 0.7 at the camera to nothing
+				// 200 units away.
+				float alpha = particle.peakAlpha * remaining * remaining;
+				if (particle.kind == 2) {
+					alpha = std::max(0.0f, 0.7f * (1.0f - (distance * distance) / 40000.0f));
+				}
+
 				std::vector<float> &into = particle.alphaBlend ? blended : additive;
 				into.push_back(particle.x);
 				into.push_back(particle.y);
@@ -3911,8 +4140,7 @@ namespace
 				into.push_back(particle.r);
 				into.push_back(particle.g);
 				into.push_back(particle.b);
-				// Fade out, weighted late.
-				into.push_back(particle.peakAlpha * remaining * remaining);
+				into.push_back(alpha);
 				into.push_back(pixels);
 			}
 
@@ -3937,9 +4165,35 @@ namespace
 			}
 		}
 
-		if (!beams.empty()) {
+		{
 			std::vector<float> data;
 			data.reserve(beams.size() * 12);
+			// X4c: rain, as upstream's ParticleRendererRain draws it - a
+			// streak 0.1 wide and (1 - |camera pitch| + 0.1) tall, so it
+			// lengthens as the view levels out, at 0.7 alpha fading to
+			// nothing 200 units away. Additive lines carry no alpha, so the
+			// fade dims the colour instead.
+			{
+				float streak = 0.0f;
+				bool streakKnown = false;
+				for (size_t i = 0; i < particles.size(); i++) {
+					const Particle &drop = particles[i];
+					if (drop.kind != 1 || drop.y < clipBelowY) continue;
+					if (!streakKnown) {
+						// The camera's forward is unit length already.
+						streak = 1.0f - fabsf(g_pickCamera.fwdY) + 0.1f;
+						streakKnown = true;
+					}
+					const float dx = drop.x - eyeX, dy = drop.y - eyeY, dz = drop.z - eyeZ;
+					const float d2 = dx * dx + dy * dy + dz * dz;
+					const float fade = std::max(0.0f, 0.7f * (1.0f - d2 / 40000.0f));
+					if (fade <= 0.0f) continue;
+					data.push_back(drop.x); data.push_back(drop.y); data.push_back(drop.z);
+					data.push_back(fade); data.push_back(fade); data.push_back(fade);
+					data.push_back(drop.x); data.push_back(drop.y - streak); data.push_back(drop.z);
+					data.push_back(fade); data.push_back(fade); data.push_back(fade);
+				}
+			}
 			for (size_t i = 0; i < beams.size(); i++) {
 				const Beam &beam = beams[i];
 				// Same waterline rule as the particles above: a beam wholly
@@ -4876,7 +5130,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		smokeEmitsThisFrame = std::min(smokeEmitsThisFrame, kMaxTrailStepsPerFrame);
 
 		spawnEffects();
-		updateEffects(delta);
+		emitTankSmoke(*ctx, delta);
+		emitPrecipitation(delta);
+		updateEffects(*ctx, delta);
 	}
 
 	HeightMap &heightMap = ctx->getLandscapeMaps().getGroundMaps().getHeightMap();

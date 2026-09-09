@@ -72,6 +72,17 @@ Already matching and needing nothing: wind creation, the change timer,
 shot physics, AI compensation, clouds, breakers, the ocean's own wind mapping
 and the setup options.
 
+## Status (2026-09-09)
+
+- **X1 done** and **X4 done** (all three effects), in the commit after this
+  note. Dan confirmed the normalised drift: "it makes sense to normalise
+  drift so it looks the same everywhere ... I want it to look consistent on
+  multiple devices."
+- **X2 deliberately left as is**: dan wants the sea to keep following the
+  live wind.
+- **X3 deferred**: the indicator work is tied to the minimap, which the port
+  does not have yet; to be looked at with it.
+
 ## Plan
 
 Steps in the order to do them; each is visible on its own. X-numbers are
