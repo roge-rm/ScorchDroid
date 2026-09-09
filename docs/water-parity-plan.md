@@ -16,7 +16,7 @@ before the next. W5-W12 continue the W-numbering of the earlier water work.
 **Status (2026-09-09): all steps done**, one commit each - W5 05aa08c, W9
 674e130, W8 00a33d5, W6+W7 46bddea (which also retired the sine sea and its
 switch, since the fine detail needs the tile's normal texture from that step
-on), W10a 3a2de54, W10c 9000467, W11 the commit after. W12 needed nothing
+on), W10a 3a2de54, W10c 9000467, W11 bc753fc. W12 needed nothing
 beyond the update rate following the slider. Verified on the emulator per
 step: shader compiles, the "Ocean tile uploaded" and "Water grid" log lines
 carry the expected numbers, screenshots at each stage.
