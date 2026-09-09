@@ -588,19 +588,32 @@ bool applyLightMap(const Inputs &in, Texture &texture)
 		}
 	}
 
-	// Multiply into the texture, nearest-sampled. Upstream scales the light
-	// map up with gluScaleImage first; sampling straight from it is the same
-	// thing without the intermediate copy, and the map is smooth enough that
-	// the difference doesn't show.
+	// G3: multiply into the texture exactly as upstream does - the 256
+	// map scaled up to the texture's size with gluScaleImage, which is a
+	// bilinear resample, then each texel times (light * 1.2). The 1.2 is
+	// upstream's own (addLightMapToBitmap); without it the baked ground
+	// came out 17% darker than the PC game's.
 	for (int y = 0; y < texture.height; y++) {
-		const int ly = std::min(y * lightMapSize / texture.height, lightMapSize - 1);
+		const float fy = ((float) y + 0.5f) * (float) lightMapSize / (float) texture.height - 0.5f;
+		const int ly0 = std::min(std::max((int) floorf(fy), 0), lightMapSize - 1);
+		const int ly1 = std::min(ly0 + 1, lightMapSize - 1);
+		const float wy = std::min(std::max(fy - (float) ly0, 0.0f), 1.0f);
 		for (int x = 0; x < texture.width; x++) {
-			const int lx = std::min(x * lightMapSize / texture.width, lightMapSize - 1);
-			const float *lit = &light[((size_t) ly * lightMapSize + lx) * 3];
+			const float fx = ((float) x + 0.5f) * (float) lightMapSize / (float) texture.width - 0.5f;
+			const int lx0 = std::min(std::max((int) floorf(fx), 0), lightMapSize - 1);
+			const int lx1 = std::min(lx0 + 1, lightMapSize - 1);
+			const float wx = std::min(std::max(fx - (float) lx0, 0.0f), 1.0f);
+			const float *l00 = &light[((size_t) ly0 * lightMapSize + lx0) * 3];
+			const float *l10 = &light[((size_t) ly0 * lightMapSize + lx1) * 3];
+			const float *l01 = &light[((size_t) ly1 * lightMapSize + lx0) * 3];
+			const float *l11 = &light[((size_t) ly1 * lightMapSize + lx1) * 3];
 			unsigned char *dest = &texture.rgb[((size_t) y * texture.width + x) * 3];
 			for (int c = 0; c < 3; c++) {
+				const float top = l00[c] + (l10[c] - l00[c]) * wx;
+				const float bottom = l01[c] + (l11[c] - l01[c]) * wx;
+				const float lit = top + (bottom - top) * wy;
 				dest[c] = (unsigned char) std::min(255.0f,
-					std::max(0.0f, (float) dest[c] * lit[c]));
+					std::max(0.0f, (float) dest[c] * (lit * 1.2f)));
 			}
 		}
 	}
