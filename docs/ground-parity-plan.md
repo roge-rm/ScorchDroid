@@ -81,6 +81,17 @@ Already matching and needing nothing: the heightmap itself, the band and
 slope blending, the shore band, the shadow-or-bake decision, the surround's
 geometry and texture choice, the scorch marks, the fog.
 
+## Status (2026-09-09)
+
+All eight done, one commit each after G1+G2's shared one: G1+G2 c4248aa,
+G3 68a1c6d, G4 40e5f40, G5 29a1484, G6+G8 51cefe7, G7 the commit after.
+Verified on the emulator: the 1024 build takes 0.6 s on its worker, the
+detail loads without the old hang, the marker ring has upstream's 32
+points on a 256 map; host-tests pin the size-independent tiling (a 128
+and a 512 build agree on all 49,152 channels where they sample the same
+source pixel) and the light map's 1.2. The emulator reports no
+anisotropic filtering extension, so G6 is exercised only on a device.
+
 ## Plan
 
 G-numbers, in the order to do them; each is visible on its own.
