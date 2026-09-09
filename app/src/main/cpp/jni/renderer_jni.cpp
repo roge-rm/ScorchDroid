@@ -1896,6 +1896,24 @@ namespace
 			 w, h, verts1D, verts1D, terrainMinHeight, terrainMaxHeight);
 	}
 
+	// G6: anisotropic filtering, where the device has it (essentially every
+	// GLES3 one). Upstream draws its main map with plain linear filtering
+	// and no mipmaps, which on a phone screen at oblique angles shimmers;
+	// keeping the mipmaps and adding anisotropy keeps upstream's sharpness
+	// on oblique ground without the shimmer. A deliberate deviation.
+	void applyAnisotropy()
+	{
+		static int checked = 0;   // 0 unknown, 1 yes, -1 no
+		if (checked == 0) {
+			const char *ext = (const char *) glGetString(GL_EXTENSIONS);
+			checked = (ext && strstr(ext, "GL_EXT_texture_filter_anisotropic")) ? 1 : -1;
+			LOGI("Anisotropic filtering: %s", checked == 1 ? "available, 4x" : "not available");
+		}
+		if (checked != 1) return;
+		const GLenum kMaxAnisotropy = 0x84FE;   // GL_TEXTURE_MAX_ANISOTROPY_EXT
+		glTexParameterf(GL_TEXTURE_2D, kMaxAnisotropy, 4.0f);
+	}
+
 	// G1: upstream's texture size follows its TexureSize option - 256 at
 	// Low, 1024 at the default, 2048 at High. Here it follows the Landscape
 	// detail slider, which already sets the mesh: the full 256 grid gets
@@ -1997,6 +2015,7 @@ namespace
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		applyAnisotropy();
 		LOGI("Ground texture built: %dx%d", ground.width, ground.height);
 
 		// G2: the detail image, mipmapped and repeating (upstream's
@@ -2014,6 +2033,7 @@ namespace
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+			applyAnisotropy();
 			LOGI("Detail texture: %dx%d, one tile per 16 units", detail.width, detail.height);
 		} else {
 			LOGI("Detail texture: none (%s)", groundJob.inputs.detail.c_str());
@@ -2722,8 +2742,12 @@ namespace
 				(LandscapeTexTextureGenerate *) tex->texture;
 			roofTexture = loadSkyTexture(generate->roof, "", true, &texW, &texH);
 		}
-		const float uScale = (texW > 0) ? ((float) w / (float) texW) : 1.0f;
-		const float vScale = (texH > 0) ? ((float) h / (float) texH) : 1.0f;
+		// G8: upstream's SkyRoof puts the <roof> image once across the map
+		// (its texture coordinate is position / map size), whatever the
+		// image's pixel size. The port used to tile it by pixel size, which
+		// only agreed on a 256 map with a 256 image.
+		const float uScale = 1.0f;
+		const float vScale = 1.0f;
 		roofUScale = uScale;
 		roofVScale = vScale;
 
