@@ -64,6 +64,8 @@ namespace ScorchDroidSky
 		// landscape says otherwise. Night maps set it, because a moon that
 		// adds light to whatever is behind it looks like a hole.
 		bool sunBlendAdditive = true;
+		// <nosunfog>: upstream draws the sun billboard with fog unless set.
+		bool sunFog = true;
 	};
 
 	// Returns a Description with valid=false if there is no landscape yet

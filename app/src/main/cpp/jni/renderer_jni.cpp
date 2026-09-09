@@ -209,6 +209,8 @@ namespace
 	GLuint cloudProgram = 0, cloudVao = 0, cloudVbo = 0, cloudTexture = 0;
 	GLint  cloudMvpLoc = -1, cloudScrollLoc = -1, cloudTexScaleLoc = -1;
 	GLint  cloudSamplerLoc = -1, cloudTintLoc = -1, cloudOpacityLoc = -1;
+	GLint  cloudFogColorLoc = -1, cloudFogDensityLoc = -1, cloudEyePosLoc = -1;
+	GLint  skyFogColorLoc = -1, skyFogDensityLoc = -1, skyEyeHeightLoc = -1;
 	bool   cloudsBuilt = false, cloudsVisible = false;
 	float  cloudScrollX = 0.0f, cloudScrollY = 0.0f;
 
@@ -1071,7 +1073,8 @@ namespace
 			vec3 n = normalize(vNormal);
 			float diffuse = max(dot(n, uLightDir), 0.0);
 			vec3 lit = vColor * (0.45 + diffuse * 0.75);
-			float fog = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
+			// Fixed-function GL_EXP2 fog, as upstream's models get.
+			float fog = clamp(exp(-(uFogDensity * vViewDepth) * (uFogDensity * vViewDepth)), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
 		}
 	)";
@@ -1140,7 +1143,8 @@ namespace
 			float diffuse = abs(dot(n, uLightDir));
 			vec3 lit = texel.rgb * vColor * (0.45 + diffuse * 0.75);
 
-			float fog = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
+			// Fixed-function GL_EXP2 fog, as upstream's trees get.
+			float fog = clamp(exp(-(uFogDensity * vViewDepth) * (uFogDensity * vViewDepth)), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
 		}
 	)";
@@ -1158,7 +1162,9 @@ namespace
 			vec3 n = normalize(vNormal);
 			float diffuse = max(dot(n, uLightDir), 0.0);
 			vec3 lit = uColor.rgb * (0.45 + diffuse * 0.75);
-			float fog = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
+			// Fixed-function GL_EXP2 fog, as upstream's models get. Only the
+			// land and water shaders use the 350-unit, three-times curve.
+			float fog = clamp(exp(-(uFogDensity * vViewDepth) * (uFogDensity * vViewDepth)), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, lit, fog), uColor.a);
 		}
 	)";
@@ -1247,26 +1253,59 @@ namespace
 		uniform float uHorizonGlow;
 		uniform float uFlash;
 		uniform float uSunDisc;
+		// The fog, and the camera's height above upstream's dome centre.
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
+		uniform float uEyeHeight;
 		void main() {
 			vec3 d = normalize(vRay);
 
-			// Upstream's gradient is indexed by height above the horizon.
-			// Below it there is nothing to show but the horizon colour -
-			// the ground is drawn over that anyway, and clamping avoids a
-			// hard band when the camera dips.
-			float t = clamp(d.y, 0.0, 1.0) * 15.0;
+			// Upstream's gradient is indexed by the *angle* above the
+			// horizon (Hemisphere::drawColored: colour row = slice / slices
+			// * 15, where a slice is an equal step of elevation), not by
+			// the sine of it. Below the horizon there is nothing to show
+			// but the horizon colour - the ground is drawn over that
+			// anyway, and clamping avoids a hard band when the camera dips.
+			float t = asin(clamp(d.y, 0.0, 1.0)) / 1.5707963 * 15.0;
 			int lo = int(floor(t));
 			int hi = min(lo + 1, 15);
 			vec3 sky = mix(uGradient[lo], uGradient[hi], fract(t));
 
-			// The sun itself, then its halo. Two powers rather than one so
-			// the disc stays tight while the glow spreads.
+			// Upstream's horizon glow, per vertex of the dome: every colour
+			// channel lifted by (dot(direction, sun) + 1) / 4 - a quarter
+			// everywhere, half towards the sun - and capped at 1.
+			if (uHorizonGlow > 0.5) {
+				sky = min(sky + vec3((dot(d, uSunDir) + 1.0) / 4.0), vec3(1.0));
+			}
+
+			// Upstream draws its sky dome with fixed-function fog *on*: a
+			// flattened ellipsoid 2000 units across and 225 tall, centred
+			// 15 units below sea level under the camera, so the horizon is
+			// 2000 units away and, with GL_EXP2 (exp(-(density * z)^2)),
+			// almost entirely the fog colour; even the zenith at 225 units
+			// carries a little. That is why upstream's night horizon is
+			// dark and this port's was a bright band the sea then mirrored.
+			// The ray's distance to that dome is solved here per fragment.
+			// In thousands of units: the raw coefficients are around 1e-7,
+			// which a phone's mediump float flushes to zero.
+			{
+				float R = 2.0, r = 0.225;
+				float h = (uEyeHeight + 15.0) / 1000.0;
+				float a = (d.x * d.x + d.z * d.z) / (R * R) + (d.y * d.y) / (r * r);
+				float b = 2.0 * h * d.y / (r * r);
+				float c = (h * h) / (r * r) - 1.0;
+				float disc = b * b - 4.0 * a * c;
+				float dist = (disc > 0.0 && a > 0.0) ? (-b + sqrt(disc)) / (2.0 * a) : R;
+				float z = uFogDensity * 1000.0 * dist;
+				sky = mix(uFogColor, sky, exp(-z * z));
+			}
+
+			// The sun itself, only when the landscape has no sun texture of
+			// its own; otherwise the sprite is the sun and this would show
+			// through it as a second, harder one. Not fogged here: the
+			// sprite path fogs the real billboard unless <nosunfog>.
 			float toSun = max(dot(d, uSunDir), 0.0);
-			// The tight disc is only drawn here when the landscape has no
-			// sun texture of its own; otherwise the sprite is the sun and
-			// this would show through it as a second, harder one.
 			sky += uSunColor * pow(toSun, 256.0) * 2.0 * uSunDisc;
-			sky += uSunColor * pow(toSun, 12.0) * 0.35 * uHorizonGlow;
 
 			// SkyFlash: lift the whole sky towards white.
 			fragColor = vec4(mix(sky, vec3(1.0), uFlash), 1.0);
@@ -1311,31 +1350,37 @@ namespace
 		uniform mat4 uMVP;
 		uniform vec2 uScroll;
 		uniform float uTexScale;
+		uniform vec3 uEyePos;
 		out vec2 vUv;
-		out float vViewDepth;
+		out float vEyeDistance;
 		void main() {
 			vUv = aPosition.xz * uTexScale + uScroll;
 			gl_Position = uMVP * vec4(aPosition, 1.0);
-			vViewDepth = gl_Position.w;
+			vEyeDistance = distance(aPosition, uEyePos);
 		}
 	)";
 
 	const char *kCloudFragmentShader = R"(#version 300 es
 		precision mediump float;
 		in vec2 vUv;
-		in float vViewDepth;
+		in float vEyeDistance;
 		out vec4 fragColor;
 		uniform sampler2D uClouds;
 		uniform vec3 uTint;
 		uniform float uOpacity;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
 		void main() {
 			vec4 c = texture(uClouds, vUv);
-			// Fade out with distance rather than letting the layer run to
-			// the horizon: a near-horizontal plane collapses a whole tile
-			// into a pixel out there, which aliases exactly the way the
-			// water did, and clouds meeting the ground looks wrong anyway.
-			float fade = clamp(1.0 - vViewDepth / 1200.0, 0.0, 1.0);
-			fragColor = vec4(c.rgb * uTint, c.a * uOpacity * fade * fade);
+			// Upstream's cloud layers sit on a 1980-unit dome drawn with
+			// fixed-function GL_EXP2 fog, so a cloud near the horizon is
+			// nearly the fog colour. Same curve here, by distance from the
+			// eye - which also does the job the old distance fade did, of
+			// keeping the layer from aliasing out at the horizon. The stars
+			// are drawn with fog off (density 0), as upstream draws them.
+			float z = uFogDensity * vEyeDistance;
+			vec3 colour = mix(uFogColor, c.rgb * uTint, exp(-z * z));
+			fragColor = vec4(colour, c.a * uOpacity);
 		}
 	)";
 
@@ -1459,7 +1504,9 @@ namespace
 		in vec4 vReflectCoord;
 		in vec4 vShadowCoord;
 		out vec4 fragColor;
-		uniform vec3 uSunDir;
+		// The sun's position (upstream's GL_LIGHT0 for the water is the sun
+		// as a point light, so the direction to it is per fragment).
+		uniform vec3 uSunPos;
 		uniform vec3 uSkyHorizon;
 		uniform vec3 uSkyZenith;
 		uniform vec3 uEyePos;
@@ -1517,7 +1564,7 @@ namespace
 			// E, the direction *to* the viewer, and L, the direction to the
 			// sun - both as upstream's shader has them.
 			vec3 E = normalize(uEyePos - vWorldPos);
-			vec3 L = normalize(uSunDir);
+			vec3 L = normalize(uSunPos - vWorldPos);
 			vec3 R = reflect(-L, n);
 			float s0 = sunShadow();
 
@@ -2188,8 +2235,18 @@ namespace
 
 		glUseProgram(spriteProgram);
 		glUniformMatrix4fv(spriteMvpLoc, 1, GL_FALSE, mvp.m);
-		glUniform4f(spriteTintLoc, skyDescription.sunColor[0],
-					skyDescription.sunColor[1], skyDescription.sunColor[2], 1.0f);
+		// Upstream draws the billboard with fixed-function fog unless the
+		// landscape says <nosunfog>: GL_EXP2 by its distance from the eye.
+		float tint[3] = { skyDescription.sunColor[0], skyDescription.sunColor[1], skyDescription.sunColor[2] };
+		if (skyDescription.sunFog && g_showFog) {
+			const float dx = cx - g_pickCamera.eyeX, dy = cy - g_pickCamera.eyeY, dz = cz - g_pickCamera.eyeZ;
+			const float z = skyDescription.fogDensity * sqrtf(dx * dx + dy * dy + dz * dz);
+			const float f = expf(-z * z);
+			float fog[3];
+			currentFogColor(fog);
+			for (int i = 0; i < 3; i++) tint[i] = fog[i] + (tint[i] - fog[i]) * f;
+		}
+		glUniform4f(spriteTintLoc, tint[0], tint[1], tint[2], 1.0f);
 		glActiveTexture(GL_TEXTURE0);
 		glBindTexture(GL_TEXTURE_2D, sunTexture);
 		glUniform1i(spriteSamplerLoc, 0);
@@ -2335,7 +2392,7 @@ namespace
 	void drawSky(float eyeFwdX, float eyeFwdY, float eyeFwdZ,
 				 float rightX, float rightY, float rightZ,
 				 float upX, float upY, float upZ,
-				 float tanHalfFov, float aspect)
+				 float tanHalfFov, float aspect, float eyeHeight)
 	{
 		if (!skyDescription.valid || skyProgram == 0) return;
 
@@ -2370,6 +2427,13 @@ namespace
 		glUniform1f(skyFlashLoc,
 					std::min(1.0f, skyFlashRemaining / kSkyFlashSeconds));
 		glUniform1f(skySunDiscLoc, (sunTexture != 0) ? 0.0f : 1.0f);
+		{
+			float fog[3];
+			currentFogColor(fog);
+			glUniform3f(skyFogColorLoc, fog[0], fog[1], fog[2]);
+			glUniform1f(skyFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
+			glUniform1f(skyEyeHeightLoc, eyeHeight);
+		}
 
 		glBindVertexArray(skyVao);
 		glBindBuffer(GL_ARRAY_BUFFER, skyVbo);
@@ -4971,6 +5035,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	cloudProgram = linkProgram(kCloudVertexShader, kCloudFragmentShader);
 	cloudMvpLoc = glGetUniformLocation(cloudProgram, "uMVP");
 	cloudScrollLoc = glGetUniformLocation(cloudProgram, "uScroll");
+	cloudFogColorLoc = glGetUniformLocation(cloudProgram, "uFogColor");
+	cloudFogDensityLoc = glGetUniformLocation(cloudProgram, "uFogDensity");
+	cloudEyePosLoc = glGetUniformLocation(cloudProgram, "uEyePos");
 	cloudTexScaleLoc = glGetUniformLocation(cloudProgram, "uTexScale");
 	cloudSamplerLoc = glGetUniformLocation(cloudProgram, "uClouds");
 	cloudTintLoc = glGetUniformLocation(cloudProgram, "uTint");
@@ -4983,6 +5050,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	skyGlowLoc = glGetUniformLocation(skyProgram, "uHorizonGlow");
 	skyFlashLoc = glGetUniformLocation(skyProgram, "uFlash");
 	skySunDiscLoc = glGetUniformLocation(skyProgram, "uSunDisc");
+	skyFogColorLoc = glGetUniformLocation(skyProgram, "uFogColor");
+	skyFogDensityLoc = glGetUniformLocation(skyProgram, "uFogDensity");
+	skyEyeHeightLoc = glGetUniformLocation(skyProgram, "uEyeHeight");
 	glGenVertexArrays(1, &skyVao);
 	glGenBuffers(1, &skyVbo);
 	glBindVertexArray(skyVao);
@@ -5031,7 +5101,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
 	waterWaveAmpLoc = glGetUniformLocation(waterProgram, "uWaveAmplitude");
 	waterWaveLodLoc = glGetUniformLocation(waterProgram, "uWaveLod");
-	waterSunDirLoc = glGetUniformLocation(waterProgram, "uSunDir");
+	waterSunDirLoc = glGetUniformLocation(waterProgram, "uSunPos");
 	waterMapSizeLoc = glGetUniformLocation(waterProgram, "uMapSize");
 
 	sightProgram = linkProgram(kSightVertexShader, kSightFragmentShader);
@@ -6036,6 +6106,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glUniform1f(cloudTexScaleLoc, 1.0f / 700.0f);
 			glUniform3f(cloudTintLoc, 1.0f, 1.0f, 1.0f);
 			glUniform1f(cloudOpacityLoc, 0.7f);
+			glUniform3f(cloudFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+			glUniform1f(cloudFogDensityLoc, 0.0f);   // upstream draws the stars with fog off
+			glUniform3f(cloudEyePosLoc, g_pickCamera.eyeX, g_pickCamera.eyeY, g_pickCamera.eyeZ);
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, starTexture);
 			glUniform1i(cloudSamplerLoc, 0);
@@ -6071,6 +6144,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 						0.4f + skyDescription.sunColor[1] * 0.6f,
 						0.4f + skyDescription.sunColor[2] * 0.6f);
 			glUniform1f(cloudOpacityLoc, 0.75f);
+			glUniform3f(cloudFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+			glUniform1f(cloudFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
+			glUniform3f(cloudEyePosLoc, g_pickCamera.eyeX, g_pickCamera.eyeY, g_pickCamera.eyeZ);
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, cloudTexture);
 			glUniform1i(cloudSamplerLoc, 0);
@@ -6855,7 +6931,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		drawSky(-reflView.m[2], -reflView.m[6], -reflView.m[10],
 				reflView.m[0], reflView.m[4], reflView.m[8],
 				reflView.m[1], reflView.m[5], reflView.m[9],
-				tanf(kFovYRadians * 0.5f), aspect);
+				tanf(kFovYRadians * 0.5f), aspect, reflEyeY);
 		// The clouds, stars and sun, which upstream's drawLayers() puts in
 		// its reflection as well - a mirrored gradient under a clouded sky
 		// was the giveaway that this was only half a reflection.
@@ -6884,7 +6960,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	drawSky(-view.m[2], -view.m[6], -view.m[10],
 			view.m[0], view.m[4], view.m[8],
 			view.m[1], view.m[5], view.m[9],
-			tanf(kFovYRadians * 0.5f), aspect);
+			tanf(kFovYRadians * 0.5f), aspect, eyeY);
 
 	drawSkyLayersPass(mvp, view);
 
@@ -7099,16 +7175,28 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 		glUniform1f(waterAlphaLoc, waterAlpha);
 		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
-		// The same two ends of the gradient the sky dome is drawn from, so a
-		// reflection cannot disagree with the sky it is reflecting.
-		glUniform3f(waterSkyHorizonLoc,
-					skyDescription.gradient[0][0],
-					skyDescription.gradient[0][1],
-					skyDescription.gradient[0][2]);
-		glUniform3f(waterSkyZenithLoc,
-					skyDescription.gradient[ScorchDroidSky::kGradientSteps - 1][0],
-					skyDescription.gradient[ScorchDroidSky::kGradientSteps - 1][1],
-					skyDescription.gradient[ScorchDroidSky::kGradientSteps - 1][2]);
+		// The two ends of the sky gradient *as the sky pass draws them*:
+		// fogged by upstream's dome distances, 2000 units at the horizon
+		// and 225 at the zenith, so the sea's own reflection fallback
+		// agrees with the sky it stands in for. Unfogged, the far sea
+		// mirrored a bright horizon the sky pass never showed.
+		{
+			float skyFog[3];
+			currentFogColor(skyFog);
+			const float density = g_showFog ? skyDescription.fogDensity : 0.0f;
+			const float fh = expf(-(density * 2000.0f) * (density * 2000.0f));
+			const float fz = expf(-(density * 225.0f) * (density * 225.0f));
+			const float *top = skyDescription.gradient[ScorchDroidSky::kGradientSteps - 1];
+			const float *bottom = skyDescription.gradient[0];
+			glUniform3f(waterSkyHorizonLoc,
+						skyFog[0] + (bottom[0] - skyFog[0]) * fh,
+						skyFog[1] + (bottom[1] - skyFog[1]) * fh,
+						skyFog[2] + (bottom[2] - skyFog[2]) * fh);
+			glUniform3f(waterSkyZenithLoc,
+						skyFog[0] + (top[0] - skyFog[0]) * fz,
+						skyFog[1] + (top[1] - skyFog[1]) * fz,
+						skyFog[2] + (top[2] - skyFog[2]) * fz);
+		}
 		glUniform3f(waterEyePosLoc, eyeX, eyeY, eyeZ);
 		float waterFog[3];
 		currentFogColor(waterFog);
@@ -7123,9 +7211,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// culling.
 		glDisable(GL_CULL_FACE);
 		glUniform3f(waterSunDirLoc,
-					skyDescription.sunDirection[0],
-					skyDescription.sunDirection[2],
-					-skyDescription.sunDirection[1]);
+					skyDescription.sunPosition[0],
+					skyDescription.sunPosition[2],
+					worldZFromEngineY(skyDescription.sunPosition[1]));
 
 		// The mesh, rebuilt if the Water detail has changed since. The
 		// ocean tile is already in world units at upstream's own scale
