@@ -28,7 +28,9 @@
 #include <vector>
 #include <sstream>
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <thread>
 #include <algorithm>
 #include <cmath>
 
@@ -65,6 +67,7 @@
 #include <MovementStore.h>
 #include <TargetModelStore.h>
 #include <SkyDescription.hpp>
+#include <OceanWaves.h>
 #include <InstanceBuffer.hpp>
 #include <TreeGeometry.hpp>
 #include <3dsparse/TreeModelFactory.hpp>
@@ -204,6 +207,20 @@ namespace
 	// W2: the displaced part of the surface. The flat skirt above still
 	// covers out to the far plane; this grid is the near water that moves.
 	GLuint waterGridVao = 0, waterGridVbo = 0;
+	// W4: the ocean tile, and the worker that keeps it up to date. The
+	// generator is a couple of milliseconds of FFT per update, which is
+	// fine off the GL thread and not fine on it.
+	GLuint oceanTexture = 0;
+	GLint  waterWaveTexLoc = -1, waterUseWaveTexLoc = -1, waterWaveTileLoc = -1;
+	std::atomic<int> g_oceanStyle{0};     // 0 = this port's sine waves, 1 = upstream's
+	std::thread oceanThread;
+	std::atomic<bool> oceanRunning{false};
+	std::mutex oceanMutex;
+	ScorchDroidOcean::Tile oceanReady;    // guarded by oceanMutex
+	bool oceanHasNew = false;             // guarded by oceanMutex
+	float oceanSeededSpeed = -1.0f, oceanSeededDirection = 0.0f;
+	std::vector<float> oceanUpload;       // reused, so no per-update allocation
+	int oceanUploadLogsLeft = 3;
 	int    waterGridVertexCount = 0;
 	int    waterSkirtVertexCount = 0;
 	float  waveCentreX = 0.0f, waveCentreZ = 0.0f, waveReach = 1.0f;
@@ -1092,6 +1109,13 @@ namespace
 		out float vViewDepth;
 		out vec3 vNormal;
 
+		// W4: Scorched3D's own ocean, as a tile the CPU regenerates from a
+		// Tessendorf spectrum (see OceanWaves.h). Height in R, the two
+		// slopes in G and B, repeated across the sea.
+		uniform sampler2D uWaveTex;
+		uniform float uUseWaveTex;
+		uniform float uWaveTileLength;
+
 		// The same two waves the surface is coloured by, as a height field,
 		// so the shape and the shading cannot drift apart.
 		float waveHeight(vec2 p, float t) {
@@ -1109,17 +1133,31 @@ namespace
 			float amp = uWaveAmplitude * (1.0 - clamp(edge, 0.0, 1.0));
 
 			vec3 world = aPosition;
-			world.y += waveHeight(vWorld, uTime) * amp;
+			if (uUseWaveTex > 0.5) {
+				// textureLod, not texture: a vertex shader has no
+				// derivatives to pick a mip level from, and ES3 requires the
+				// level to be given explicitly here.
+				vec3 wave = textureLod(uWaveTex, vWorld / uWaveTileLength, 0.0).rgb;
+				world.y += wave.r * amp;
+				// The slopes come out of the spectrum differentiated
+				// analytically, so the normal is exact rather than sampled
+				// from neighbours - but they are slopes of a unit-amplitude
+				// tile, so they scale with the same amplitude the height
+				// does.
+				vNormal = normalize(vec3(-wave.g * amp, 1.0, -wave.b * amp));
+			} else {
+				world.y += waveHeight(vWorld, uTime) * amp;
 
-			// Normal from the analytic slope rather than from neighbouring
-			// vertices: exact, and it costs two more evaluations instead of
-			// a bigger vertex format.
-			float e = 1.0;
-			float hx = (waveHeight(vWorld + vec2(e, 0.0), uTime)
-					  - waveHeight(vWorld - vec2(e, 0.0), uTime)) * amp;
-			float hz = (waveHeight(vWorld + vec2(0.0, e), uTime)
-					  - waveHeight(vWorld - vec2(0.0, e), uTime)) * amp;
-			vNormal = normalize(vec3(-hx, 2.0 * e, -hz));
+				// Normal from the analytic slope rather than from
+				// neighbouring vertices: exact, and it costs two more
+				// evaluations instead of a bigger vertex format.
+				float e = 1.0;
+				float hx = (waveHeight(vWorld + vec2(e, 0.0), uTime)
+						  - waveHeight(vWorld - vec2(e, 0.0), uTime)) * amp;
+				float hz = (waveHeight(vWorld + vec2(0.0, e), uTime)
+						  - waveHeight(vWorld - vec2(0.0, e), uTime)) * amp;
+				vNormal = normalize(vec3(-hx, 2.0 * e, -hz));
+			}
 
 			vWorldPos = world;
 			gl_Position = uMVP * vec4(world, 1.0);
@@ -2295,6 +2333,123 @@ namespace
 			 "texture %s (%dx%d, %.1fx%.1f tiles)",
 			 roofIndexCount, roofSkirtVertexCount, roofMinHeight, roofMaxHeight,
 			 roofTexture ? "loaded" : "none", texW, texH, uScale, vScale);
+	}
+
+	// W4: keeps the ocean tile current.
+	//
+	// The spectrum is fixed by the wind, so it is only rebuilt when the wind
+	// changes; what runs continuously is the far cheaper phase rotation and
+	// the two inverse FFTs behind it. That runs on its own thread, and the
+	// GL thread only ever uploads whatever is finished - so a slow frame
+	// makes the sea move less smoothly rather than making the frame slower.
+	void stopOceanWorker()
+	{
+		if (!oceanRunning.exchange(false)) return;
+		if (oceanThread.joinable()) oceanThread.join();
+		std::lock_guard<std::mutex> lock(oceanMutex);
+		oceanHasNew = false;
+	}
+
+	void startOceanWorker()
+	{
+		if (oceanRunning.load()) return;
+		oceanRunning.store(true);
+		oceanThread = std::thread([]() {
+			// Its own clock: the sea's phase should not depend on how often
+			// the GL thread happens to ask for it.
+			auto started = std::chrono::steady_clock::now();
+			ScorchDroidOcean::Tile tile;
+			while (oceanRunning.load()) {
+				const float seconds = std::chrono::duration<float>(
+						std::chrono::steady_clock::now() - started).count();
+				ScorchDroidOcean::generate(seconds, tile);
+				{
+					std::lock_guard<std::mutex> lock(oceanMutex);
+					oceanReady = tile;
+					oceanHasNew = true;
+				}
+				// Twenty a second is smooth for a sea and leaves the core
+				// alone the rest of the time.
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			}
+		});
+	}
+
+	void updateOceanIfNeeded(ScorchedContext &ctx)
+	{
+		if (g_oceanStyle.load() != 1) {
+			stopOceanWorker();
+			return;
+		}
+
+		// Upstream seeds its generator from the game's own wind, and falls
+		// back to a diagonal breeze when the round is dead calm - a flat sea
+		// is not a sea.
+		Wind &wind = ctx.getSimulator().getWind();
+		FixedVector direction = wind.getWindDirection();
+		float bearing = atan2f(direction[0].asFloat(), direction[1].asFloat());
+		if (direction[0] == fixed(0) && direction[1] == fixed(0)) {
+			// Upstream's own fallback for a dead calm round: a diagonal
+			// breeze, because a flat sea is not a sea.
+			bearing = atan2f(0.8f, 0.8f);
+		}
+		// Upstream's own mapping, verbatim (Water2::generate): the game's
+		// 0-5 wind becomes 3-13 for the spectrum. Worth taking exactly
+		// rather than inventing a scale - it decides the wavelength, and a
+		// wind twice as strong gives waves four times as long.
+		const float generatorSpeed = wind.getWindSpeed().asFloat() * 2.0f + 3.0f;
+		if (fabsf(generatorSpeed - oceanSeededSpeed) > 0.01f ||
+			fabsf(bearing - oceanSeededDirection) > 0.01f) {
+			ScorchDroidOcean::reseed(generatorSpeed, bearing, 0x5cd0u);
+			oceanSeededSpeed = generatorSpeed;
+			oceanSeededDirection = bearing;
+		}
+
+		startOceanWorker();
+
+		// Upload whatever the worker has finished, if anything.
+		bool haveNew = false;
+		{
+			std::lock_guard<std::mutex> lock(oceanMutex);
+			if (oceanHasNew && !oceanReady.height.empty()) {
+				const int n = ScorchDroidOcean::kResolution;
+				oceanUpload.resize((size_t) n * n * 3);
+				for (size_t i = 0; i < (size_t) n * n; i++) {
+					oceanUpload[i * 3 + 0] = oceanReady.height[i];
+					oceanUpload[i * 3 + 1] = oceanReady.slopeX[i];
+					oceanUpload[i * 3 + 2] = oceanReady.slopeZ[i];
+				}
+				oceanHasNew = false;
+				haveNew = true;
+			}
+		}
+		if (!haveNew) return;
+
+		const int n = ScorchDroidOcean::kResolution;
+		if (oceanTexture == 0) {
+			glGenTextures(1, &oceanTexture);
+			glBindTexture(GL_TEXTURE_2D, oceanTexture);
+			// Repeated across the sea, and filtered - RGB16F is
+			// texture-filterable in ES3 without an extension, which the
+			// 32-bit float formats are not.
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, n, n, 0, GL_RGB, GL_FLOAT, nullptr);
+		}
+		glBindTexture(GL_TEXTURE_2D, oceanTexture);
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, n, n, GL_RGB, GL_FLOAT, oceanUpload.data());
+		if (oceanUploadLogsLeft > 0) {
+			oceanUploadLogsLeft--;
+			float peak = 0.0f, peakSlope = 0.0f;
+			for (size_t i = 0; i < (size_t) n * n; i++) {
+				peak = std::max(peak, fabsf(oceanUpload[i * 3]));
+				peakSlope = std::max(peakSlope, fabsf(oceanUpload[i * 3 + 1]));
+			}
+			LOGI("Ocean tile uploaded: wind %.1f bearing %.2f, peak height %.2f, peak slope %.3f",
+				 oceanSeededSpeed, oceanSeededDirection, peak, peakSlope);
+		}
 	}
 
 	// M6 water: reads the landscape's own water definition and builds the
@@ -3812,6 +3967,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterEyeLoc = glGetUniformLocation(waterProgram, "uEye");
 	waterSkyHorizonLoc = glGetUniformLocation(waterProgram, "uSkyHorizon");
 	waterSkyZenithLoc = glGetUniformLocation(waterProgram, "uSkyZenith");
+	waterWaveTexLoc = glGetUniformLocation(waterProgram, "uWaveTex");
+	waterUseWaveTexLoc = glGetUniformLocation(waterProgram, "uUseWaveTex");
+	waterWaveTileLoc = glGetUniformLocation(waterProgram, "uWaveTileLength");
 	waterEyePosLoc = glGetUniformLocation(waterProgram, "uEyePos");
 	waterFogColorLoc = glGetUniformLocation(waterProgram, "uFogColor");
 	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
@@ -5090,6 +5248,16 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// on top of the surface.
 	if (waterVisible && waterProgram != 0) {
 		glUseProgram(waterProgram);
+		// W4: the ocean tile, when upstream's spectrum is the one in use.
+		updateOceanIfNeeded(*ctx);
+		const bool useOcean = (g_oceanStyle.load() == 1) && oceanTexture != 0;
+		glUniform1f(waterUseWaveTexLoc, useOcean ? 1.0f : 0.0f);
+		glUniform1f(waterWaveTileLoc, ScorchDroidOcean::kTileLength);
+		if (useOcean) {
+			glActiveTexture(GL_TEXTURE3);
+			glBindTexture(GL_TEXTURE_2D, oceanTexture);
+			glUniform1i(waterWaveTexLoc, 3);
+		}
 		glUniformMatrix4fv(waterMvpLoc, 1, GL_FALSE, mvp.m);
 		glUniform3f(waterDeepLoc, waterDeep[0], waterDeep[1], waterDeep[2]);
 		glUniform3f(waterShallowLoc, waterShallow[0], waterShallow[1], waterShallow[2]);
@@ -6035,6 +6203,13 @@ Java_com_rm_scorchdroid_NativeBridge_setRenderOptions(
 // M23: how finely the landscape is drawn, as a grid resolution. Takes
 // effect on the next landscape build, which the renderer forces as soon as
 // it sees the value change.
+// W4: which sea to draw - 0 for this port's two sine waves, 1 for
+// Scorched3D's own Tessendorf spectrum.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setOceanStyle(JNIEnv *env, jobject, jint style) {
+    g_oceanStyle.store(style == 1 ? 1 : 0);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_setTerrainDetail(JNIEnv *env, jobject, jint grid) {
     g_requestedTerrainGrid.store(grid);

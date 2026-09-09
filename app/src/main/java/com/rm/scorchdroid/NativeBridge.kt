@@ -280,6 +280,12 @@ object NativeBridge {
      */
     external fun setTerrainDetail(grid: Int)
 
+    /**
+     * W4: which sea to draw - 0 for this port's two sine waves, 1 for
+     * Scorched3D's own Tessendorf spectrum, generated on a worker thread.
+     */
+    external fun setOceanStyle(style: Int)
+
     /** M23: the range [setTerrainDetail] accepts, as "min|max". */
     external fun getTerrainDetailRange(): String
 
