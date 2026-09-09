@@ -246,7 +246,6 @@ class GameSettings(context: Context) {
         reflectionLevel = value.coerceIn(0, 2)
         prefs.edit().putInt(KEY_REFLECT, reflectionLevel).apply()
         NativeBridge.setReflectionStyle(reflectionLevel)
-        NativeBridge.setEffectsDetail(effectsDetail)
     }
 
     /**
@@ -295,6 +294,25 @@ class GameSettings(context: Context) {
         NativeBridge.setEffectsDetail(effectsDetail)
     }
 
+    /**
+     * The sun's shadow map, which is what puts an island's shadow on the sea
+     * beside it and a tank's on the ground. Upstream's own two sizes, plus
+     * off.
+     *
+     * Off is not unlit: it is upstream's own fallback for hardware without
+     * shadows, where the sun and the shadows hills cast on each other are
+     * baked into the ground texture instead. Changing this rebuilds that
+     * texture, so it takes a moment and cannot be done twice a frame.
+     */
+    var shadowDetail by mutableIntStateOf(prefs.getInt(KEY_SHADOWS, 2))
+        private set
+
+    fun updateShadowDetail(value: Int) {
+        shadowDetail = value.coerceIn(0, 2)
+        prefs.edit().putInt(KEY_SHADOWS, shadowDetail).apply()
+        NativeBridge.setShadowDetail(shadowDetail)
+    }
+
     var showFog by mutableStateOf(prefs.getBoolean(KEY_FOG, true))
         private set
 
@@ -320,6 +338,8 @@ class GameSettings(context: Context) {
         NativeBridge.setTerrainDetail(terrainDetail)
         NativeBridge.setOceanStyle(if (originalOcean) 1 else 0)
         NativeBridge.setReflectionStyle(reflectionLevel)
+        NativeBridge.setEffectsDetail(effectsDetail)
+        NativeBridge.setShadowDetail(shadowDetail)
     }
 
     private companion object {
@@ -350,6 +370,7 @@ class GameSettings(context: Context) {
         // is exactly what it did here. The old key is simply left behind.
         const val KEY_REFLECT = "graphics.reflectionLevel"
         const val KEY_EFFECTS = "graphics.effectsDetail"
+        const val KEY_SHADOWS = "graphics.shadowDetail"
         // The maximum the renderer allows - see kTerrainGridMax.
         const val DEFAULT_DETAIL = 256
     }

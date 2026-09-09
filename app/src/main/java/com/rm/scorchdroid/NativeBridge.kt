@@ -289,6 +289,9 @@ object NativeBridge {
     /** 0 low, 1 normal, 2 high - upstream's own effects detail levels. */
     external fun setEffectsDetail(level: Int)
 
+    /** 0 off, 1 for a 1024 shadow map, 2 for upstream's own 2048. */
+    external fun setShadowDetail(level: Int)
+
     /**
      * W3: how much the water reflects - 0 for the sky's own colours, 1 for
      * the sky and the land, 2 for the tanks and scenery as well. Above 0 the

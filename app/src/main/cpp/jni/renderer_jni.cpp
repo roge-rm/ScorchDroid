@@ -193,14 +193,18 @@ namespace
 
 	// M6 water surface: one quad at the landscape's own water height.
 	GLuint waterProgram = 0, waterVao = 0, waterVbo = 0;
-	GLint  waterMvpLoc = -1, waterDeepLoc = -1, waterShallowLoc = -1;
-	GLint  waterAlphaLoc = -1, waterTimeLoc = -1, waterEyeLoc = -1;
+	GLint  waterMvpLoc = -1, waterUpwellTopLoc = -1, waterUpwellBotLoc = -1;
+	GLint  waterHeightLoc = -1, waterSunDiffuseLoc = -1;
+	GLint  waterShadowTexLoc = -1, waterShadowMatrixLoc = -1, waterShadowEnabledLoc = -1;
+	GLint  waterAlphaLoc = -1, waterTimeLoc = -1;
 	GLint  waterSkyHorizonLoc = -1, waterSkyZenithLoc = -1, waterEyePosLoc = -1;
 	bool   waterBuilt = false;    // one attempt per landscape, success or not
 	bool   waterVisible = false;  // this landscape actually has water
 	float  waterHeight = 0.0f;
-	float  waterDeep[3] = { 0.11f, 0.26f, 0.45f };
-	float  waterShallow[3] = { 0.29f, 0.56f, 0.91f };
+	// Upstream's upwelling pair - the colour the sea's own body shows,
+	// bottom in a trough and top on a crest.
+	float  waterUpwellBot[3] = { 0.29f, 0.56f, 0.91f };
+	float  waterUpwellTop[3] = { 0.49f, 0.83f, 0.94f };
 	float  waterAlpha = 0.8f;
 	// Shoreline foam: a baked mask of how close each cell is to the water's
 	// edge, sampled by the water shader (see buildShoreMask).
@@ -211,6 +215,8 @@ namespace
 	// generator is a couple of milliseconds of FFT per update, which is
 	// fine off the GL thread and not fine on it.
 	GLint terrainClipEnabledLoc = -1, terrainClipBelowLoc = -1;
+	GLint terrainShadowMatrixLoc = -1, terrainShadowTexLoc = -1, terrainShadowEnabledLoc = -1;
+	GLint terrainAmbienceLoc = -1, terrainDiffuseLoc = -1, terrainSunDirLoc = -1;
 	// W3: the reflection this port draws the water with when upstream's own
 	// reflection is asked for - the scene mirrored in the water plane,
 	// rendered into a half-size target and sampled by the water shader.
@@ -219,7 +225,37 @@ namespace
 	// 0 = this port's sky colour, 1 = the sky and the land, 2 = everything
 	// solid in the scene, which is what upstream reflects.
 	std::atomic<int> g_reflectionStyle{0};
-	GLint  waterReflectTexLoc = -1, waterUseReflectLoc = -1, waterViewportLoc = -1;
+	GLint  waterReflectTexLoc = -1, waterUseReflectLoc = -1;
+	// Upstream's own reflection texture coordinate: the water vertex pushed
+	// out along its normal onto a "virtual plane" and then projected through
+	// the *real* camera (water.vshader, and the texture matrix
+	// VisibilityPatchGrid sets for unit 1 - bias * proj * modelview). That is
+	// what makes the distortion a displacement in the world rather than a
+	// nudge in screen space, so a wave bends the reflection of the thing it
+	// is actually in front of.
+	GLint  waterReflectMatrixLoc = -1;
+
+	// The sun's shadow map. Upstream renders the scene's depth from the sun
+	// into a 2048-square depth texture (Landscape::drawShadows) and samples it
+	// with shadow2DProj in both its land and its water shader, which is what
+	// puts an island's shadow on the sea beside it.
+	//
+	// It also decides the terrain's lighting: upstream bakes its light map
+	// into the ground texture *only* when the hardware has no shadows
+	// (Landscape.cpp: `if (!GLStateExtension::hasHardwareShadows())`), and
+	// otherwise lights the terrain per fragment against this map. Both paths
+	// are here, chosen by the same setting, so the terrain is never lit twice.
+	GLuint shadowFbo = 0, shadowTexture = 0;
+	int    shadowSize = 0;
+	bool   shadowValid = false;
+	Mat4   shadowMatrix = Mat4::identity();
+	// 0 = off (bake the light map instead, as upstream does without shadows),
+	// 1 = 1024, 2 = upstream's own 2048.
+	std::atomic<int> g_shadowLevel{2};
+	// What the ground texture currently in hand was built for, so a changed
+	// setting rebuilds it rather than leaving the terrain lit twice or not
+	// at all.
+	bool   groundBakedForShadows = false;
 
 	GLuint oceanTexture = 0;
 	GLint  waterWaveTexLoc = -1, waterUseWaveTexLoc = -1, waterWaveTileLoc = -1;
@@ -686,10 +722,14 @@ namespace
 		uniform mat4 uMVP;
 		uniform float uMinHeight;
 		uniform float uHeightRange;
+		// The sun's own view-projection, with the [-1,1] to [0,1] bias
+		// already folded in - upstream's shadow texture matrix.
+		uniform mat4 uShadowMatrix;
 		out vec3 vNormal;
 		out float vHeight01;
 		out vec2 vTexCoord;
 		out float vViewDepth;
+		out vec4 vShadowCoord;
 		// W3: for the reflection pass, which has to drop everything below
 		// the waterline - GLES3 has no clip planes, so the fragment shader
 		// does it.
@@ -698,6 +738,7 @@ namespace
 			vNormal = aNormal;
 			vTexCoord = aTexCoord;
 			vHeight01 = clamp((aPosition.y - uMinHeight) / uHeightRange, 0.0, 1.0);
+			vShadowCoord = uShadowMatrix * vec4(aPosition, 1.0);
 			// Order matters: gl_Position has to be written before its w can
 			// be read. The other way round this reads an undefined value and
 			// the terrain silently stops fogging.
@@ -719,8 +760,32 @@ namespace
 		in float vHeight01;
 		in vec2 vTexCoord;
 		in float vViewDepth;
+		in vec4 vShadowCoord;
 		in float vWorldY;
 		out vec4 fragColor;
+		// Upstream's sampler2DShadow, sampled with textureProj - the hardware
+		// does the depth comparison and, with a linear filter, gives back a
+		// bilinear average of four comparisons rather than a hard bit.
+		uniform highp sampler2DShadow uShadowTex;
+		uniform int uShadowEnabled;
+		// <skyambience> and <skydiffuse>. Upstream's land shader combines them
+		// as `diffuse * NdotL * shadow + ambient` and multiplies the ground
+		// texture by the result.
+		uniform vec3 uAmbience;
+		uniform vec3 uDiffuse;
+		uniform vec3 uSunDir;
+
+		// 1.0 in full light, 0.0 in full shade. Outside the sun's frustum
+		// there is nothing to test against, so everything there is lit -
+		// clamping to the edge instead would smear the border texel across
+		// the whole map.
+		float sunShadow() {
+			if (uShadowEnabled == 0) return 1.0;
+			if (vShadowCoord.w <= 0.0) return 1.0;
+			vec3 p = vShadowCoord.xyz / vShadowCoord.w;
+			if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+			return textureProj(uShadowTex, vShadowCoord);
+		}
 		// W3: when this pass is a reflection, anything under the water is
 		// not in it.
 		uniform int uClipEnabled;
@@ -749,8 +814,21 @@ namespace
 			if (uLightBaked == 1) {
 				// The texture already carries the sun, the ambience and the
 				// shadows hills cast on each other - lighting it again here
-				// would apply the sun twice and wash the shadows out.
+				// would apply the sun twice and wash the shadows out. This is
+				// upstream's no-shadow path, and with shadows on it is not
+				// taken: the light map is not baked at all then, exactly as
+				// upstream skips it when the hardware can shadow.
 				lit = baseColor;
+			} else if (uShadowEnabled == 1 && uHalfLambert == 0) {
+				// Upstream's own land shader, verbatim in structure:
+				// lightcolor = diffuse * (N.L * shadow) + ambient, times the
+				// ground texture. The sun's real direction, not the fixed
+				// light the unshadowed path uses, because the shadow map is
+				// cast from the sun and the two have to agree or a slope will
+				// be lit from one side and shadowed from the other.
+				vec3 n = normalize(vNormal);
+				float ndotl = max(dot(n, normalize(uSunDir)), 0.0) * sunShadow();
+				lit = baseColor * (uDiffuse * ndotl + uAmbience);
 			} else {
 				vec3 n = normalize(vNormal);
 				float raw = dot(n, uLightDir);
@@ -1137,6 +1215,20 @@ namespace
 		out vec3 vWorldPos;
 		out float vViewDepth;
 		out vec3 vNormal;
+		out vec3 vUpwell;
+		out vec4 vReflectCoord;
+		out vec4 vShadowCoord;
+
+		// Upstream's upwelling colours, the two the landscape's own
+		// <wavetop*>/<wavebottom*> resolve to, and the water plane they are
+		// measured against.
+		uniform vec3 uUpwellTop;
+		uniform vec3 uUpwellBot;
+		uniform float uWaterHeight;
+		// bias * proj * view of the *real* camera, for the reflection, and
+		// the sun's for the shadow map.
+		uniform mat4 uReflectMatrix;
+		uniform mat4 uShadowMatrix;
 
 		// W4: Scorched3D's own ocean, as a tile the CPU regenerates from a
 		// Tessendorf spectrum (see OceanWaves.h). Height in R, the two
@@ -1189,6 +1281,32 @@ namespace
 			}
 
 			vWorldPos = world;
+
+			// Upstream's upwelling colour, from water.vshader:
+			//   upwelltopbot * clamp((vertex.z + viewpos.z)/9 + N.z - 7/15, 0, 1)
+			//     + upwellbot
+			// with viewpos.z set to -waterHeight, so the first term is the
+			// wave's own displacement. This is the water's *body* colour, and
+			// it is slope dependent - a crest turns towards the top colour and
+			// a trough towards the bottom one, which is most of why upstream's
+			// sea reads as water rather than as a tinted mirror.
+			vec3 n = normalize(vNormal);
+			vUpwell = (uUpwellTop - uUpwellBot) *
+				clamp((world.y - uWaterHeight) * 0.1111111 + n.y - 0.4666667, 0.0, 1.0)
+				+ uUpwellBot;
+
+			// Upstream's virtual-plane reflection coordinate (water.vshader):
+			//   texc = vertex + N * (12 * N.z); texc.z -= 12;
+			// then through the real camera's bias*proj*view. Its Z-up maps to
+			// our Y-up, so its N.z is our N.y. The displacement is in world
+			// units on a plane 12 above the surface, which is why the
+			// distortion follows the wave rather than sliding across the
+			// screen the way a texture-space nudge does.
+			vec3 texc = world + n * (12.0 * n.y);
+			texc.y -= 12.0;
+			vReflectCoord = uReflectMatrix * vec4(texc, 1.0);
+			vShadowCoord = uShadowMatrix * vec4(world, 1.0);
+
 			gl_Position = uMVP * vec4(world, 1.0);
 			vViewDepth = gl_Position.w;
 		}
@@ -1200,6 +1318,9 @@ namespace
 		in vec3 vWorldPos;
 		in float vViewDepth;
 		in vec3 vNormal;
+		in vec3 vUpwell;
+		in vec4 vReflectCoord;
+		in vec4 vShadowCoord;
 		out vec4 fragColor;
 		uniform vec3 uSunDir;
 		uniform vec3 uSkyHorizon;
@@ -1207,95 +1328,98 @@ namespace
 		uniform vec3 uEyePos;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
-		uniform vec3 uDeepColor;
-		uniform vec3 uShallowColor;
+		uniform vec3 uSunDiffuse;
 		uniform float uAlpha;
 		uniform highp float uTime;  // must match the vertex shader's, see above
-		uniform vec2 uEye;
 		uniform sampler2D uShore;
 		uniform vec2 uMapSize;
 		// W3: the mirrored scene, when it is being drawn.
 		uniform sampler2D uReflectionTex;
 		uniform float uUseReflection;
-		uniform vec2 uViewport;
+		uniform highp sampler2DShadow uShadowTex;
+		uniform int uShadowEnabled;
+
+		// Upstream's water shininess, from water.fshader.
+		const float kWaterShininess = 120.0;
+
+		float sunShadow() {
+			if (uShadowEnabled == 0) return 1.0;
+			if (vShadowCoord.w <= 0.0) return 1.0;
+			vec3 p = vShadowCoord.xyz / vShadowCoord.w;
+			if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+			return textureProj(uShadowTex, vShadowCoord);
+		}
 		void main() {
-			// Two waves at different angles and speeds, deliberately not
-			// harmonics of each other - a single sine reads as corduroy.
+			// Kept only for the surf's own phase below - the surface colour
+			// no longer comes from a pair of sines.
 			float a = sin(vWorld.x * 0.09 + uTime * 0.7);
-			float b = sin((vWorld.x * 0.4 + vWorld.y * 0.9) * 0.05 - uTime * 0.5);
-			float crest = 0.5 + 0.25 * a + 0.25 * b;
 
-			// Flatten the waves with distance. The surface reaches the far
-			// plane, so near the horizon a whole wavelength collapses into
-			// well under a pixel and the pattern aliases into hard stripes
-			// - there is no mip chain to save it, the colour being computed
-			// rather than sampled. Fading to the mean is what a mip would
-			// have converged to anyway.
-			float d = distance(vWorld, uEye);
-			crest = mix(crest, 0.5, clamp(d / 400.0, 0.0, 1.0));
-
-			vec3 water = mix(uDeepColor, uShallowColor, clamp(crest, 0.0, 1.0));
-
-			// Sun off the wave slopes. This is what the displacement buys
-			// beyond a silhouette - flat water cannot glint.
 			vec3 n = normalize(vNormal);
-			float glint = pow(max(dot(n, normalize(uSunDir)), 0.0), 24.0);
-			water += vec3(1.0) * glint * 0.35;
+			// E, the direction *to* the viewer, and L, the direction to the
+			// sun - both as upstream's shader has them.
+			vec3 E = normalize(uEyePos - vWorldPos);
+			vec3 L = normalize(uSunDir);
+			vec3 R = reflect(-L, n);
+			float s0 = sunShadow();
 
-			// M10.5: the sky, reflected, weighted by Fresnel.
-			//
-			// Without this the surface colour does not depend on where it is
-			// viewed from at all, which is the single biggest reason the
-			// water read as flat blue paint rather than as a surface: real
-			// water is nearly transparent underfoot and nearly a mirror at a
-			// grazing angle, and the camera here sweeps through both (its
-			// pitch runs from about 8 degrees off the horizontal to nearly
-			// overhead).
-			//
-			// The sky is evaluated from its own two colours rather than
-			// sampled from a reflection buffer. Upstream renders the whole
-			// scene a second time, mirrored, into a 512-square texture; that
-			// buys reflected *terrain* as well, at the cost of drawing
-			// everything twice. This gets the part that covers most of the
-			// surface most of the time for the price of a few instructions,
-			// and leaves that judgement to be made on what it looks like.
-			vec3 viewDir = normalize(vWorldPos - uEyePos);
-			vec3 reflectDir = reflect(viewDir, n);
-			// Up the reflected ray is sky; below the horizon there is
-			// nothing to reflect but more water, so it stays at the horizon
-			// colour rather than going dark.
-			float up = clamp(reflectDir.y, 0.0, 1.0);
-			vec3 sky = mix(uSkyHorizon, uSkyZenith, sqrt(up));
+			// Upstream's Fresnel, which is not Schlick: an approximation of
+			// 1/((dot+1)^8), capped at 0.8 so the sea is never a full mirror.
+			// Its own comment says that cap "greatly increases the realism of
+			// the appearance", and it does - the previous Schlick term with a
+			// 2% base went to nearly 1.0 at a grazing angle and turned the
+			// whole distance into a mirror, which is most of why the water
+			// read as the wrong colour.
+			float fresnel = clamp(dot(E, n), 0.0, 1.0) + 1.0;
+			fresnel = pow(fresnel, -8.0) * 0.8;
+
+			// Phong specular off the wave slopes, at upstream's shininess.
+			vec3 specular = uSunDiffuse * pow(clamp(dot(R, E), 0.0, 1.0), kWaterShininess);
+
+			// The refracted (upwelling) colour: the body colour computed per
+			// vertex, lit by the sun and dimmed - but not extinguished - in
+			// shadow, upstream's `min(1, s0 + 0.9)`.
+			float dl = max(dot(L, n), 0.0);
+			vec3 refraction = vUpwell * dl * min(1.0, s0 + 0.9);
+
+			// What the surface reflects. With the reflection buffer off this
+			// is the sky evaluated from its own two colours, which is this
+			// port's own fallback and all the old shader ever had.
+			vec3 reflected;
 			if (uUseReflection > 0.5) {
-				// Screen-space planar reflection: the mirrored pass shares
-				// this pass's projection, so the reflected image of a point
-				// on the water plane lands at that point's own screen
-				// position. Nudged by the wave slope, which is what makes a
-				// reflection wobble instead of looking like a mirror.
-				vec2 uv = gl_FragCoord.xy / uViewport;
-				uv += n.xz * 0.03;
-				sky = texture(uReflectionTex, clamp(uv, vec2(0.002), vec2(0.998))).rgb;
+				// Upstream's projective lookup. The mirrored pass shares this
+				// pass's projection, so a point on the water plane projects to
+				// the same place in both and its reflection is read there;
+				// the virtual-plane displacement in the vertex shader is what
+				// bends that lookup along the wave.
+				reflected = textureProj(uReflectionTex, vReflectCoord).rgb;
+			} else {
+				vec3 up = reflect(-E, n);
+				reflected = mix(uSkyHorizon, uSkyZenith, sqrt(clamp(up.y, 0.0, 1.0)));
 			}
-			// Schlick, with water's real normal-incidence reflectance of
-			// about 2% - so looking straight down barely reflects and a low
-			// angle mostly does.
-			float facing = clamp(dot(-viewDir, n), 0.0, 1.0);
-			float fresnel = 0.02 + 0.98 * pow(1.0 - facing, 5.0);
-			water = mix(water, sky, clamp(fresnel, 0.0, 1.0));
+
+			// Upstream's mix, shadow-weighted the same way.
+			vec3 water = mix(refraction, reflected, fresnel * min(1.0, s0 + 0.8))
+				+ specular * s0;
 
 			// Foam along the shore. The mask is in landscape space, so v
 			// runs the other way to world Z - the same flip the ground
 			// texture takes. Off the map there is no shore, hence the
 			// explicit bounds test rather than clamping, which would smear
 			// the edge band out to the horizon.
+			//
+			// Upstream mixes its foam towards the sun's own diffuse colour
+			// rather than to white, and takes it back where the water is
+			// shadowed; both are done here.
 			vec2 land = vec2(vWorld.x, uMapSize.y - vWorld.y);
 			if (land.x >= 0.0 && land.y >= 0.0 &&
 				land.x <= uMapSize.x && land.y <= uMapSize.y) {
 				float shore = texture(uShore, land / uMapSize).r;
 				// Break the band up so it reads as surf rather than a
-				// contour line, using the same waves as the surface.
+				// contour line.
 				float surf = shore * (0.75 + 0.25 * sin(uTime * 2.0 + a * 3.0));
-				water = mix(water, vec3(1.0), clamp(surf * surf, 0.0, 1.0) * 0.85);
+				float foam = clamp(surf * surf, 0.0, 1.0) * 0.85;
+				foam = max(foam - (1.0 - s0) * 0.5, 0.0);
+				water = mix(water, uSunDiffuse, foam);
 			}
 			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, water, fog), uAlpha);
@@ -1416,8 +1540,13 @@ namespace
 		// M23: a changed detail setting rebuilds the mesh too - the grid is
 		// baked into every vertex, index and texture coordinate.
 		const bool gridChanged = (terrainGrid != requestedGridFor(ctx));
-		if (terrainBuilt && defnNumber == builtDefinitionNumber && !gridChanged) return;
-		if (terrainBuilt && (defnNumber != builtDefinitionNumber || gridChanged)) {
+		// Turning shadows on or off changes whether the ground texture is
+		// baked with the sun in it, so the texture has to be built again -
+		// otherwise the terrain ends up lit twice or not at all.
+		const bool shadowModeChanged = (groundBakedForShadows != (g_shadowLevel.load() > 0));
+		if (terrainBuilt && defnNumber == builtDefinitionNumber &&
+			!gridChanged && !shadowModeChanged) return;
+		if (terrainBuilt && (defnNumber != builtDefinitionNumber || gridChanged || shadowModeChanged)) {
 			// Drop the old landscape's GL objects before rebuilding.
 			if (terrainVao) glDeleteVertexArrays(1, &terrainVao);
 			if (terrainVbo) glDeleteBuffers(1, &terrainVbo);
@@ -1592,8 +1721,20 @@ namespace
 		// the upload, exactly where upstream does it (Landscape.cpp, right
 		// after generating the texture). The terrain is then drawn unlit -
 		// see uLightBaked in the terrain shader.
-		groundLightBaked = LandscapeTextureBuilder::applyLightMap(ctx, groundTextureData);
-        if (groundLightBaked) LOGI("Ground light map baked (sun lighting + terrain shadows)");
+		// ...but only when there are no shadows to light it with. Upstream's
+		// own condition, verbatim: `if (!GLStateExtension::hasHardwareShadows())`
+		// it bakes, and otherwise leaves the texture unlit and lights the
+		// terrain per fragment in the land shader against the shadow map.
+		// Doing both would light the ground twice and flatten the shadows the
+		// map is there to draw.
+		groundBakedForShadows = (g_shadowLevel.load() > 0);
+		if (!groundBakedForShadows) {
+			groundLightBaked = LandscapeTextureBuilder::applyLightMap(ctx, groundTextureData);
+			if (groundLightBaked) LOGI("Ground light map baked (sun lighting + terrain shadows)");
+		} else {
+			groundLightBaked = false;
+			LOGI("Ground light map not baked - the shadow map lights the terrain");
+		}
 		LandscapeTextureBuilder::Texture &ground = groundTextureData;
 		if (!ground.valid()) {
 			LOGE("ground texture generation failed (%s) - falling back to flat height colours", groundError.c_str());
@@ -2515,16 +2656,25 @@ namespace
 		LandscapeTexBorderWater *water = (LandscapeTexBorderWater *) tex->border;
 		waterHeight = water->height.asFloat();
 
-		// The definition gives five wave colours. The "b" pair are the lit
-		// ones (the "a" pair are black in every landscape upstream ships,
-		// being the far end of a shader gradient we aren't reproducing), so
-		// those drive the crossfade, with the deep tone darkened from the
-		// bottom colour so there is somewhere for the crests to stand out
-		// against.
-		waterShallow[0] = water->wavetopb[0];
-		waterShallow[1] = water->wavetopb[1];
-		waterShallow[2] = water->wavetopb[2];
-		for (int i = 0; i < 3; i++) waterDeep[i] = water->wavebottomb[i] * 0.55f;
+		// Upstream's own two upwelling colours, resolved its own way
+		// (Water2Renderer::generate): the "a" and "b" pair of each are the
+		// ends of a gradient and <wavelight> is the position along it, so
+		//   wavetop    = lerp(wavetopa,    wavetopb,    wavelight)
+		//   wavebottom = lerp(wavebottoma, wavebottomb, wavelight)
+		// The "a" pair is black in every shipped landscape and wavelight is
+		// white in most, which is why taking "b" straight looked right - but
+		// not on the ones that do set it. Hell's <wavelight> is (1, 0.3, 0.3)
+		// and turns its sea red, and that only happens if the lerp is real.
+		//
+		// The previous darkening of the deep colour by 0.55 is gone with the
+		// gradient it existed to serve: these are now upstream's top and
+		// bottom, and the shader picks between them by wave slope exactly as
+		// upstream's vertex shader does.
+		for (int i = 0; i < 3; i++) {
+			const float light = water->wavelight[i];
+			waterUpwellTop[i] = water->wavetopa[i] + (water->wavetopb[i] - water->wavetopa[i]) * light;
+			waterUpwellBot[i] = water->wavebottoma[i] + (water->wavebottomb[i] - water->wavebottoma[i]) * light;
+		}
 
 		// waterTransparency defaults to 1.0 and no shipped landscape sets
 		// it, so it can only make the surface *more* see-through than the
@@ -2646,9 +2796,9 @@ namespace
 		waterVisible = true;
 		LOGI("Water surface at height %.1f, alpha %.2f, shore mask %s",
 			 waterHeight, waterAlpha, shore.empty() ? "none" : "built");
-		LOGI("Water colours: deep (%.2f, %.2f, %.2f), shallow (%.2f, %.2f, %.2f)",
-			 waterDeep[0], waterDeep[1], waterDeep[2],
-			 waterShallow[0], waterShallow[1], waterShallow[2]);
+		LOGI("Water upwelling: bottom (%.2f, %.2f, %.2f), top (%.2f, %.2f, %.2f)",
+			 waterUpwellBot[0], waterUpwellBot[1], waterUpwellBot[2],
+			 waterUpwellTop[0], waterUpwellTop[1], waterUpwellTop[2]);
 	}
 
 	// M6 terrain destruction: craters are carved into the real heightmap by
@@ -4073,6 +4223,12 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainProgram = linkProgram(kTerrainVertexShader, kTerrainFragmentShader);
 	terrainMvpLoc = glGetUniformLocation(terrainProgram, "uMVP");
+	terrainShadowMatrixLoc = glGetUniformLocation(terrainProgram, "uShadowMatrix");
+	terrainShadowTexLoc = glGetUniformLocation(terrainProgram, "uShadowTex");
+	terrainShadowEnabledLoc = glGetUniformLocation(terrainProgram, "uShadowEnabled");
+	terrainAmbienceLoc = glGetUniformLocation(terrainProgram, "uAmbience");
+	terrainDiffuseLoc = glGetUniformLocation(terrainProgram, "uDiffuse");
+	terrainSunDirLoc = glGetUniformLocation(terrainProgram, "uSunDir");
 	terrainMinHeightLoc = glGetUniformLocation(terrainProgram, "uMinHeight");
 	terrainHeightRangeLoc = glGetUniformLocation(terrainProgram, "uHeightRange");
 	terrainLightDirLoc = glGetUniformLocation(terrainProgram, "uLightDir");
@@ -4139,11 +4295,16 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 
 	waterProgram = linkProgram(kWaterVertexShader, kWaterFragmentShader);
 	waterMvpLoc = glGetUniformLocation(waterProgram, "uMVP");
-	waterDeepLoc = glGetUniformLocation(waterProgram, "uDeepColor");
-	waterShallowLoc = glGetUniformLocation(waterProgram, "uShallowColor");
+	waterUpwellTopLoc = glGetUniformLocation(waterProgram, "uUpwellTop");
+	waterUpwellBotLoc = glGetUniformLocation(waterProgram, "uUpwellBot");
+	waterHeightLoc = glGetUniformLocation(waterProgram, "uWaterHeight");
+	waterSunDiffuseLoc = glGetUniformLocation(waterProgram, "uSunDiffuse");
+	waterReflectMatrixLoc = glGetUniformLocation(waterProgram, "uReflectMatrix");
+	waterShadowTexLoc = glGetUniformLocation(waterProgram, "uShadowTex");
+	waterShadowMatrixLoc = glGetUniformLocation(waterProgram, "uShadowMatrix");
+	waterShadowEnabledLoc = glGetUniformLocation(waterProgram, "uShadowEnabled");
 	waterAlphaLoc = glGetUniformLocation(waterProgram, "uAlpha");
 	waterTimeLoc = glGetUniformLocation(waterProgram, "uTime");
-	waterEyeLoc = glGetUniformLocation(waterProgram, "uEye");
 	waterSkyHorizonLoc = glGetUniformLocation(waterProgram, "uSkyHorizon");
 	waterSkyZenithLoc = glGetUniformLocation(waterProgram, "uSkyZenith");
 	waterWaveTexLoc = glGetUniformLocation(waterProgram, "uWaveTex");
@@ -4151,7 +4312,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterWaveTileLoc = glGetUniformLocation(waterProgram, "uWaveTileLength");
 	waterReflectTexLoc = glGetUniformLocation(waterProgram, "uReflectionTex");
 	waterUseReflectLoc = glGetUniformLocation(waterProgram, "uUseReflection");
-	waterViewportLoc = glGetUniformLocation(waterProgram, "uViewport");
 	waterEyePosLoc = glGetUniformLocation(waterProgram, "uEyePos");
 	waterFogColorLoc = glGetUniformLocation(waterProgram, "uFogColor");
 	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
@@ -5220,6 +5380,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform1i(terrainHalfLambertLoc, 0);
 		glUniform3f(terrainFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 		glUniform1f(terrainFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
+		// The sun's shadow map. False while the map is itself being drawn,
+		// which is what keeps that pass from sampling the texture it writes.
+		glUniform1i(terrainShadowEnabledLoc, shadowValid ? 1 : 0);
+		glUniformMatrix4fv(terrainShadowMatrixLoc, 1, GL_FALSE, shadowMatrix.m);
+		glUniform1i(terrainShadowTexLoc, 5);
+		glUniform3f(terrainAmbienceLoc, skyDescription.ambience[0],
+					skyDescription.ambience[1], skyDescription.ambience[2]);
+		glUniform3f(terrainDiffuseLoc, skyDescription.diffuse[0],
+					skyDescription.diffuse[1], skyDescription.diffuse[2]);
+		// The sun as the shadow map sees it, in world axes.
+		glUniform3f(terrainSunDirLoc,
+					skyDescription.sunDirection[0],
+					skyDescription.sunDirection[2],
+					-skyDescription.sunDirection[1]);
 		if (groundTexture != 0) {
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, groundTexture);
@@ -5729,6 +5903,125 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 
 
+	// The sun's shadow map, drawn before anything that samples it.
+	//
+	// Upstream's Landscape::drawShadows, followed closely: a depth-only pass
+	// from the sun's own position, aimed at the middle of the map, with the
+	// land, the scenery and the tanks in it. Front faces are culled and the
+	// depth is offset, both to keep a surface from shadowing itself.
+	{
+		const int level = g_shadowLevel.load();
+		const int wanted = (level <= 0) ? 0 : (level == 1 ? 1024 : 2048);
+		if (wanted != shadowSize) {
+			if (shadowTexture) glDeleteTextures(1, &shadowTexture);
+			if (shadowFbo) glDeleteFramebuffers(1, &shadowFbo);
+			shadowTexture = 0; shadowFbo = 0; shadowSize = 0; shadowValid = false;
+			if (wanted > 0) {
+				glGenTextures(1, &shadowTexture);
+				glBindTexture(GL_TEXTURE_2D, shadowTexture);
+				glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, wanted, wanted, 0,
+							 GL_DEPTH_COMPONENT, GL_UNSIGNED_INT, nullptr);
+				// COMPARE_REF_TO_TEXTURE is what makes this a sampler2DShadow:
+				// the hardware compares rather than returning a depth, and with
+				// a linear filter it averages four comparisons, which softens
+				// the edge for free. Upstream gets the same from shadow2DProj.
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+				glGenFramebuffers(1, &shadowFbo);
+				glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+				glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+									   GL_TEXTURE_2D, shadowTexture, 0);
+				// Depth only: no colour attachment at all, which ES3 needs
+				// told explicitly on both ends.
+				GLenum none = GL_NONE;
+				glDrawBuffers(1, &none);
+				glReadBuffer(GL_NONE);
+				const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+				glBindFramebuffer(GL_FRAMEBUFFER, 0);
+				shadowSize = wanted;
+				LOGI("Shadow map: %dx%d, status 0x%x", wanted, wanted, status);
+			}
+		}
+
+		shadowValid = false;
+		if (shadowSize > 0 && shadowFbo != 0) {
+			// Upstream's own framing, from Landscape::drawShadows. The sun is
+			// a position rather than a direction (its light map bakes against
+			// a point source 900 units out), pulled in or pushed out with the
+			// map's size, and the frustum is a 60-degree cone reaching a map
+			// and a half either side of it.
+			const float landWidth = mapWidthUnits * 0.5f;
+			const float landHeight = mapHeightUnits * 0.5f;
+			const float maxWidth = std::max(landWidth, landHeight);
+			const float spread = 0.5f + (maxWidth - 128.0f) / 256.0f;
+			const float sunX = skyDescription.sunPosition[0] * spread;
+			const float sunY = skyDescription.sunPosition[1] * spread;
+			const float sunH = skyDescription.sunPosition[2] * spread;
+			const float relX = sunX - landWidth, relY = sunY - landHeight;
+			const float magnitude = sqrtf(relX * relX + relY * relY + sunH * sunH);
+			const float nearZ = std::max(magnitude - maxWidth * 1.5f, 1.0f);
+			const float farZ = magnitude + maxWidth * 1.5f;
+
+			// Landscape (x, y, height) into this renderer's (x, height, z).
+			const float eyeWX = sunX, eyeWY = sunH, eyeWZ = worldZFromEngineY(sunY);
+			const float tgtWX = landWidth, tgtWY = 0.0f,
+						tgtWZ = worldZFromEngineY(landHeight);
+			// Upstream's up is its height axis, which is ours; a sun directly
+			// overhead would make that parallel to the view, so it falls back
+			// to a horizontal one in that case rather than producing a
+			// degenerate matrix.
+			const float dx = tgtWX - eyeWX, dz = tgtWZ - eyeWZ;
+			const bool overhead = (dx * dx + dz * dz) < 1.0f;
+			Mat4 lightView = Mat4::lookAt(eyeWX, eyeWY, eyeWZ, tgtWX, tgtWY, tgtWZ,
+										  0.0f, overhead ? 0.0f : 1.0f, overhead ? 1.0f : 0.0f);
+			Mat4 lightProj = Mat4::perspective(60.0f * 3.14159265f / 180.0f, 1.0f, nearZ, farZ);
+			Mat4 lightVp = Mat4::multiply(lightProj, lightView);
+			// The [-1,1] to [0,1] remap upstream folds into its texture matrix.
+			const Mat4 bias = Mat4::multiply(Mat4::translate(0.5f, 0.5f, 0.5f),
+											 Mat4::scale(0.5f, 0.5f, 0.5f));
+			shadowMatrix = Mat4::multiply(bias, lightVp);
+
+			glBindFramebuffer(GL_FRAMEBUFFER, shadowFbo);
+			glViewport(0, 0, shadowSize, shadowSize);
+			glClear(GL_DEPTH_BUFFER_BIT);
+			glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+			glEnable(GL_POLYGON_OFFSET_FILL);
+			glPolygonOffset(10.0f, 10.0f);
+			// Upstream culls front faces here, which is the usual trick for
+			// closed geometry: the back of a solid is far enough behind its
+			// front to hide the depth-comparison error. This terrain is not
+			// closed - it is an open heightmap with a top and no bottom, and
+			// its top *is* the front face from the sun. Culling that leaves
+			// nothing to write depth at all, so the map comes back empty and
+			// nothing is ever shadowed. Both sides are drawn instead, and the
+			// offset above does the work upstream's cull was doing.
+			glDisable(GL_CULL_FACE);
+
+			drawLandPass(lightVp, false);
+			drawSceneryPass(lightVp);
+			drawTanksPass(lightVp, false);
+
+			glEnable(GL_CULL_FACE);
+			glDisable(GL_POLYGON_OFFSET_FILL);
+			glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+			glViewport(0, 0, surfaceWidth, surfaceHeight);
+			shadowValid = true;
+		}
+
+		// Bound once for the whole frame; both the terrain and the water read
+		// it, and nothing else uses unit 5.
+		if (shadowValid) {
+			glActiveTexture(GL_TEXTURE5);
+			glBindTexture(GL_TEXTURE_2D, shadowTexture);
+			glActiveTexture(GL_TEXTURE0);
+		}
+	}
+
 	// W3: the reflection, when upstream's own is the one asked for.
 	//
 	// Upstream renders the scene a second time into a texture with the
@@ -5782,19 +6075,46 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				 glCheckFramebufferStatus(GL_FRAMEBUFFER));
 		}
 
-		// The camera, mirrored in the plane y = waterHeight: the eye goes
-		// under it by as much as it was over, and what it looks at does the
-		// same, so the reflected ray through any point of the surface is the
-		// one the real camera would have followed.
+		// The camera, mirrored in the plane y = waterHeight - and this is the
+		// whole of why the reflection used to sit in the wrong place.
+		//
+		// It was built by feeding lookAt the mirrored eye and the mirrored
+		// target with the world's own up vector, which sounds like the same
+		// thing and is not. The true mirrored view is the real view composed
+		// with the reflection itself, `view * mirror`, and lookAt cannot
+		// produce that: given the mirrored eye and target it derives an up of
+		// its own that comes out *negated* against the real one. The basis is
+		// orthonormal either way, so nothing looked broken, but every point
+		// landed at -y in the reflection buffer's clip space.
+		//
+		// That matters because the sampling relies on the two agreeing: a
+		// point on the water plane is unmoved by the mirror, so it must
+		// project to the same place in both views, and then the reflection is
+		// read at the fragment's own screen position. With the vertical
+		// flipped it was read from the mirror image of that position instead -
+		// which is why a reflection belonging under the shoreline appeared up
+		// near the horizon.
+		//
+		// Upstream composes it exactly this way (Landscape::drawWater:
+		// glTranslatef(0, 0, waterHeight*2) then glScalef(1, 1, -1), in its
+		// Z-up world), and flips the winding afterwards because the result is
+		// a reflection rather than a rotation - which ours now genuinely is.
 		const float reflEyeY = 2.0f * waterHeight - eyeY;
-		const float reflTargetY = 2.0f * waterHeight - targetY;
-		Mat4 reflView = Mat4::lookAt(eyeX, reflEyeY, eyeZ,
-									 targetX, reflTargetY, targetZ, 0.0f, 1.0f, 0.0f);
+		const Mat4 mirror = Mat4::multiply(
+			Mat4::translate(0.0f, 2.0f * waterHeight, 0.0f),
+			Mat4::scale(1.0f, -1.0f, 1.0f));
+		Mat4 reflView = Mat4::multiply(view, mirror);
 		Mat4 reflMvp = Mat4::multiply(proj, reflView);
 
 		glBindFramebuffer(GL_FRAMEBUFFER, reflectionFbo);
 		glViewport(0, 0, rw, rh);
-		glClearColor(fogColor[0], fogColor[1], fogColor[2], 1.0f);
+		// Upstream's own clear colour for this buffer, from
+		// Landscape::drawWater: a near-black blue-green. It was the fog colour
+		// here, which is a pale haze on most landscapes - and since the
+		// mirrored view has nothing to draw below its own horizon, that pale
+		// clear showed through as a hard diagonal band of lighter sea wherever
+		// the reflection was sampled from that part of the buffer.
+		glClearColor(0.0f, 1.0f / 16.0f, 1.0f / 8.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		// Mirroring turns every triangle inside out, so what was front-facing
 		// is now back-facing. Winding is flipped rather than culling turned
@@ -6011,7 +6331,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform1f(waterWaveTileLoc, ScorchDroidOcean::kTileLength);
 		const bool useReflection = wantReflection && reflectionTexture != 0;
 		glUniform1f(waterUseReflectLoc, useReflection ? 1.0f : 0.0f);
-		glUniform2f(waterViewportLoc, (float) surfaceWidth, (float) surfaceHeight);
 		if (useReflection) {
 			glActiveTexture(GL_TEXTURE4);
 			glBindTexture(GL_TEXTURE_2D, reflectionTexture);
@@ -6023,11 +6342,26 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glUniform1i(waterWaveTexLoc, 3);
 		}
 		glUniformMatrix4fv(waterMvpLoc, 1, GL_FALSE, mvp.m);
-		glUniform3f(waterDeepLoc, waterDeep[0], waterDeep[1], waterDeep[2]);
-		glUniform3f(waterShallowLoc, waterShallow[0], waterShallow[1], waterShallow[2]);
+		// Upstream's reflection texture matrix: bias * proj * view of the
+		// *real* camera. The mirrored pass drew into the buffer with a view
+		// that agrees with this one on the water plane, so this projects a
+		// surface point to the place its own reflection was rendered.
+		{
+			const Mat4 bias = Mat4::multiply(Mat4::translate(0.5f, 0.5f, 0.5f),
+											 Mat4::scale(0.5f, 0.5f, 0.5f));
+			const Mat4 reflectMatrix = Mat4::multiply(bias, mvp);
+			glUniformMatrix4fv(waterReflectMatrixLoc, 1, GL_FALSE, reflectMatrix.m);
+		}
+		glUniform1i(waterShadowEnabledLoc, shadowValid ? 1 : 0);
+		glUniformMatrix4fv(waterShadowMatrixLoc, 1, GL_FALSE, shadowMatrix.m);
+		glUniform1i(waterShadowTexLoc, 5);
+		glUniform3f(waterUpwellTopLoc, waterUpwellTop[0], waterUpwellTop[1], waterUpwellTop[2]);
+		glUniform3f(waterUpwellBotLoc, waterUpwellBot[0], waterUpwellBot[1], waterUpwellBot[2]);
+		glUniform1f(waterHeightLoc, waterHeight);
+		glUniform3f(waterSunDiffuseLoc, skyDescription.diffuse[0],
+					skyDescription.diffuse[1], skyDescription.diffuse[2]);
 		glUniform1f(waterAlphaLoc, waterAlpha);
 		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
-		glUniform2f(waterEyeLoc, eyeX, eyeZ);
 		// The same two ends of the gradient the sky dome is drawn from, so a
 		// reflection cannot disagree with the sky it is reflecting.
 		glUniform3f(waterSkyHorizonLoc,
@@ -6629,6 +6963,21 @@ Java_com_rm_scorchdroid_NativeBridge_setReflectionStyle(JNIEnv *env, jobject, ji
     // Logged because the failure above was invisible: the setting moved, the
     // renderer did nothing, and there was no way to tell which end was wrong.
     LOGI("Water reflections: level %d (asked for %d)", level, (int) style);
+}
+
+// The sun's shadow map: 0 off, 1 for a 1024 map, 2 for upstream's own 2048.
+//
+// Off is not "no lighting": it is upstream's own no-shadow path, where the
+// sun and the shadows hills cast on each other are baked into the ground
+// texture instead. So the terrain looks lit either way; what the map adds is
+// everything a baked texture cannot hold - an island's shadow falling on the
+// sea beside it, a tank's on the ground, and shadows that move with the sun.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setShadowDetail(JNIEnv *env, jobject, jint level) {
+    const int clamped = std::min(std::max((int) level, 0), 2);
+    g_shadowLevel.store(clamped);
+    LOGI("Shadow detail: level %d (%s)", clamped,
+         clamped == 0 ? "off, light map baked" : (clamped == 1 ? "1024" : "2048"));
 }
 
 // How many particles may be alight at once, as upstream's effects detail

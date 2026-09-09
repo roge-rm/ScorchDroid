@@ -254,6 +254,33 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateOriginalOcean(it)
                         }
 
+                        // The sun's shadow map. Its own row rather than folded
+                        // into another setting because it is the one here that
+                        // rebuilds the ground texture when it changes, and
+                        // because "off" is a real, complete look rather than a
+                        // degraded one - it is what upstream does on hardware
+                        // that cannot shadow.
+                        SliderRow(
+                            "Shadows",
+                            when (settings.shadowDetail) {
+                                0 -> "Off"
+                                1 -> "1024"
+                                else -> "2048"
+                            },
+                            settings.shadowDetail.toFloat(),
+                            0f..2f,
+                        ) {
+                            settings.updateShadowDetail(it.roundToInt())
+                        }
+                        Text(
+                            "The sun's shadow map, which puts an island's shadow on the sea " +
+                                "and a tank's on the ground. Off bakes the sun into the " +
+                                "ground texture instead, as Scorched3D does without it - " +
+                                "still lit, but nothing casts onto the water.",
+                            color = Color.White.copy(alpha = 0.55f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+
                         // Upstream's own effects detail, with upstream's own
                         // three particle budgets behind it. Normal is its
                         // default and the faithful one; Low exists because a
