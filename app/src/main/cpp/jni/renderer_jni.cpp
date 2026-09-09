@@ -392,10 +392,10 @@ namespace
 	int sightRingVertexCount = 0, sightBearingVertexCount = 0, sightBarrelVertexCount = 0;
 	// 0 = this port's own blade, 1 = upstream's arrangement.
 	std::atomic<int> g_sightStyle{0};
-	GLint  sightMvpLoc = -1;
+	GLint  sightMvpLoc = -1, sightFogColorLoc = -1, sightFogDensityLoc = -1;
 
 	GLuint particleProgram = 0, particleVao = 0, particleVbo = 0;
-	GLint  particleMvpLoc = -1;
+	GLint  particleMvpLoc = -1, particleFogColorLoc = -1, particleFogDensityLoc = -1;
 	GLuint beamVao = 0, beamVbo = 0;
 
 	// M6 effects: live particles and beams spawned from the engine's own
@@ -1179,17 +1179,28 @@ namespace
 		layout(location = 1) in vec3 aColor;
 		uniform mat4 uMVP;
 		out vec3 vColor;
+		out float vViewDepth;
 		void main() {
 			vColor = aColor;
 			gl_Position = uMVP * vec4(aPosition, 1.0);
+			vViewDepth = gl_Position.w;
 		}
 	)";
 
+	// Also draws the beams (lasers, lightning), which upstream draws
+	// fixed-function and so fogged with GL_EXP2; the sight itself is at
+	// the tank and never far enough to notice.
 	const char *kSightFragmentShader = R"(#version 300 es
 		precision mediump float;
 		in vec3 vColor;
+		in float vViewDepth;
 		out vec4 fragColor;
-		void main() { fragColor = vec4(vColor, 1.0); }
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
+		void main() {
+			float z = uFogDensity * vViewDepth;
+			fragColor = vec4(mix(uFogColor, vColor, exp(-z * z)), 1.0);
+		}
 	)";
 
 	// M6 object shadows. The baked light map above shadows the *terrain*
@@ -1678,9 +1689,11 @@ namespace
 		layout(location = 2) in float aSize;
 		uniform mat4 uMVP;
 		out vec4 vColor;
+		out float vViewDepth;
 		void main() {
 			vColor = aColor;
 			gl_Position = uMVP * vec4(aPosition, 1.0);
+			vViewDepth = gl_Position.w;
 			gl_PointSize = aSize;
 		}
 	)";
@@ -1688,7 +1701,10 @@ namespace
 	const char *kParticleFragmentShader = R"(#version 300 es
 		precision mediump float;
 		in vec4 vColor;
+		in float vViewDepth;
 		out vec4 fragColor;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
 		void main() {
 			// Round the square point sprite off and fade towards its edge,
 			// so particles read as soft puffs rather than tiles.
@@ -1696,7 +1712,13 @@ namespace
 			float r = length(offset) * 2.0;
 			if (r > 1.0) discard;
 			float falloff = 1.0 - r * r;
-			fragColor = vec4(vColor.rgb, vColor.a * falloff);
+			// Upstream's particles are fixed-function and never switch the
+			// fog off, so they get GL_EXP2 like every other model: the
+			// colour goes to the fog colour with distance and the alpha
+			// stays, additive or not.
+			float z = uFogDensity * vViewDepth;
+			vec3 colour = mix(uFogColor, vColor.rgb, exp(-z * z));
+			fragColor = vec4(colour, vColor.a * falloff);
 		}
 	)";
 
@@ -4302,6 +4324,17 @@ namespace
 	// its reflection pass just draws the lot - but a mirrored particle from
 	// below the surface surfaces *above* it in the reflection, so the rule it
 	// already uses for targets is the right one here too.
+	// The fixed-function fog upstream applies to particles and beams:
+	// GL_EXP2 by view depth, in the landscape's fog colour, off with the
+	// Distance fog setting.
+	void setFixedFunctionFog(GLint colorLoc, GLint densityLoc)
+	{
+		float fog[3];
+		currentFogColor(fog);
+		glUniform3f(colorLoc, fog[0], fog[1], fog[2]);
+		glUniform1f(densityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
+	}
+
 	void drawEffects(const Mat4 &viewProjection, float eyeX, float eyeY, float eyeZ,
 					 float fovYRadians, float pixelScale = 1.0f,
 					 float clipBelowY = -1.0e9f)
@@ -4355,6 +4388,7 @@ namespace
 			}
 
 			glUseProgram(particleProgram);
+			setFixedFunctionFog(particleFogColorLoc, particleFogDensityLoc);
 			glUniformMatrix4fv(particleMvpLoc, 1, GL_FALSE, viewProjection.m);
 			glBindVertexArray(particleVao);
 			glBindBuffer(GL_ARRAY_BUFFER, particleVbo);
@@ -4421,6 +4455,7 @@ namespace
 
 			if (!data.empty()) {
 				glUseProgram(sightProgram);
+		setFixedFunctionFog(sightFogColorLoc, sightFogDensityLoc);
 				glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, viewProjection.m);
 				glBindVertexArray(beamVao);
 				glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
@@ -5106,6 +5141,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 
 	sightProgram = linkProgram(kSightVertexShader, kSightFragmentShader);
 	sightMvpLoc = glGetUniformLocation(sightProgram, "uMVP");
+	sightFogColorLoc = glGetUniformLocation(sightProgram, "uFogColor");
+	sightFogDensityLoc = glGetUniformLocation(sightProgram, "uFogDensity");
 	sightVertexCount = 0;
 	sightRingVertexCount = 0;
 	sightBearingVertexCount = 0;
@@ -5139,6 +5176,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	// particle/beam lists, hence GL_DYNAMIC_DRAW and no initial allocation.
 	particleProgram = linkProgram(kParticleVertexShader, kParticleFragmentShader);
 	particleMvpLoc = glGetUniformLocation(particleProgram, "uMVP");
+	particleFogColorLoc = glGetUniformLocation(particleProgram, "uFogColor");
+	particleFogDensityLoc = glGetUniformLocation(particleProgram, "uFogDensity");
 	glGenVertexArrays(1, &particleVao);
 	glBindVertexArray(particleVao);
 	glGenBuffers(1, &particleVbo);
@@ -7083,6 +7122,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 		if (!quads.empty()) {
 			glUseProgram(sightProgram);
+		setFixedFunctionFog(sightFogColorLoc, sightFogDensityLoc);
 			glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, mvp.m);
 			glEnable(GL_BLEND);
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -7416,6 +7456,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// the red blade along the barrel.
 		buildOriginalSightGeometry();
 		glUseProgram(sightProgram);
+		setFixedFunctionFog(sightFogColorLoc, sightFogDensityLoc);
 		glDisable(GL_CULL_FACE);
 		struct Piece { GLuint vao; int count; const Mat4 *frame; };
 		const Piece pieces[] = {
@@ -7434,6 +7475,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	} else if (haveSight) {
 		buildSightGeometry();
 		glUseProgram(sightProgram);
+		setFixedFunctionFog(sightFogColorLoc, sightFogDensityLoc);
 		Mat4 sightMvp = Mat4::multiply(mvp, sightTransform);
 		glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, sightMvp.m);
 		glBindVertexArray(sightVao);
@@ -7556,6 +7598,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				}
 				if (!line.empty()) {
 					glUseProgram(sightProgram);
+		setFixedFunctionFog(sightFogColorLoc, sightFogDensityLoc);
 					glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, mvp.m);
 					glBindVertexArray(beamVao);
 					glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
