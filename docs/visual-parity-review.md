@@ -166,7 +166,10 @@ was never seeded, so every launch replayed the same maps (Quick Game most
 visibly). The giant carrier and destroyer on the snow and default maps
 are upstream's own size: `<modelscale>` 0.04 on a 2,567-unit model is a
 103-unit ship, and every tank model is now host-tested through the
-sizing rule to prove bounds were not the cause.
+sizing rule to prove bounds were not the cause. The white sea and the
+"giant navy object" (blocks of broken water, not a model) were the phone's
+Mali-G52 running `mediump` as real 16-bit float; every fragment shader is
+highp since 0.7.2, with `setprop debug.scorchdroid.highp 0` to compare.
 
 ### V2 – Textured models
 
