@@ -158,7 +158,7 @@ index 508ee67d..224c8e1b 100644
  	remove = (totalTime_ > weapon_->getTotalTime());
  	Action::simulate(frameTime, remove);
 diff --git a/src/common/actions/Napalm.cpp b/src/common/actions/Napalm.cpp
-index 002724d9..7ce1e546 100644
+index 002724d9..c7b3bea3 100644
 --- a/src/common/actions/Napalm.cpp
 +++ b/src/common/actions/Napalm.cpp
 @@ -37,6 +37,10 @@
@@ -207,6 +207,54 @@ index 002724d9..7ce1e546 100644
  
  	// Add napalm for the period of the time interval
  	// once the time interval has expired then start taking it away
+@@ -396,6 +428,47 @@ void Napalm::simulateAddEdge(int x, int y)
+ 	}
+ #endif // #ifndef S3D_SERVER
+ 
++#ifdef S3D_SERVER
++	// Android build: this is the fire itself, and it is the half that was
++	// missing. The client block above emits three particles here for every
++	// napalm point that is added - at the same three offsets, each living the
++	// whole napalmtime and drawn with the animated "flames" texture set - and
++	// a napalm lays down a hundred such points, so upstream's fire is three
++	// hundred overlapping long-lived sprites rather than a few puffs.
++	//
++	// Without this the port had no per-point fire at all: the only thing it
++	// drew was one short-lived flame per draw tick, mirrored from the client's
++	// *smoke* block in Napalm::simulate above - one puff wherever a randomly
++	// chosen burning point happened to be. That is why a burning field read as
++	// a handful of sparks rather than as fire.
++	//
++	// No !getServerMode() guard, for the same reason as every other hook here:
++	// this build *is* the server, so that test is always false and would
++	// silently switch the whole effect off.
++	{
++		// Upstream's own three offsets about the point.
++		const float offsets[3][2] = { { 0.5f, -0.2f }, { -0.5f, -0.2f }, { 0.0f, 0.5f } };
++		for (int i = 0; i < 3; i++)
++		{
++			ScorchDroidEffects::EffectEvent fire;
++			fire.type = ScorchDroidEffects::eNapalmFire;
++			fire.x = float(x) + offsets[i][0];
++			fire.y = float(y) + offsets[i][1];
++			fire.z = height.asFloat();
++			// Upstream's emitter is built with a flat 1.5 for both start and
++			// end size - napalm fire does not grow, it burns and fades.
++			fire.size = 1.5f;
++			// The whole burn, which is what makes the field continuous.
++			fire.value = params_->getNapalmTime().asFloat();
++			// Upstream's particles are white and take their colour from the
++			// flames texture; with no texture here the colour has to be the
++			// fire's own.
++			fire.r = 1.0f; fire.g = 0.55f; fire.b = 0.1f;
++			ScorchDroidEffects::push(fire);
++		}
++	}
++#endif
++
+ 	context_->getLandscapeMaps().getGroundMaps().getNapalmHeight(x, y) += params_->getNapalmHeight();
+ 
+ 	// Calculate every time as the landscape may change
 diff --git a/src/common/actions/ShieldHit.cpp b/src/common/actions/ShieldHit.cpp
 index 9c26f0a8..3cc828b6 100644
 --- a/src/common/actions/ShieldHit.cpp

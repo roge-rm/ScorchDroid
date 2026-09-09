@@ -246,6 +246,7 @@ class GameSettings(context: Context) {
         reflectionLevel = value.coerceIn(0, 2)
         prefs.edit().putInt(KEY_REFLECT, reflectionLevel).apply()
         NativeBridge.setReflectionStyle(reflectionLevel)
+        NativeBridge.setEffectsDetail(effectsDetail)
     }
 
     /**
@@ -275,6 +276,23 @@ class GameSettings(context: Context) {
         originalSight = value
         prefs.edit().putBoolean(KEY_SIGHT, value).apply()
         NativeBridge.setSightStyle(if (value) 1 else 0)
+    }
+
+    /**
+     * How many particles may be alight at once - flame trails, explosions,
+     * smoke, and a napalm field's fire, which is far and away the biggest
+     * consumer. Upstream's own setting and upstream's own three sizes: 100 at
+     * low, 6000 at normal, 10000 at high (ScorchedClient.cpp). Normal is
+     * upstream's default and therefore the faithful one; low is a real rescue
+     * for a device that cannot draw a burning map.
+     */
+    var effectsDetail by mutableIntStateOf(prefs.getInt(KEY_EFFECTS, 1))
+        private set
+
+    fun updateEffectsDetail(value: Int) {
+        effectsDetail = value.coerceIn(0, 2)
+        prefs.edit().putInt(KEY_EFFECTS, effectsDetail).apply()
+        NativeBridge.setEffectsDetail(effectsDetail)
     }
 
     var showFog by mutableStateOf(prefs.getBoolean(KEY_FOG, true))
@@ -331,6 +349,7 @@ class GameSettings(context: Context) {
         // ClassCastException on the first launch after the upgrade - which
         // is exactly what it did here. The old key is simply left behind.
         const val KEY_REFLECT = "graphics.reflectionLevel"
+        const val KEY_EFFECTS = "graphics.effectsDetail"
         // The maximum the renderer allows - see kTerrainGridMax.
         const val DEFAULT_DETAIL = 256
     }

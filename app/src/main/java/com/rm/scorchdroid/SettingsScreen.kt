@@ -254,6 +254,31 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateOriginalOcean(it)
                         }
 
+                        // Upstream's own effects detail, with upstream's own
+                        // three particle budgets behind it. Normal is its
+                        // default and the faithful one; Low exists because a
+                        // napalm field is by far the heaviest thing this
+                        // renderer draws.
+                        SliderRow(
+                            "Effects detail",
+                            when (settings.effectsDetail) {
+                                0 -> "Low"
+                                1 -> "Normal"
+                                else -> "High"
+                            },
+                            settings.effectsDetail.toFloat(),
+                            0f..2f,
+                        ) {
+                            settings.updateEffectsDetail(it.roundToInt())
+                        }
+                        Text(
+                            "How many flames, sparks and smoke puffs may be alight at " +
+                                "once - 100, 6000 or 10000, which are Scorched3D's own " +
+                                "numbers. Fire thins out when the budget runs out.",
+                            color = Color.White.copy(alpha = 0.55f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+
                         // Three positions rather than a switch: the middle one
                         // is a real answer for a device that cannot afford
                         // reflecting everything but can afford the land.

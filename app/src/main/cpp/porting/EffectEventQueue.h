@@ -60,6 +60,15 @@ namespace ScorchDroidEffects
 		// A floating damage number over a target that was just hurt.
 		// `value` is the amount.
 		eDamage,
+		// Napalm's actual fire, one event per particle upstream emits when a
+		// burning point is added (three per point, at its own offsets) -
+		// distinct from eNapalm, which is the per-tick flicker this port
+		// raises from the same block upstream raises its smoke from. These
+		// are the long-lived ones: `value` carries the burn time, which for
+		// a standard napalm is four seconds against the flicker's one, and
+		// it is having a hundred points' worth of them alight at once that
+		// makes a napalm field read as fire rather than as sparks.
+		eNapalmFire,
 	};
 
 	struct EffectEvent
