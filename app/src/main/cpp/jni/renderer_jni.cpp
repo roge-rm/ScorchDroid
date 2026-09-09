@@ -381,6 +381,16 @@ namespace
 	GLint  pointMvpLoc = -1, pointColorLoc = -1, pointSizeLoc = -1;
 	GLuint meshProgram = 0;
 	GLint  meshMvpLoc = -1, meshLightDirLoc = -1, meshColorLoc = -1;
+	// V2/V3: upstream's fixed-function model light and its textures.
+	GLint  meshModelLoc = -1, meshViewLoc = -1, meshSunPosLoc = -1;
+	GLint  meshSkyAmbientLoc = -1, meshSkyDiffuseLoc = -1;
+	GLint  meshMatAmbientLoc = -1, meshMatDiffuseLoc = -1, meshMatEmissiveLoc = -1;
+	GLint  meshLightModeLoc = -1, meshHasTextureLoc = -1, meshSphereMapLoc = -1, meshTextureLoc = -1;
+	GLint  instancedViewLoc = -1, instancedSunPosLoc = -1;
+	GLint  instancedSkyAmbientLoc = -1, instancedSkyDiffuseLoc = -1;
+	GLint  instancedMatAmbientLoc = -1, instancedMatDiffuseLoc = -1, instancedMatEmissiveLoc = -1;
+	GLint  instancedHasTextureLoc = -1, instancedSphereMapLoc = -1, instancedTextureLoc = -1;
+	GLint  treeSunPosLoc = -1, treeSkyAmbientLoc = -1, treeSkyDiffuseLoc = -1;
 	GLuint sightProgram = 0, sightVao = 0, sightVbo = 0;
 	// M22: the "original" sight, upstream's own (TargetRendererImplTank::
 	// drawSight). Three pieces, because each lives in a different frame:
@@ -1043,14 +1053,60 @@ namespace
 	// same directional light as the terrain, plus a per-instance colour so
 	// "my tank" stays visually distinct from opponents the way the old
 	// point sprites were.
+	// V3: upstream lights every model with the fixed-function pipeline:
+	// GL_LIGHT1 at the sun's position with the landscape's <skyambience>
+	// and <skydiffuse> (Sun::setLightPosition), the default global ambient
+	// of 0.2, no specular (GL_LIGHT1's default), and the mesh's own
+	// material (ModelRendererMesh::drawMesh). That is evaluated per vertex
+	// and interpolated, exactly as GL did it - Gouraud, not per fragment -
+	// so a low-polygon tank shades the way it does on the PC.
+	//
+	// uLightMode 0 keeps the port's old flat shade for the geometry that is
+	// not an upstream model at all: shields, the parachute, the tank
+	// stand-ins. uSphereMap is GL_SPHERE_MAP's texgen (the chrome on the
+	// semi and the MLRS): the eye-space reflection vector mapped to a disc.
 	const char *kMeshVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
 		layout(location = 1) in vec3 aNormal;
+		layout(location = 2) in vec2 aTexCoord;
 		uniform mat4 uMVP;
-		out vec3 vNormal;
+		uniform mat4 uModel;
+		uniform mat4 uView;
+		uniform vec3 uSunPos;
+		uniform vec3 uSkyAmbient;
+		uniform vec3 uSkyDiffuse;
+		uniform vec3 uMatAmbient;
+		uniform vec3 uMatDiffuse;
+		uniform vec3 uMatEmissive;
+		uniform int uLightMode;
+		uniform int uSphereMap;
+		uniform vec3 uLightDir;
+		uniform vec4 uColor;
+		out vec3 vLit;
+		out vec2 vTexCoord;
 		out float vViewDepth;
 		void main() {
-			vNormal = aNormal;
+			vec4 world = uModel * vec4(aPosition, 1.0);
+			vec3 n = normalize(mat3(uModel) * aNormal);
+			if (uLightMode == 1) {
+				vec3 L = normalize(uSunPos - world.xyz);
+				float nl = max(dot(n, L), 0.0);
+				vLit = min(uMatAmbient * (0.2 + uSkyAmbient)
+						   + uMatDiffuse * uSkyDiffuse * nl
+						   + uMatEmissive, vec3(1.0)) * uColor.rgb;
+			} else {
+				float d = max(dot(n, uLightDir), 0.0);
+				vLit = uColor.rgb * (0.45 + d * 0.75);
+			}
+			if (uSphereMap == 1) {
+				vec3 eyePos = (uView * world).xyz;
+				vec3 eyeN = normalize(mat3(uView) * n);
+				vec3 r = reflect(normalize(eyePos), eyeN);
+				float m = 2.0 * sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));
+				vTexCoord = vec2(r.x / m + 0.5, r.y / m + 0.5);
+			} else {
+				vTexCoord = aTexCoord;
+			}
 			gl_Position = uMVP * vec4(aPosition, 1.0);
 			vViewDepth = gl_Position.w;
 		}
@@ -1070,11 +1126,20 @@ namespace
 	const char *kInstancedMeshVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
 		layout(location = 1) in vec3 aNormal;
-		layout(location = 2) in vec4 aInstancePosScale;
-		layout(location = 3) in vec4 aInstanceRotColor;
+		layout(location = 2) in vec2 aTexCoord;
+		layout(location = 3) in vec4 aInstancePosScale;
+		layout(location = 4) in vec4 aInstanceRotColor;
 		uniform mat4 uViewProj;
-		out vec3 vNormal;
-		out vec3 vColor;
+		uniform mat4 uView;
+		uniform vec3 uSunPos;
+		uniform vec3 uSkyAmbient;
+		uniform vec3 uSkyDiffuse;
+		uniform vec3 uMatAmbient;
+		uniform vec3 uMatDiffuse;
+		uniform vec3 uMatEmissive;
+		uniform int uSphereMap;
+		out vec3 vLit;
+		out vec2 vTexCoord;
 		out float vViewDepth;
 		void main() {
 			float rot = aInstanceRotColor.x;
@@ -1086,10 +1151,27 @@ namespace
 
 			// The scale is uniform, so the normal needs the rotation only -
 			// no inverse transpose.
-			vNormal = vec3(c * aNormal.x + s * aNormal.z,
-						   aNormal.y,
-						   -s * aNormal.x + c * aNormal.z);
-			vColor = aInstanceRotColor.yzw;
+			vec3 n = normalize(vec3(c * aNormal.x + s * aNormal.z,
+									aNormal.y,
+									-s * aNormal.x + c * aNormal.z));
+			// Upstream's fixed-function light, per vertex - see the mesh
+			// vertex shader. The instance colour (upstream's glColor for a
+			// target) is deliberately unused: with GL lighting on and no
+			// GL_COLOR_MATERIAL it never reached the screen there either.
+			vec3 L = normalize(uSunPos - world);
+			float nl = max(dot(n, L), 0.0);
+			vLit = min(uMatAmbient * (0.2 + uSkyAmbient)
+					   + uMatDiffuse * uSkyDiffuse * nl
+					   + uMatEmissive, vec3(1.0));
+			if (uSphereMap == 1) {
+				vec3 eyePos = (uView * vec4(world, 1.0)).xyz;
+				vec3 eyeN = normalize(mat3(uView) * n);
+				vec3 r = reflect(normalize(eyePos), eyeN);
+				float m = 2.0 * sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));
+				vTexCoord = vec2(r.x / m + 0.5, r.y / m + 0.5);
+			} else {
+				vTexCoord = aTexCoord;
+			}
 
 			gl_Position = uViewProj * vec4(world, 1.0);
 			vViewDepth = gl_Position.w;
@@ -1100,20 +1182,20 @@ namespace
 	// per instance rather than as a uniform.
 	const char *kInstancedMeshFragmentShader = R"(#version 300 es
 		precision mediump float;
-		in vec3 vNormal;
-		in vec3 vColor;
+		in vec3 vLit;
+		in vec2 vTexCoord;
 		in float vViewDepth;
 		out vec4 fragColor;
-		uniform vec3 uLightDir;
+		uniform sampler2D uTexture;
+		uniform int uHasTexture;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
 		void main() {
-			vec3 n = normalize(vNormal);
-			float diffuse = max(dot(n, uLightDir), 0.0);
-			vec3 lit = vColor * (0.45 + diffuse * 0.75);
+			vec4 texel = (uHasTexture == 1) ? texture(uTexture, vTexCoord) : vec4(1.0);
+			vec3 lit = texel.rgb * vLit;
 			// Fixed-function GL_EXP2 fog, as upstream's models get.
 			float fog = clamp(exp(-(uFogDensity * vViewDepth) * (uFogDensity * vViewDepth)), 0.0, 1.0);
-			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
+			fragColor = vec4(mix(uFogColor, lit, fog), texel.a);
 		}
 	)";
 
@@ -1135,9 +1217,11 @@ namespace
 		layout(location = 3) in vec4 aInstancePosScale;
 		layout(location = 4) in vec4 aInstanceRotColor;
 		uniform mat4 uViewProj;
-		out vec3 vNormal;
+		uniform vec3 uSunPos;
+		uniform vec3 uSkyAmbient;
+		uniform vec3 uSkyDiffuse;
+		out vec3 vLit;
 		out vec2 vTexCoord;
-		out vec3 vColor;
 		out float vViewDepth;
 		void main() {
 			float rot = aInstanceRotColor.x;
@@ -1147,11 +1231,18 @@ namespace
 			vec3 rotated = vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
 			vec3 world = rotated + aInstancePosScale.xyz;
 
-			vNormal = vec3(c * aNormal.x + s * aNormal.z,
-						   aNormal.y,
-						   -s * aNormal.x + c * aNormal.z);
+			vec3 n = normalize(vec3(c * aNormal.x + s * aNormal.z,
+									aNormal.y,
+									-s * aNormal.x + c * aNormal.z));
+			// V3: upstream's fixed-function light with ModelRendererTree's
+			// own material (ambient 0.4, diffuse 1, no specular), per
+			// vertex. Two-sided: foliage is drawn from both faces, and a
+			// leaf lit from behind should not be black.
+			vec3 L = normalize(uSunPos - world);
+			float nl = abs(dot(n, L));
+			vLit = min(vec3(0.4) * (0.2 + uSkyAmbient) + uSkyDiffuse * nl, vec3(1.0))
+				   * aInstanceRotColor.yzw;
 			vTexCoord = aTexCoord;
-			vColor = aInstanceRotColor.yzw;
 
 			gl_Position = uViewProj * vec4(world, 1.0);
 			vViewDepth = gl_Position.w;
@@ -1160,13 +1251,11 @@ namespace
 
 	const char *kTreeFragmentShader = R"(#version 300 es
 		precision mediump float;
-		in vec3 vNormal;
+		in vec3 vLit;
 		in vec2 vTexCoord;
-		in vec3 vColor;
 		in float vViewDepth;
 		out vec4 fragColor;
 		uniform sampler2D uAtlas;
-		uniform vec3 uLightDir;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
 		void main() {
@@ -1175,11 +1264,7 @@ namespace
 			// separate needle from gap.
 			if (texel.a < 0.5) discard;
 
-			// Two-sided: foliage is drawn from both faces, and a leaf lit
-			// from behind should not be black.
-			vec3 n = normalize(vNormal);
-			float diffuse = abs(dot(n, uLightDir));
-			vec3 lit = texel.rgb * vColor * (0.45 + diffuse * 0.75);
+			vec3 lit = texel.rgb * vLit;
 
 			// Fixed-function GL_EXP2 fog, as upstream's trees get.
 			float fog = clamp(exp(-(uFogDensity * vViewDepth) * (uFogDensity * vViewDepth)), 0.0, 1.0);
@@ -1189,21 +1274,23 @@ namespace
 
 	const char *kMeshFragmentShader = R"(#version 300 es
 		precision mediump float;
-		in vec3 vNormal;
+		in vec3 vLit;
+		in vec2 vTexCoord;
 		in float vViewDepth;
 		out vec4 fragColor;
-		uniform vec3 uLightDir;
+		uniform sampler2D uTexture;
+		uniform int uHasTexture;
 		uniform vec4 uColor;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
 		void main() {
-			vec3 n = normalize(vNormal);
-			float diffuse = max(dot(n, uLightDir), 0.0);
-			vec3 lit = uColor.rgb * (0.45 + diffuse * 0.75);
+			// GL_MODULATE: the texel times the lit vertex colour.
+			vec4 texel = (uHasTexture == 1) ? texture(uTexture, vTexCoord) : vec4(1.0);
+			vec3 lit = texel.rgb * vLit;
 			// Fixed-function GL_EXP2 fog, as upstream's models get. Only the
 			// land and water shaders use the 350-unit, three-times curve.
 			float fog = clamp(exp(-(uFogDensity * vViewDepth) * (uFogDensity * vViewDepth)), 0.0, 1.0);
-			fragColor = vec4(mix(uFogColor, lit, fog), uColor.a);
+			fragColor = vec4(mix(uFogColor, lit, fog), texel.a * uColor.a);
 		}
 	)";
 
@@ -5014,10 +5101,25 @@ namespace
 	// same, with each group's vertices pre-translated onto its own pivot at
 	// upload time - exactly as upstream does with setVertexTranslation -
 	// so drawing is just three transforms rather than any per-vertex work.
+	// V2/V3: one upstream Mesh's share of a group - its triangles, its
+	// texture and its material, the way ModelRendererMesh::drawMesh sets
+	// them before each mesh. Consecutive meshes that agree on all of it are
+	// merged into one range.
+	struct MeshRange {
+		int first = 0, count = 0;
+		GLuint texture = 0;
+		bool sphereMap = false;
+		float ambient[3] = { 0.0f, 0.0f, 0.0f };
+		float diffuse[3] = { 0.0f, 0.0f, 0.0f };
+		float emissive[3] = { 0.0f, 0.0f, 0.0f };
+	};
 	struct MeshGroup {
 		GLuint vao = 0, vbo = 0;
 		int vertexCount = 0;
+		std::vector<MeshRange> ranges;
 	};
+	// Floats per model vertex: position, normal, texture coordinate.
+	const int kMeshFloats = 8;
 	struct GpuModel {
 		MeshGroup hull, turret, gun;
 		float scale = 1.0f;         // upstream's "don't let the model be huge" rule
@@ -5030,6 +5132,51 @@ namespace
 		float gunOffsetX = 0.0f, gunOffsetY = 0.0f, gunOffsetZ = 0.0f;
 	};
 	std::map<Model *, GpuModel> g_modelCache;
+	// The view matrix of the pass being drawn, for the sphere-mapped
+	// meshes (GL_SPHERE_MAP works in eye space). Set before each pass.
+	Mat4 g_passView = Mat4::identity();
+
+	// V2: model textures by file name, as upstream's GLTextureReference
+	// shares them. A MilkShape mesh names its texture (and, rarely, a
+	// separate alpha image) with an absolute path built by MSModelFactory;
+	// an .ase tank gets its <skin> on every mesh (ModelStore::getModel).
+	// Missing files are remembered as 0 so they are not retried per frame.
+	std::map<std::string, GLuint> g_modelTextures;
+	GLuint modelTexture(const char *name, const char *alphaName)
+	{
+		if (!name || !name[0]) return 0;
+		std::string key = std::string(name) + "|" + (alphaName ? alphaName : "");
+		auto it = g_modelTextures.find(key);
+		if (it != g_modelTextures.end()) return it->second;
+
+		GLuint texture = 0;
+		Image image = ImageFactory::loadImage(S3D::eAbsLocation, name,
+											  alphaName ? alphaName : "", false);
+		if (image.getBits() && image.getWidth() > 0) {
+			glGenTextures(1, &texture);
+			glBindTexture(GL_TEXTURE_2D, texture);
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+			const GLenum format = (image.getComponents() == 4) ? GL_RGBA : GL_RGB;
+			glTexImage2D(GL_TEXTURE_2D, 0, (GLint) format,
+						 image.getWidth(), image.getHeight(), 0,
+						 format, GL_UNSIGNED_BYTE, image.getBits());
+			// GLTexture::create: mipmapped, trilinear, repeating.
+			glGenerateMipmap(GL_TEXTURE_2D);
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+			applyAnisotropy();
+			glBindTexture(GL_TEXTURE_2D, 0);
+			LOGI("Model texture loaded: %s (%dx%d, %d ch)", name,
+				 image.getWidth(), image.getHeight(), image.getComponents());
+		} else {
+			LOGI("Model texture FAILED: %s", name);
+		}
+		g_modelTextures[key] = texture;
+		return texture;
+	}
 
 	// ModelStore::getModel() calls DIALOG_ASSERT (i.e. abort, in this port -
 	// see the porting plan's dialogAssert note) when handed a ModelID it
@@ -5069,12 +5216,34 @@ namespace
 	//
 	// The pivot offsets are subtracted in *model* space, before the remap,
 	// so they stay in the model's own axes - hence the parameter names.
+	//
+	// V2/V3: each vertex also carries the face's texture coordinate, and
+	// each mesh its texture and material, chosen the way upstream's
+	// drawModel does - a model that uses textures anywhere takes every
+	// mesh's textured material (an .ase's 0.6 grey ambient and 0.8 grey
+	// diffuse), one that uses none takes the "no texture" colours (the
+	// .ase's own colour times the same two).
 	void uploadMeshGroup(MeshGroup &group, const std::vector<Mesh *> &meshes,
-						 float offModelX, float offModelZ, float offModelY)
+						 float offModelX, float offModelZ, float offModelY,
+						 bool textured)
 	{
 		std::vector<float> verts;
 		for (Mesh *mesh : meshes) {
+			MeshRange range;
+			range.first = (int) (verts.size() / kMeshFloats);
+			range.texture = textured ? modelTexture(mesh->getTextureName(), mesh->getATextureName()) : 0;
+			range.sphereMap = textured && mesh->getSphereMap();
+			FixedVector4 &amb = textured ? mesh->getAmbientColor() : mesh->getAmbientNoTexColor();
+			FixedVector4 &dif = textured ? mesh->getDiffuseColor() : mesh->getDiffuseNoTexColor();
+			FixedVector4 &emi = textured ? mesh->getEmissiveColor() : mesh->getEmissiveNoTexColor();
+			for (int i = 0; i < 3; i++) {
+				range.ambient[i] = amb[i].asFloat();
+				range.diffuse[i] = dif[i].asFloat();
+				range.emissive[i] = emi[i].asFloat();
+			}
 			for (Face *face : mesh->getFaces()) {
+				// drawVerts skips degenerate faces.
+				if (face->v[0] == face->v[1] || face->v[1] == face->v[2] || face->v[0] == face->v[2]) continue;
 				for (int i = 0; i < 3; i++) {
 					Vertex *v = mesh->getVertexes()[face->v[i]];
 					verts.push_back(v->position[0].asFloat() - offModelX);
@@ -5083,10 +5252,25 @@ namespace
 					verts.push_back(face->normal[i][0].asFloat());
 					verts.push_back(face->normal[i][2].asFloat());
 					verts.push_back(-face->normal[i][1].asFloat());
+					verts.push_back(face->tcoord[i][0].asFloat());
+					verts.push_back(face->tcoord[i][1].asFloat());
 				}
 			}
+			range.count = (int) (verts.size() / kMeshFloats) - range.first;
+			if (range.count == 0) continue;
+			if (!group.ranges.empty()) {
+				MeshRange &last = group.ranges.back();
+				if (last.texture == range.texture && last.sphereMap == range.sphereMap &&
+					memcmp(last.ambient, range.ambient, sizeof(range.ambient)) == 0 &&
+					memcmp(last.diffuse, range.diffuse, sizeof(range.diffuse)) == 0 &&
+					memcmp(last.emissive, range.emissive, sizeof(range.emissive)) == 0) {
+					last.count += range.count;
+					continue;
+				}
+			}
+			group.ranges.push_back(range);
 		}
-		group.vertexCount = (int) (verts.size() / 6);
+		group.vertexCount = (int) (verts.size() / kMeshFloats);
 		if (verts.empty()) return;
 
 		glGenVertexArrays(1, &group.vao);
@@ -5095,9 +5279,11 @@ namespace
 		glBindBuffer(GL_ARRAY_BUFFER, group.vbo);
 		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
 		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kMeshFloats * sizeof(float), (void *) 0);
 		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kMeshFloats * sizeof(float), (void *) (3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, kMeshFloats * sizeof(float), (void *) (6 * sizeof(float)));
 		glBindVertexArray(0);
 	}
 
@@ -5171,10 +5357,11 @@ namespace
 		gpu.gunOffsetY = gunModelZ;
 		gpu.gunOffsetZ = -gunModelY;
 
-		uploadMeshGroup(gpu.hull, hullMeshes, tcx, tcModelZ, tcModelY);
-		uploadMeshGroup(gpu.turret, turretMeshes, tcx, tcModelZ, tcModelY);
+		const bool textured = model->getTexturesUsed();
+		uploadMeshGroup(gpu.hull, hullMeshes, tcx, tcModelZ, tcModelY, textured);
+		uploadMeshGroup(gpu.turret, turretMeshes, tcx, tcModelZ, tcModelY, textured);
 		uploadMeshGroup(gpu.gun, gunMeshes,
-						tcx + gunModelX, tcModelZ + gunModelZ, tcModelY + gunModelY);
+						tcx + gunModelX, tcModelZ + gunModelZ, tcModelY + gunModelY, textured);
 
 		if (gpu.hull.vertexCount == 0 && gpu.turret.vertexCount == 0 && gpu.gun.vertexCount == 0) {
 			return nullptr;
@@ -5185,18 +5372,68 @@ namespace
 		gpu.baseOffset = tcModelZ - minV[2].asFloat();
 		gpu.groundOffset = gpu.baseOffset * gpu.scale;
 
-		LOGI("Model uploaded: hull %d, turret %d, gun %d tris, scale %.3f",
-			 gpu.hull.vertexCount / 3, gpu.turret.vertexCount / 3, gpu.gun.vertexCount / 3, gpu.scale);
+		LOGI("Model uploaded: hull %d, turret %d, gun %d tris, scale %.3f, %s, %d ranges",
+			 gpu.hull.vertexCount / 3, gpu.turret.vertexCount / 3, gpu.gun.vertexCount / 3, gpu.scale,
+			 textured ? "textured" : "untextured",
+			 (int) (gpu.hull.ranges.size() + gpu.turret.ranges.size() + gpu.gun.ranges.size()));
 		g_modelCache[model] = gpu;
 		return &g_modelCache[model];
 	}
 
-	void drawMeshGroup(const MeshGroup &group, GLint mvpLoc, const Mat4 &mvp)
+	// Binds one range's material and texture for whichever of the two
+	// model programs is current.
+	void setMeshRangeState(const MeshRange &range, GLint matAmbientLoc, GLint matDiffuseLoc,
+						   GLint matEmissiveLoc, GLint hasTextureLoc, GLint sphereMapLoc)
+	{
+		glUniform3fv(matAmbientLoc, 1, range.ambient);
+		glUniform3fv(matDiffuseLoc, 1, range.diffuse);
+		glUniform3fv(matEmissiveLoc, 1, range.emissive);
+		glUniform1i(hasTextureLoc, range.texture != 0 ? 1 : 0);
+		glUniform1i(sphereMapLoc, range.sphereMap ? 1 : 0);
+		if (range.texture != 0) {
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, range.texture);
+		}
+	}
+
+	// The per-pass state of the mesh program for upstream models: the
+	// sun as GL_LIGHT1, the sky's two light colours, this pass's view,
+	// and no tint - upstream draws its models with no glColor at all.
+	void beginUpstreamModels()
+	{
+		glUniform1i(meshLightModeLoc, 1);
+		glUniform4f(meshColorLoc, 1.0f, 1.0f, 1.0f, 1.0f);
+		glUniformMatrix4fv(meshViewLoc, 1, GL_FALSE, g_passView.m);
+		glUniform3f(meshSunPosLoc,
+					skyDescription.sunPosition[0],
+					skyDescription.sunPosition[2],
+					worldZFromEngineY(skyDescription.sunPosition[1]));
+		glUniform3fv(meshSkyAmbientLoc, 1, skyDescription.ambience);
+		glUniform3fv(meshSkyDiffuseLoc, 1, skyDescription.diffuse);
+	}
+
+	// The mesh program drawing something that is not an upstream model
+	// (shields, parachutes): the port's own flat shade, untextured.
+	void beginFlatMeshes()
+	{
+		glUniform1i(meshLightModeLoc, 0);
+		glUniform1i(meshHasTextureLoc, 0);
+		glUniform1i(meshSphereMapLoc, 0);
+		glUniformMatrix4fv(meshModelLoc, 1, GL_FALSE, Mat4::identity().m);
+		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+	}
+
+	void drawMeshGroup(const MeshGroup &group, const Mat4 &vp, const Mat4 &model)
 	{
 		if (group.vertexCount == 0) return;
-		glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, mvp.m);
+		glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(vp, model).m);
+		glUniformMatrix4fv(meshModelLoc, 1, GL_FALSE, model.m);
 		glBindVertexArray(group.vao);
-		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, group.vertexCount);
+		for (const MeshRange &range : group.ranges) {
+			setMeshRangeState(range, meshMatAmbientLoc, meshMatDiffuseLoc, meshMatEmissiveLoc,
+							  meshHasTextureLoc, meshSphereMapLoc);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, range.first, range.count);
+		}
 	}
 
 	// Draws a set of real world-space positions (already x,y,z in the same
@@ -5367,6 +5604,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	meshColorLoc = glGetUniformLocation(meshProgram, "uColor");
 	meshFogColorLoc = glGetUniformLocation(meshProgram, "uFogColor");
 	meshFogDensityLoc = glGetUniformLocation(meshProgram, "uFogDensity");
+	meshModelLoc = glGetUniformLocation(meshProgram, "uModel");
+	meshViewLoc = glGetUniformLocation(meshProgram, "uView");
+	meshSunPosLoc = glGetUniformLocation(meshProgram, "uSunPos");
+	meshSkyAmbientLoc = glGetUniformLocation(meshProgram, "uSkyAmbient");
+	meshSkyDiffuseLoc = glGetUniformLocation(meshProgram, "uSkyDiffuse");
+	meshMatAmbientLoc = glGetUniformLocation(meshProgram, "uMatAmbient");
+	meshMatDiffuseLoc = glGetUniformLocation(meshProgram, "uMatDiffuse");
+	meshMatEmissiveLoc = glGetUniformLocation(meshProgram, "uMatEmissive");
+	meshLightModeLoc = glGetUniformLocation(meshProgram, "uLightMode");
+	meshHasTextureLoc = glGetUniformLocation(meshProgram, "uHasTexture");
+	meshSphereMapLoc = glGetUniformLocation(meshProgram, "uSphereMap");
+	meshTextureLoc = glGetUniformLocation(meshProgram, "uTexture");
+	glUseProgram(meshProgram);
+	glUniform1i(meshTextureLoc, 0);
 
 	instancedMeshProgram = linkProgram(kInstancedMeshVertexShader, kInstancedMeshFragmentShader);
 	treeProgram = linkProgram(kTreeVertexShader, kTreeFragmentShader);
@@ -5379,6 +5630,21 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	instancedLightDirLoc = glGetUniformLocation(instancedMeshProgram, "uLightDir");
 	instancedFogColorLoc = glGetUniformLocation(instancedMeshProgram, "uFogColor");
 	instancedFogDensityLoc = glGetUniformLocation(instancedMeshProgram, "uFogDensity");
+	instancedViewLoc = glGetUniformLocation(instancedMeshProgram, "uView");
+	instancedSunPosLoc = glGetUniformLocation(instancedMeshProgram, "uSunPos");
+	instancedSkyAmbientLoc = glGetUniformLocation(instancedMeshProgram, "uSkyAmbient");
+	instancedSkyDiffuseLoc = glGetUniformLocation(instancedMeshProgram, "uSkyDiffuse");
+	instancedMatAmbientLoc = glGetUniformLocation(instancedMeshProgram, "uMatAmbient");
+	instancedMatDiffuseLoc = glGetUniformLocation(instancedMeshProgram, "uMatDiffuse");
+	instancedMatEmissiveLoc = glGetUniformLocation(instancedMeshProgram, "uMatEmissive");
+	instancedHasTextureLoc = glGetUniformLocation(instancedMeshProgram, "uHasTexture");
+	instancedSphereMapLoc = glGetUniformLocation(instancedMeshProgram, "uSphereMap");
+	instancedTextureLoc = glGetUniformLocation(instancedMeshProgram, "uTexture");
+	glUseProgram(instancedMeshProgram);
+	glUniform1i(instancedTextureLoc, 0);
+	treeSunPosLoc = glGetUniformLocation(treeProgram, "uSunPos");
+	treeSkyAmbientLoc = glGetUniformLocation(treeProgram, "uSkyAmbient");
+	treeSkyDiffuseLoc = glGetUniformLocation(treeProgram, "uSkyDiffuse");
 
 	pointProgram = linkProgram(kPointVertexShader, kPointFragmentShader);
 	pointMvpLoc = glGetUniformLocation(pointProgram, "uMVP");
@@ -5490,6 +5756,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	surroundVao = surroundVbo = surroundTexture = 0;
 
 	g_modelCache.clear();
+	g_modelTextures.clear();
 	// Same reason as the model cache above: these name GL objects belonging
 	// to the context that has just gone away.
 	g_instancedDraws.clear();
@@ -6552,7 +6819,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// standing on the reflected surface.
 	auto drawSceneryPass = [&](const Mat4 &vp, float cullBelowY = -1.0e9f) {
 	glUseProgram(meshProgram);
-		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+		beginUpstreamModels();
 		glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 		glUniform1f(meshFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 
@@ -6571,6 +6838,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// path - they are simply another bucket.
 			struct Bucket {
 				int vertexCount = 0;
+				const MeshGroup *group = nullptr;
 				std::vector<ScorchDroidInstances::Instance> instances;
 			};
 			std::map<GLuint, Bucket> buckets;
@@ -6616,13 +6884,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 				Bucket &bucket = buckets[sourceVbo];
 				bucket.vertexCount = vertexCount;
+				bucket.group = &uploadModel(inst.model)->hull;
 				bucket.instances.push_back(packed);
 			}
 
 			if (!buckets.empty() && instancedMeshProgram != 0) {
 				glUseProgram(instancedMeshProgram);
 				glUniformMatrix4fv(instancedViewProjLoc, 1, GL_FALSE, vp.m);
-				glUniform3f(instancedLightDirLoc, 0.4f, 0.82f, 0.35f);
+				glUniformMatrix4fv(instancedViewLoc, 1, GL_FALSE, g_passView.m);
+				glUniform3f(instancedSunPosLoc,
+							skyDescription.sunPosition[0],
+							skyDescription.sunPosition[2],
+							worldZFromEngineY(skyDescription.sunPosition[1]));
+				glUniform3fv(instancedSkyAmbientLoc, 1, skyDescription.ambience);
+				glUniform3fv(instancedSkyDiffuseLoc, 1, skyDescription.diffuse);
 				glUniform3f(instancedFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 				glUniform1f(instancedFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 
@@ -6639,19 +6914,21 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 						// wrote them in.
 						glBindBuffer(GL_ARRAY_BUFFER, sourceVbo);
 						glEnableVertexAttribArray(0);
-						glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+						glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, kMeshFloats * sizeof(float), (void *) 0);
 						glEnableVertexAttribArray(1);
-						glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+						glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, kMeshFloats * sizeof(float), (void *) (3 * sizeof(float)));
+						glEnableVertexAttribArray(2);
+						glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, kMeshFloats * sizeof(float), (void *) (6 * sizeof(float)));
 						// ...then the per-instance attributes, advancing once
 						// per instance rather than once per vertex.
 						const GLsizei stride = ScorchDroidInstances::kFloatsPerInstance * sizeof(float);
 						glBindBuffer(GL_ARRAY_BUFFER, draw.instanceVbo);
-						glEnableVertexAttribArray(2);
-						glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, stride, (void *) 0);
-						glVertexAttribDivisor(2, 1);
 						glEnableVertexAttribArray(3);
-						glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void *) (4 * sizeof(float)));
+						glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, stride, (void *) 0);
 						glVertexAttribDivisor(3, 1);
+						glEnableVertexAttribArray(4);
+						glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, stride, (void *) (4 * sizeof(float)));
+						glVertexAttribDivisor(4, 1);
 						glBindVertexArray(0);
 					}
 
@@ -6672,8 +6949,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					draw.instanceCount = (int) bucket.instances.size();
 
 					glBindVertexArray(draw.vao);
-					frameDrawCalls++;
-					glDrawArraysInstanced(GL_TRIANGLES, 0, bucket.vertexCount, draw.instanceCount);
+					for (const MeshRange &range : bucket.group->ranges) {
+						setMeshRangeState(range, instancedMatAmbientLoc, instancedMatDiffuseLoc,
+										  instancedMatEmissiveLoc, instancedHasTextureLoc,
+										  instancedSphereMapLoc);
+						frameDrawCalls++;
+						glDrawArraysInstanced(GL_TRIANGLES, range.first, range.count, draw.instanceCount);
+					}
 				}
 				glBindVertexArray(0);
 			}
@@ -6693,7 +6975,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				// reflection's trees from the real camera - two thousand of
 				// them in the wrong place, on top of the reflected land.
 				glUniformMatrix4fv(treeViewProjLoc, 1, GL_FALSE, vp.m);
-				glUniform3f(treeLightDirLoc, 0.4f, 0.82f, 0.35f);
+				glUniform3f(treeSunPosLoc,
+							skyDescription.sunPosition[0],
+							skyDescription.sunPosition[2],
+							worldZFromEngineY(skyDescription.sunPosition[1]));
+				glUniform3fv(treeSkyAmbientLoc, 1, skyDescription.ambience);
+				glUniform3fv(treeSkyDiffuseLoc, 1, skyDescription.diffuse);
 				glUniform3f(treeFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 				glUniform1f(treeFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 				glUniform1i(treeAtlasLoc, 0);
@@ -6768,13 +7055,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				continue;
 			}
 
-			// The engine's own per-tank colour, as upstream tints tanks and
-			// draws their names with. Was a hardcoded cyan/red "mine vs theirs"
-			// split, which contradicted the name plates the moment those
-			// started showing the real colour - a red "Player" label over a
-			// cyan tank. Your own tank is identifiable by the aim sight and the
-			// follow camera; it doesn't need to lie about its colour too.
-			glUniform4f(meshColorLoc, inst.colorR, inst.colorG, inst.colorB, 1.0f);
+			// No tint. Upstream draws the tank model as it is - its skin or
+			// its material colours under the sun - and shows the player's
+			// colour only on the name plate (TargetRendererImplTank::render
+			// sets no glColor before ModelRendererTank::draw). This port
+			// used to multiply the model by the tank colour, which is why
+			// every tank was a flat team-coloured silhouette.
 
 			// The hull faces the way the tank last drove; the turret swings to
 			// the firing bearing and the gun additionally lifts to the
@@ -6791,15 +7077,15 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// Tilt first, then yaw inside it, so a tank driving across a slope
 			// turns about its own up axis rather than the world's - the same
 			// order the ground tilt was added under.
-			Mat4 hullMvp = Mat4::multiply(vp, Mat4::multiply(
+			Mat4 hullModel = Mat4::multiply(
 				Mat4::multiply(
 					Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
 					Mat4::multiply(inst.groundTilt, Mat4::rotateY(inst.hullYawRadians))),
-				Mat4::scale(gpu->scale)));
-			drawMeshGroup(gpu->hull, meshMvpLoc, hullMvp);
+				Mat4::scale(gpu->scale));
+			drawMeshGroup(gpu->hull, vp, hullModel);
 
 			Mat4 turret = Mat4::multiply(base, Mat4::rotateY(inst.headingRadians));
-			drawMeshGroup(gpu->turret, meshMvpLoc, Mat4::multiply(vp, turret));
+			drawMeshGroup(gpu->turret, vp, turret);
 
 			Mat4 gun = Mat4::multiply(
 				turret,
@@ -6808,7 +7094,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					// Not negated: the barrel points along world -Z after the
 					// upload's remap, and rotateX(+e) lifts -Z towards +Y.
 					Mat4::rotateX(inst.elevationRadians)));
-			drawMeshGroup(gpu->gun, meshMvpLoc, Mat4::multiply(vp, gun));
+			drawMeshGroup(gpu->gun, vp, gun);
 
 			// Upstream draws the sight on the player's own tank while it's
 			// playing (TargetRendererImplTank::drawParticle: currentTank &&
@@ -6852,10 +7138,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// every rocket's smoke.
 	auto drawShotsPass = [&](const Mat4 &vp, bool primary, float cullBelowY = -1.0e9f) {
 		glUseProgram(meshProgram);
-		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+		beginUpstreamModels();
 		glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 		glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
-		glUniform4f(meshColorLoc, 0.95f, 0.9f, 0.4f, 1.0f);
 		for (size_t i = 0; i < shotPositionsRaw.size(); i++) {
 			FixedVector &p = shotPositionsRaw[i];
 			float wx = p[0].asFloat(), wy = p[2].asFloat(), wz = worldZFromEngineY(p[1].asFloat());
@@ -6961,10 +7246,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			Mat4 model = Mat4::multiply(
 				Mat4::translate(wx, wy, wz),
 				Mat4::multiply(orientation, Mat4::scale(gpu->scale * projectileScale)));
-			Mat4 shotMvp = Mat4::multiply(vp, model);
-			drawMeshGroup(gpu->hull, meshMvpLoc, shotMvp);
-			drawMeshGroup(gpu->turret, meshMvpLoc, shotMvp);
-			drawMeshGroup(gpu->gun, meshMvpLoc, shotMvp);
+			drawMeshGroup(gpu->hull, vp, model);
+			drawMeshGroup(gpu->turret, vp, model);
+			drawMeshGroup(gpu->gun, vp, model);
 		}
 	};
 
@@ -7068,6 +7352,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// offset above does the work upstream's cull was doing.
 			glDisable(GL_CULL_FACE);
 
+			g_passView = lightView;
 			drawLandPass(lightVp, false);
 			drawSceneryPass(lightVp);
 			drawTanksPass(lightVp, false);
@@ -7200,6 +7485,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// Everything else, with upstream's waterline rule applied to
 			// each: anything whose position is under the surface is skipped,
 			// because mirroring would raise it back above one.
+			g_passView = reflView;
 			drawSceneryPass(reflMvp, waterHeight);
 			drawTanksPass(reflMvp, false, waterHeight);
 			drawShotsPass(reflMvp, false, waterHeight);
@@ -7577,15 +7863,16 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// fallback for any tank whose model wouldn't load, so a tank is never
 	// simply invisible.
 
+	g_passView = view;
 	drawSceneryPass(mvp);
 
 	// M6: the thrown rocks. Upstream picks between rock1 and rock2 per chunk
-	// and draws them opaque in a flat dark grey-green, untextured.
+	// and draws them with no skin, so they take the .ase's own "no
+	// texture" material colours under the sun.
 	if (!debrisChunks.empty()) {
 		ModelID rockIds[2];
 		rockIds[0].initFromString("ase", "data/meshes/rock1.ase", "none");
 		rockIds[1].initFromString("ase", "data/meshes/rock2.ase", "none");
-		glUniform4f(meshColorLoc, 0.3f, 0.4f, 0.3f, 1.0f);
 		for (const DebrisChunk &chunk : debrisChunks) {
 			Model *model = loadModelSafely(rockIds[chunk.mesh & 1]);
 			if (!model) continue;
@@ -7596,7 +7883,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				Mat4::multiply(
 					Mat4::rotateAxis(chunk.axisX, chunk.axisY, chunk.axisZ, chunk.angle),
 					Mat4::scale(gpu->scale * chunk.scale)));
-			drawMeshGroup(gpu->hull, meshMvpLoc, Mat4::multiply(mvp, rockModel));
+			drawMeshGroup(gpu->hull, mvp, rockModel);
 		}
 	}
 
@@ -7643,15 +7930,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					LOGI("Arena markers: %s, %d points, water %s", file, (int) points.size(),
 						 waterVisible ? "yes" : "no");
 				}
-				glUniform4f(meshColorLoc, 1.0f, 1.0f, 1.0f, 1.0f);
 				const Mat4 markerScale = Mat4::scale(0.15f);
 				for (const std::pair<int, int> &pt : points) {
 					const float x = (float) pt.first;
 					const float z = worldZFromEngineY((float) pt.second);
 					// On the ground (LandscapePoints::draw).
 					const float gy = heightAt(markerMap, mapWidthUnits, mapHeightUnits, x, (float) pt.second);
-					drawMeshGroup(gpu->hull, meshMvpLoc,
-						Mat4::multiply(mvp, Mat4::multiply(Mat4::translate(x, gy, z), markerScale)));
+					drawMeshGroup(gpu->hull, mvp, Mat4::multiply(Mat4::translate(x, gy, z), markerScale));
 					// And on the water (WaterMapPoints::draw), riding the
 					// ocean tile 0.6 above the surface, where there is one.
 					if (waterVisible && !oceanUpload.empty()) {
@@ -7660,9 +7945,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 						const int tx = ((int) floorf(x / tile * n) % n + n) % n;
 						const int tz = ((int) floorf(z / tile * n) % n + n) % n;
 						const float wave = oceanUpload[((size_t) tz * n + tx) * 3];
-						drawMeshGroup(gpu->hull, meshMvpLoc,
-							Mat4::multiply(mvp, Mat4::multiply(
-								Mat4::translate(x, waterHeight + wave + 0.6f, z), markerScale)));
+						drawMeshGroup(gpu->hull, mvp, Mat4::multiply(
+							Mat4::translate(x, waterHeight + wave + 0.6f, z), markerScale));
 					}
 				}
 			}
@@ -7737,7 +8021,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glDepthMask(GL_FALSE);
 		glUseProgram(meshProgram);
-		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+		beginFlatMeshes();
 		glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 		glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
 
