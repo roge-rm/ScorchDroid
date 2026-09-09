@@ -836,11 +836,20 @@ namespace
 				float diffuse = (uHalfLambert == 1) ? (raw * 0.5 + 0.5) : max(raw, 0.0);
 				lit = baseColor * (0.55 + diffuse * 0.6);
 			}
-			// Upstream's exponential distance fog. gl_Position.w is the view
-			// distance for a standard projection, so no eye position needs
-			// passing in - which is what lets every shader here fog the same
-			// way with one line each.
-			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			// Upstream's exponential distance fog, exactly as its land and
+			// water shaders have it: gl_FogFragCoord = max(z - 350, 0) in
+			// the vertex shader, then exp2(-density * coord * 3 * 1.442695)
+			// - which is exp(-3 * density * coord). Nothing is fogged inside
+			// 350 units, and beyond that it thickens three times as fast as
+			// the landscape's <fogdensity> alone would say. The old
+			// exp(-density * depth) from zero was 30% fog at 350 units on a
+			// typical map, where upstream has none, and a soft horizon
+			// where upstream's sea meets the fog colour hard.
+			//
+			// gl_Position.w is the view distance for a standard projection,
+			// so no eye position needs passing in - which is what lets
+			// every shader here fog the same way with one line each.
+			float fog = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
 		}
 	)";
@@ -917,7 +926,7 @@ namespace
 			vec3 n = normalize(vNormal);
 			float diffuse = max(dot(n, uLightDir), 0.0);
 			vec3 lit = vColor * (0.45 + diffuse * 0.75);
-			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			float fog = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
 		}
 	)";
@@ -986,7 +995,7 @@ namespace
 			float diffuse = abs(dot(n, uLightDir));
 			vec3 lit = texel.rgb * vColor * (0.45 + diffuse * 0.75);
 
-			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			float fog = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, lit, fog), 1.0);
 		}
 	)";
@@ -1004,7 +1013,7 @@ namespace
 			vec3 n = normalize(vNormal);
 			float diffuse = max(dot(n, uLightDir), 0.0);
 			vec3 lit = uColor.rgb * (0.45 + diffuse * 0.75);
-			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			float fog = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
 			fragColor = vec4(mix(uFogColor, lit, fog), uColor.a);
 		}
 	)";
@@ -1369,7 +1378,7 @@ namespace
 			// no longer comes from a pair of sines.
 			float a = sin(vWorld.x * 0.09 + uTime * 0.7);
 
-			float fogFactor = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+			float fogFactor = clamp(exp(-3.0 * uFogDensity * max(vViewDepth - 350.0, 0.0)), 0.0, 1.0);
 
 			// Upstream's two noise layers, added to the geometric normal:
 			//   N = normalize(normal + N0 + N1)
