@@ -864,17 +864,23 @@ namespace
 		return shader;
 	}
 
-	// `adb shell setprop debug.scorchdroid.highp 1` (then restart the app)
-	// promotes every fragment shader's default precision to highp. Mali
-	// GPUs run mediump as real 16-bit floats where Adreno and the emulator
-	// quietly use 32, so this is the A/B for a phone-only artefact.
-	bool forceHighpFragments()
+	// Every fragment shader here declares highp. GLSL ES 3.00 guarantees
+	// highp in fragment shaders, and on a Mali GPU mediump is a real
+	// 16-bit float (range 65504, ten bits of mantissa) where Adreno and
+	// the emulator quietly run it at 32 bits - so mediump shaders that
+	// looked right everywhere else drew a white sea and navy blocks of
+	// broken water on a Moto G Stylus 2024 (Mali-G52). dan A/B'd it on
+	// the phone: highp fixed both, mediump brought both back.
+	//
+	// `adb shell setprop debug.scorchdroid.highp 0` (then restart the app)
+	// puts mediump back, for comparing the two on a device.
+	bool forceMediumpFragments()
 	{
 		static int cached = -1;
 		if (cached < 0) {
 			char value[PROP_VALUE_MAX] = { 0 };
-			cached = (__system_property_get("debug.scorchdroid.highp", value) > 0 && value[0] == '1') ? 1 : 0;
-			if (cached) LOGI("Shaders: fragment precision forced to highp (debug.scorchdroid.highp)");
+			cached = (__system_property_get("debug.scorchdroid.highp", value) > 0 && value[0] == '0') ? 1 : 0;
+			if (cached) LOGI("Shaders: fragment precision forced back to mediump (debug.scorchdroid.highp=0)");
 		}
 		return cached == 1;
 	}
@@ -882,10 +888,10 @@ namespace
 	GLuint linkProgram(const char *vs, const char *fs)
 	{
 		std::string fsSource = fs;
-		if (forceHighpFragments()) {
-			const std::string from = "precision mediump float;";
+		if (forceMediumpFragments()) {
+			const std::string from = "precision highp float;";
 			size_t at = fsSource.find(from);
-			if (at != std::string::npos) fsSource.replace(at, from.size(), "precision highp float;");
+			if (at != std::string::npos) fsSource.replace(at, from.size(), "precision mediump float;");
 		}
 		GLuint v = compileShader(GL_VERTEX_SHADER, vs);
 		GLuint f = compileShader(GL_FRAGMENT_SHADER, fsSource.c_str());
@@ -961,7 +967,7 @@ namespace
 	// colouring if the landscape definition doesn't use generated textures
 	// or the images failed to load, so the ground is never invisible.
 	const char *kTerrainFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec3 vNormal;
 		in float vHeight01;
 		in vec2 vTexCoord;
@@ -1205,7 +1211,7 @@ namespace
 	// Identical to the mesh fragment shader except that the colour arrives
 	// per instance rather than as a uniform.
 	const char *kInstancedMeshFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec3 vLit;
 		in vec2 vTexCoord;
 		in float vViewDepth;
@@ -1274,7 +1280,7 @@ namespace
 	)";
 
 	const char *kTreeFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec3 vLit;
 		in vec2 vTexCoord;
 		in float vViewDepth;
@@ -1297,7 +1303,7 @@ namespace
 	)";
 
 	const char *kMeshFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec3 vLit;
 		in vec2 vTexCoord;
 		in float vViewDepth;
@@ -1340,7 +1346,7 @@ namespace
 	// fixed-function and so fogged with GL_EXP2; the sight itself is at
 	// the tank and never far enough to notice.
 	const char *kSightFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec3 vColor;
 		in float vViewDepth;
 		out vec4 fragColor;
@@ -1371,7 +1377,7 @@ namespace
 	)";
 
 	const char *kShadowFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec2 vLocal;
 		out vec4 fragColor;
 		uniform float uStrength;
@@ -1404,7 +1410,7 @@ namespace
 	)";
 
 	const char *kSkyFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec3 vRay;
 		out vec4 fragColor;
 		uniform vec3 uGradient[16];
@@ -1496,7 +1502,7 @@ namespace
 	)";
 
 	const char *kSpriteFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec2 vUv;
 		out vec4 fragColor;
 		uniform sampler2D uTexture;
@@ -1529,7 +1535,7 @@ namespace
 	)";
 
 	const char *kCloudFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec2 vUv;
 		in float vEyeDistance;
 		out vec4 fragColor;
@@ -1663,7 +1669,7 @@ namespace
 	)";
 
 	const char *kWaterFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec2 vWorld;
 		in vec3 vWorldPos;
 		in float vViewDepth;
@@ -1842,7 +1848,7 @@ namespace
 	)";
 
 	const char *kBreakerFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec2 vUv;
 		out vec4 fragColor;
 		uniform sampler2D uTexture;
@@ -1878,7 +1884,7 @@ namespace
 	)";
 
 	const char *kParticleFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		in vec2 vUv;
 		in float vLayer;
 		in vec4 vColor;
@@ -1910,7 +1916,7 @@ namespace
 	)";
 
 	const char *kPointFragmentShader = R"(#version 300 es
-		precision mediump float;
+		precision highp float;
 		out vec4 fragColor;
 		uniform vec4 uColor;
 		void main() {
