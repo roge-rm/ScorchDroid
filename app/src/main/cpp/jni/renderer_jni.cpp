@@ -864,10 +864,31 @@ namespace
 		return shader;
 	}
 
+	// `adb shell setprop debug.scorchdroid.highp 1` (then restart the app)
+	// promotes every fragment shader's default precision to highp. Mali
+	// GPUs run mediump as real 16-bit floats where Adreno and the emulator
+	// quietly use 32, so this is the A/B for a phone-only artefact.
+	bool forceHighpFragments()
+	{
+		static int cached = -1;
+		if (cached < 0) {
+			char value[PROP_VALUE_MAX] = { 0 };
+			cached = (__system_property_get("debug.scorchdroid.highp", value) > 0 && value[0] == '1') ? 1 : 0;
+			if (cached) LOGI("Shaders: fragment precision forced to highp (debug.scorchdroid.highp)");
+		}
+		return cached == 1;
+	}
+
 	GLuint linkProgram(const char *vs, const char *fs)
 	{
+		std::string fsSource = fs;
+		if (forceHighpFragments()) {
+			const std::string from = "precision mediump float;";
+			size_t at = fsSource.find(from);
+			if (at != std::string::npos) fsSource.replace(at, from.size(), "precision highp float;");
+		}
 		GLuint v = compileShader(GL_VERTEX_SHADER, vs);
-		GLuint f = compileShader(GL_FRAGMENT_SHADER, fs);
+		GLuint f = compileShader(GL_FRAGMENT_SHADER, fsSource.c_str());
 		GLuint p = glCreateProgram();
 		glAttachShader(p, v);
 		glAttachShader(p, f);
