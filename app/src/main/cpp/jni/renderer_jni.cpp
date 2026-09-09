@@ -99,6 +99,7 @@
 #include <tanket/TanketShotInfo.hpp>
 #include <map>
 #include <set>
+#include <sys/system_properties.h>
 #include <string>
 #include <cstring>
 
@@ -148,6 +149,7 @@ namespace
 	GLint  terrainFogColorLoc = -1, terrainFogDensityLoc = -1, terrainHalfLambertLoc = -1;
 	GLint  meshFogColorLoc = -1, meshFogDensityLoc = -1;
 	GLint  waterFogColorLoc = -1, waterFogDensityLoc = -1;
+	GLint  waterDebugModeLoc = -1;
 	GLuint groundTexture = 0;
 	bool   groundTextureBuilt = false;
 	// Whether the ground texture already carries the sun's lighting, in
@@ -1676,6 +1678,7 @@ namespace
 		uniform highp float uWaveTileLength;
 		// W10a: the landscape's foam bitmap, tiled across the map.
 		uniform sampler2D uFoamMask;
+		uniform int uDebugMode;
 
 		// Upstream's water shininess, from water.fshader.
 		const float kWaterShininess = 120.0;
@@ -1765,6 +1768,23 @@ namespace
 				* texture(uFoamMask, mapPer * 25.0).b;
 			water = mix(water, uSunDiffuse, foam);
 
+			// Remote diagnosis: `adb shell setprop debug.scorchdroid.water N`
+			// shows one term of the sum instead of the sum.
+			if (uDebugMode != 0) {
+				vec3 d = vec3(1.0, 0.0, 1.0);
+				if (uDebugMode == 1) d = vec3(s0);
+				else if (uDebugMode == 2) d = vec3(foam);
+				else if (uDebugMode == 3) d = specular;
+				else if (uDebugMode == 4) d = reflected;
+				else if (uDebugMode == 5) d = vec3(fresnel);
+				else if (uDebugMode == 6) d = refraction;
+				else if (uDebugMode == 7) d = n * 0.5 + 0.5;
+				else if (uDebugMode == 8) d = vec3(aof);
+				else if (uDebugMode == 9) d = vec3(fogFactor);
+				else if (uDebugMode == 10) d = vUpwell;
+				fragColor = vec4(d, 1.0);
+				return;
+			}
 			fragColor = vec4(mix(uFogColor, water, fogFactor), uAlpha);
 		}
 	)";
@@ -5138,6 +5158,21 @@ namespace
 		float gunOffsetX = 0.0f, gunOffsetY = 0.0f, gunOffsetZ = 0.0f;
 	};
 	std::map<Model *, GpuModel> g_modelCache;
+	// `adb shell setprop debug.scorchdroid.water N` picks a debug view of
+	// the water shader (see uDebugMode there); polled once a second so a
+	// phone that cannot be attached to a debugger can still be diagnosed.
+	int waterDebugMode()
+	{
+		static int cached = 0;
+		static double checkedAt = -10.0;
+		if (lastFrameSeconds - checkedAt < 1.0) return cached;
+		checkedAt = lastFrameSeconds;
+		char value[PROP_VALUE_MAX] = { 0 };
+		if (__system_property_get("debug.scorchdroid.water", value) > 0) cached = atoi(value);
+		else cached = 0;
+		return cached;
+	}
+
 	// The view matrix of the pass being drawn, for the sphere-mapped
 	// meshes (GL_SPHERE_MAP works in eye space). Set before each pass.
 	Mat4 g_passView = Mat4::identity();
@@ -5192,7 +5227,13 @@ namespace
 	Model *loadModelSafely(ModelID &id)
 	{
 		if (!id.modelValid()) return nullptr;
-		return ModelStore::instance()->loadModel(id);
+		Model *model = ModelStore::instance()->loadModel(id);
+		static std::set<std::string> logged;
+		if (logged.insert(id.getStringHash()).second) {
+			LOGI("Model loaded: %s mesh %s skin %s -> %p", id.getType(), id.getMeshName(),
+				 id.getSkinName(), (void *) model);
+		}
+		return model;
 	}
 
 	// The model every shot falls back to, straight out of upstream's own
@@ -5591,6 +5632,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterEyePosLoc = glGetUniformLocation(waterProgram, "uEyePos");
 	waterFogColorLoc = glGetUniformLocation(waterProgram, "uFogColor");
 	waterFogDensityLoc = glGetUniformLocation(waterProgram, "uFogDensity");
+	waterDebugModeLoc = glGetUniformLocation(waterProgram, "uDebugMode");
 	waterWaveAmpLoc = glGetUniformLocation(waterProgram, "uWaveAmplitude");
 	waterWaveLodLoc = glGetUniformLocation(waterProgram, "uWaveLod");
 	waterSunDirLoc = glGetUniformLocation(waterProgram, "uSunPos");
@@ -7776,6 +7818,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform3f(waterFogColorLoc, waterFog[0], waterFog[1], waterFog[2]);
 		glUniform1f(waterFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 		glUniform2f(waterMapSizeLoc, mapWidthUnits, mapHeightUnits);
+		glUniform1i(waterDebugModeLoc, waterDebugMode());
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		// The surface extends far past the map on every side, so with the
