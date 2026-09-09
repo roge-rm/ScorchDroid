@@ -174,6 +174,11 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.soundEnabled,
                         ) { settings.updateSoundEnabled(it) }
                         SwitchRow(
+                            "Ambient sound",
+                            "The landscape's own atmosphere - waves, rain, birds in the trees",
+                            settings.ambientEnabled,
+                        ) { settings.updateAmbientEnabled(it) }
+                        SwitchRow(
                             "Music",
                             "Scorched3D's own loops, changing with the state of the game",
                             settings.musicEnabled,

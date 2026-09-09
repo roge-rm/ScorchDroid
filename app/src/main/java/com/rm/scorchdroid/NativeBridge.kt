@@ -323,6 +323,16 @@ object NativeBridge {
 
     external fun setBotTypes(names: Array<String>): Boolean
 
+    /**
+     * M21: the ambient sounds the current landscape asks for, as
+     * "file|gain|looped|min|max" rows. Reads two small XML files, so poll
+     * [getLandscapeTex] and only call this when the landscape has changed.
+     */
+    external fun getAmbientSounds(): Array<String>
+
+    /** M21: which landscape is loaded, as its texture definition's path. */
+    external fun getLandscapeTex(): String
+
     /** M19: every landscape the chosen mod defines, by name. */
     external fun getLandscapes(): Array<String>
 
@@ -648,4 +658,26 @@ fun parseBots(rows: Array<String>): List<BotOption> = rows.mapNotNull { row ->
     val parts = row.split("|", limit = 2)
     if (parts.size != 2) return@mapNotNull null
     BotOption(name = parts[0], description = parts[1])
+}
+
+/** M21: one ambient sound, as [NativeBridge.getAmbientSounds] reports it. */
+data class AmbientSound(
+    val file: String,
+    val gain: Float,
+    /** Looped plays continuously; otherwise it fires every so often. */
+    val looped: Boolean,
+    val minSeconds: Float,
+    val maxSeconds: Float,
+)
+
+fun parseAmbientSounds(rows: Array<String>): List<AmbientSound> = rows.mapNotNull { row ->
+    val parts = row.split("|")
+    if (parts.size != 5) return@mapNotNull null
+    AmbientSound(
+        file = parts[0],
+        gain = parts[1].toFloatOrNull() ?: 1f,
+        looped = parts[2] == "1",
+        minSeconds = parts[3].toFloatOrNull() ?: 0f,
+        maxSeconds = parts[4].toFloatOrNull() ?: 0f,
+    )
 }

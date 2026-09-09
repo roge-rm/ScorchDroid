@@ -67,6 +67,7 @@
 #include <ScoreboardState.h>
 #include <GameSetup.h>
 #include <PlayerProfile.h>
+#include <AmbientSound.h>
 #include <landscapedef/LandscapeDefinitionsBase.hpp>
 #include <tankai/TankAIStore.hpp>
 #include <tankai/TankAI.hpp>
@@ -81,6 +82,7 @@
 #include <ClientSync.hpp>
 
 #include <cstdio>
+#include <fstream>
 #include <cmath>
 #include <vector>
 #include <cstdlib>
@@ -2644,6 +2646,68 @@ static void testGameSetup()
 	check(afterReset == originalRounds, "reset() goes back to what the config file says");
 }
 
+// M21: the landscape's own ambient sound. Read from upstream's tex*.xml and
+// the ambientsound*.xml files it includes, so what is worth pinning is that
+// the chain from "a landscape is loaded" to "these wav files" holds.
+static void testAmbientSound()
+{
+	printf("ambient sound (M21: the landscape's own atmosphere):\n");
+
+	// A landscape has to be loaded for there to be anything to ask about,
+	// which the server started earlier in this run has done.
+	if (!ScorchedServer::instance())
+	{
+		check(false, "a server exists to read a landscape from");
+		return;
+	}
+
+	std::vector<ScorchDroidAmbient::Sound> sounds =
+		ScorchDroidAmbient::forCurrentLandscape(ScorchedServer::instance()->getContext());
+	// Not every landscape defines one - texblank is silent - so this checks
+	// the mechanism rather than a particular count.
+	printf("  (this landscape defines %d ambient sound%s)\n",
+		(int) sounds.size(), sounds.size() == 1 ? "" : "s");
+
+	bool allReadable = true, allNamed = true;
+	for (size_t i = 0; i < sounds.size(); i++)
+	{
+		if (sounds[i].file.empty()) allNamed = false;
+		std::ifstream probe(sounds[i].file.c_str());
+		if (!probe.is_open()) allReadable = false;
+		if (!sounds[i].looped && sounds[i].maxSeconds <= 0.0f) allNamed = false;
+	}
+	check(allNamed, "every ambient sound names a file, and a repeat has an interval");
+	check(allReadable, "...and every file named is one that exists on disk");
+
+	// The shipped data is the real check, read from a named landscape so it
+	// does not depend on which one the running game happened to pick:
+	// arizona asks for ocean waves.
+	{
+		std::vector<ScorchDroidAmbient::Sound> arizona = ScorchDroidAmbient::forTexFile(
+			"data/globalmods/none/data/landscapes/texarizona.xml");
+		check(arizona.size() == 1, "arizona declares one ambient sound");
+		check(!arizona.empty() &&
+			arizona[0].file.find("oceanwaves") != std::string::npos,
+			"...the ocean waves its own definition names");
+		check(!arizona.empty() && arizona[0].looped,
+			"...on a loop, as its timing says");
+
+		// The tropical map is the interesting one: a looping bird track with two
+		// chirps played at intervals over it, which is where the repeat
+		// timing has to come through rather than being read as another loop.
+		std::vector<ScorchDroidAmbient::Sound> jungle = ScorchDroidAmbient::forTexFile(
+			"data/globalmods/none/data/landscapes/textropical.xml");
+		int looped = 0, repeats = 0;
+		for (size_t i = 0; i < jungle.size(); i++)
+		{
+			if (jungle[i].looped) looped++;
+			else if (jungle[i].maxSeconds > jungle[i].minSeconds) repeats++;
+		}
+		check(looped >= 1 && repeats >= 2,
+			"the tropical map's loop and its two intermittent chirps all come through");
+	}
+}
+
 // M16: who the player is - the name, and now the tank model, colour and
 // avatar. The lists are all read from shipped data, so what is worth pinning
 // is that they are found at all and that a choice survives being made.
@@ -2781,6 +2845,7 @@ int main(int argc, char **argv)
 	testServerRestart();
 	testGameSetup();
 	testPlayerProfile();
+	testAmbientSound();
 
 	printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
 		failures, failures == 1 ? "" : "s");
