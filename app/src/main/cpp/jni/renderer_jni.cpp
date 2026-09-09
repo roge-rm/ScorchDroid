@@ -69,6 +69,7 @@
 #include <SkyDescription.hpp>
 #include <OceanWaves.h>
 #include <ShoreBreakers.h>
+#include <ParticleTextures.h>
 #include <SoundEventQueue.h>
 #include <landscapedef/LandscapeTex.hpp>
 #include <target/TargetLife.hpp>
@@ -432,7 +433,38 @@ namespace
 		// (upstream's ParticleRendererRain, a 0.1-wide quad about a unit
 		// tall); 2 = snow, a small sprite. Both fade with distance from
 		// the camera rather than with age, and die below the ground plane.
-		int   kind = 0;
+		int   kind = 0;   // 3 = a mushroom-cloud puff, positioned from its path
+		// V1: which layer of the sprite array this particle draws with
+		// (0 is the soft disc), how many frames its set has from that
+		// layer, whether the frames run by age (framesPerSecond > 0, the
+		// napalm) or by life (the animated explosions), a random start
+		// frame, and one of upstream's four texture orientations.
+		int   layer = 0;
+		int   frames = 1;
+		float framesPerSecond = 0.0f;
+		int   frameOffset = 0;
+		int   orient = 0;
+		// Upstream's alpha runs linearly from its start value to an end
+		// value over the life; the disc particles keep the old late fade.
+		float endAlpha = 0.0f;
+		bool  linearAlpha = false;
+		// Mushroom puffs: where the cloud started, the puff's own spread
+		// direction and the blast size, for ExplosionNukeRendererEntry's
+		// path.
+		float startX = 0.0f, startY = 0.0f, startZ = 0.0f;
+		float spreadX = 0.0f, spreadZ = 0.0f;
+		float mushroomSize = 0.0f;
+	};
+
+	// V1: upstream's nuke cloud (ExplosionNukeRenderer): from 1.25 s to
+	// 2.25 s after the blast, every 0.08 s, a handful of puffs are raised
+	// at the cloud's base and then carried along a fixed rise-then-spread
+	// path over 16/3 s. One of these per cloud, stepped each frame.
+	struct MushroomEmitter {
+		float x, y, z;       // render space, the base (blast lowered by size, clamped to ground)
+		float size;
+		int   layer, frames; // the explosion's set
+		float time = 0.0f, accumulator = 0.0f;
 	};
 
 	// X4a: upstream's damaged-tank smoke (TargetRendererImplTank::simulate):
@@ -457,6 +489,12 @@ namespace
 
 	std::vector<Particle> particles;
 	std::vector<Beam> beams;
+	std::vector<MushroomEmitter> mushroomEmitters;
+	// V1: the sprite array (see ParticleTextures.h), one 128-square layer
+	// per texture, and the CPU copy it is rebuilt from after a context loss.
+	GLuint spriteArrayTexture = 0;
+	GLint  particleSpritesLoc = -1;
+	ScorchDroidParticleTextures::Atlas spriteAtlas;
 	double lastFrameSeconds = 0.0;
 	// When the camera last updated, for the occlusion ease-out's timestep.
 	double lastCameraSeconds = 0.0;
@@ -1693,40 +1731,42 @@ namespace
 	// could not express without a draw call each.
 	const char *kParticleVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
-		layout(location = 1) in vec4 aColor;
-		layout(location = 2) in float aSize;
+		layout(location = 1) in vec2 aUv;
+		layout(location = 2) in float aLayer;
+		layout(location = 3) in vec4 aColor;
 		uniform mat4 uMVP;
+		out vec2 vUv;
+		out float vLayer;
 		out vec4 vColor;
 		out float vViewDepth;
 		void main() {
+			vUv = aUv;
+			vLayer = aLayer;
 			vColor = aColor;
 			gl_Position = uMVP * vec4(aPosition, 1.0);
 			vViewDepth = gl_Position.w;
-			gl_PointSize = aSize;
 		}
 	)";
 
 	const char *kParticleFragmentShader = R"(#version 300 es
 		precision mediump float;
+		in vec2 vUv;
+		in float vLayer;
 		in vec4 vColor;
 		in float vViewDepth;
 		out vec4 fragColor;
+		uniform mediump sampler2DArray uSprites;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
 		void main() {
-			// Round the square point sprite off and fade towards its edge,
-			// so particles read as soft puffs rather than tiles.
-			vec2 offset = gl_PointCoord - vec2(0.5);
-			float r = length(offset) * 2.0;
-			if (r > 1.0) discard;
-			float falloff = 1.0 - r * r;
-			// Upstream's particles are fixed-function and never switch the
-			// fog off, so they get GL_EXP2 like every other model: the
-			// colour goes to the fog colour with distance and the alpha
-			// stays, additive or not.
+			// Upstream's particle: a camera-facing quad with one of its
+			// textures, GL_MODULATE by the particle colour and alpha.
+			vec4 t = texture(uSprites, vec3(vUv, vLayer));
+			// Fixed-function GL_EXP2 fog, as upstream's particles get: the
+			// colour goes to the fog colour with distance, the alpha stays.
 			float z = uFogDensity * vViewDepth;
-			vec3 colour = mix(uFogColor, vColor.rgb, exp(-z * z));
-			fragColor = vec4(colour, vColor.a * falloff);
+			vec3 colour = mix(uFogColor, t.rgb * vColor.rgb, exp(-z * z));
+			fragColor = vec4(colour, t.a * vColor.a);
 		}
 	)";
 
@@ -3600,6 +3640,131 @@ namespace
 		particles.push_back(particle);
 	}
 
+	// V1: the sprite array texture, from the loaded sets. Built on first
+	// use so it comes after the surface-created reset, and rebuilt from
+	// the CPU copy after a context loss.
+	void ensureSpriteTexture()
+	{
+		if (spriteArrayTexture != 0) return;
+		if (!spriteAtlas.valid()) {
+			spriteAtlas = ScorchDroidParticleTextures::load();
+			LOGI("Particle textures: %d layers in %d sets", spriteAtlas.layers, (int) spriteAtlas.sets.size());
+		}
+		if (!spriteAtlas.valid()) return;
+		const int n = ScorchDroidParticleTextures::kSize;
+		glGenTextures(1, &spriteArrayTexture);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, spriteArrayTexture);
+		glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, n, n, spriteAtlas.layers, 0,
+					 GL_RGBA, GL_UNSIGNED_BYTE, spriteAtlas.rgba.data());
+		glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+	}
+
+	// Gives a particle upstream's texture set: every frame by life when
+	// animated, else one frame at random (ParticleEmitter's two branches).
+	// An unknown or empty name leaves the soft disc.
+	void setSprite(Particle &particle, const std::string &setName, bool animate)
+	{
+		if (!spriteAtlas.valid()) spriteAtlas = ScorchDroidParticleTextures::load();
+		const ScorchDroidParticleTextures::Set *set = spriteAtlas.find(setName);
+		if (!set || set->count <= 0) return;
+		if (animate && set->count > 1) {
+			particle.layer = set->firstLayer;
+			particle.frames = set->count;
+		} else {
+			const int index = std::min((int) (randomUnit() * (float) (set->count - 1)), set->count - 1);
+			particle.layer = set->firstLayer + index;
+			particle.frames = 1;
+		}
+		particle.orient = (int) (randomUnit() * 4.0f) & 3;
+		particle.linearAlpha = true;
+	}
+
+	// The sampled terrain's height under a render-space point, from the
+	// grid the mesh was built from; 0 off the map.
+	float sampledGroundHeight(float x, float z)
+	{
+		if (terrainHeights.empty() || mapWidthUnits <= 0.0f || mapHeightUnits <= 0.0f) return 0.0f;
+		const int gx = std::min(std::max((int) (x / mapWidthUnits * (float) terrainGrid), 0), terrainVerts1D - 1);
+		const int gz = std::min(std::max((int) (z / mapHeightUnits * (float) terrainGrid), 0), terrainVerts1D - 1);
+		return terrainHeights[(size_t) gz * terrainVerts1D + gx];
+	}
+
+	// ExplosionNukeRenderer's path table: 100 steps over 16/3 s, rising
+	// two units a step for the first 30% and spreading half a unit a step
+	// after. Scaled per cloud by its size at use.
+	const int kMushroomSteps = 100;
+	void mushroomPath(int step, float &width, float &height)
+	{
+		float w = 0.0f, h = 0.0f;
+		for (int i = 0; i < step; i++) {
+			if (i > (int) (kMushroomSteps * 0.3f)) w += 0.5f; else h += 2.0f;
+		}
+		width = w; height = h;
+	}
+
+	// One puff of a nuke cloud, ParticleEmitter::emitMushroom with
+	// ExplosionNukeRenderer's attributes: life 5, white, alpha 0.3-0.2 to
+	// 0, 2-3 units growing to 4-6, alpha-blended, its own random spread
+	// direction of length 1-1.5 (ExplosionNukeRendererEntry).
+	void spawnMushroomPuff(const MushroomEmitter &cloud)
+	{
+		Particle puff = {};
+		puff.kind = 3;
+		puff.startX = cloud.x; puff.startY = cloud.y; puff.startZ = cloud.z;
+		puff.x = cloud.x; puff.y = cloud.y; puff.z = cloud.z;
+		const float rot = randomUnit() * 6.2831853f;
+		const float width = 1.0f + randomUnit() * 0.5f;
+		puff.spreadX = sinf(rot) * width;
+		puff.spreadZ = cosf(rot) * width;
+		puff.mushroomSize = cloud.size;
+		puff.r = puff.g = puff.b = 1.0f;
+		puff.life = 5.0f;
+		const float born = 2.0f + randomUnit();
+		const float dies = 4.0f + randomUnit() * 2.0f;
+		puff.worldSize = born;
+		puff.growth = dies / born - 1.0f;
+		puff.peakAlpha = 0.2f + randomUnit() * 0.1f;
+		puff.endAlpha = 0.0f;
+		puff.linearAlpha = true;
+		puff.alphaBlend = true;
+		puff.drag = 1.0f;
+		puff.gravityScale = 0.0f;
+		if (cloud.frames > 0) {
+			puff.layer = cloud.layer + std::min((int) (randomUnit() * (float) (cloud.frames - 1)), cloud.frames - 1);
+			puff.frames = 1;
+		}
+		puff.orient = (int) (randomUnit() * 4.0f) & 3;
+		addParticle(puff);
+	}
+
+	// Steps the clouds: ExplosionNukeRenderer::simulate, 0.08 s between
+	// bursts, from 1.25 s to 2.25 s, 8 / 14 / 18 puffs a burst by upstream's
+	// effects detail (which this port's particle budget stands in for).
+	void stepMushroomEmitters(float deltaSeconds)
+	{
+		const int budget = g_maxParticles.load();
+		const int perBurst = (budget <= 100) ? 8 : (budget >= 10000 ? 18 : 14);
+		size_t live = 0;
+		for (size_t i = 0; i < mushroomEmitters.size(); i++) {
+			MushroomEmitter &cloud = mushroomEmitters[i];
+			cloud.time += deltaSeconds;
+			cloud.accumulator += deltaSeconds;
+			while (cloud.accumulator > 0.08f) {
+				cloud.accumulator -= 0.08f;
+				if (cloud.time > 1.25f && cloud.time < 2.25f) {
+					for (int n = 0; n < perBurst; n++) spawnMushroomPuff(cloud);
+				}
+			}
+			if (cloud.time < 2.25f) mushroomEmitters[live++] = cloud;
+		}
+		mushroomEmitters.resize(live);
+	}
+
 	// One lingering puff, with upstream's own Smoke emitter numbers
 	// (src/client/landscape/Smoke.cpp): 2-4 seconds, grey, 0.6-0.8 opaque
 	// falling to nothing, growing from about 0.35 to about 1.35 units, and
@@ -3615,18 +3780,23 @@ namespace
 		puff.vy = 1.2f + randomUnit() * 0.8f;
 		puff.vz = randomSigned() * 0.3f;
 		puff.r = 0.8f; puff.g = 0.8f; puff.b = 0.8f;
-		puff.worldSize = 0.2f + randomUnit() * 0.3f;
+		puff.mass = 0.2f + randomUnit() * 0.3f;
+		const float born = 0.2f + randomUnit() * 0.3f;
+		const float dies = 1.2f + randomUnit() * 0.3f;
+		puff.worldSize = born;
+		puff.growth = dies / born - 1.0f;
 		puff.life = 2.0f + randomUnit() * 2.0f;
-		puff.drag = 0.6f;
-		// Rises instead of falling, and slowly - it is buoyant, not
-		// weightless, so the drag above still settles it.
-		puff.gravityScale = -0.15f;
-		// 0.35 -> 1.35 units over its life.
-		puff.growth = 2.9f;
+		// Upstream's friction 0.01-0.02 a second, and its +400 gravity on
+		// the time-squared integrator: 400/60 a second squared at 60 fps,
+		// times the mass, upward - against this port's 3.15 per unit of
+		// gravityScale.
+		puff.drag = 0.985f;
+		puff.gravityScale = -(400.0f / 60.0f * puff.mass) / 3.15f;
 		puff.peakAlpha = 0.6f + randomUnit() * 0.2f;
+		puff.endAlpha = 0.0f;
 		puff.alphaBlend = true;
 		puff.windAffect = true;
-		puff.mass = 0.2f + randomUnit() * 0.3f;
+		setSprite(puff, "smoke", false);
 		addParticle(puff);
 	}
 
@@ -3827,9 +3997,12 @@ namespace
 					flame.gravityScale = 0.0f;
 					flame.drag = 0.98f;
 					flame.peakAlpha = 0.9f + randomUnit() * 0.1f;
+					flame.endAlpha = randomUnit() * 0.1f;
 					// Both of MissileActionRenderer's emitters are wind-affected.
 					flame.windAffect = true;
 					flame.mass = mass;
+					// The weapon's <flametexture> set, animated if it says so.
+					setSprite(flame, weapon->getFlameTexture(), weapon->getAnimateFlameTexture());
 					addParticle(flame);
 				}
 			}
@@ -3856,11 +4029,9 @@ namespace
 					smoke.vx = vx * kick;
 					smoke.vy = vy * kick;
 					smoke.vz = vz * kick;
-					// Upstream's smoke is a grey particle texture; additive
-					// blending makes pure grey glow, so it is kept dim and cool
-					// rather than bright white.
-					const float grey = 0.25f + randomUnit() * 0.15f;
-					smoke.r = grey; smoke.g = grey; smoke.b = grey * 1.1f;
+					// Upstream's smoke: 0.7 grey, alpha-blended, on the
+					// weapon's <smoketexture> set.
+					smoke.r = 0.7f; smoke.g = 0.7f; smoke.b = 0.7f;
 					const float born = startSize * (0.5f + randomUnit() * 0.5f);
 					const float dies = endSize * (0.5f + randomUnit() * 0.5f);
 					smoke.worldSize = born;
@@ -3869,8 +4040,14 @@ namespace
 					smoke.gravityScale = 0.0f;
 					smoke.drag = 0.9f;
 					smoke.peakAlpha = 0.3f;
+					smoke.endAlpha = randomUnit() * 0.1f;
+					smoke.alphaBlend = true;
+					// Upstream's +100 gravity on its time-squared integrator:
+					// 100/60 a second squared at 60 fps, times the mass, up.
+					smoke.gravityScale = -(100.0f / 60.0f * mass) / 3.15f;
 					smoke.windAffect = true;
 					smoke.mass = mass;
+					setSprite(smoke, weapon->getSmokeTexture(), weapon->getAnimateSmokeTexture());
 					addParticle(smoke);
 				}
 			}
@@ -3925,85 +4102,138 @@ namespace
 				}
 				// A bright core plus an outward burst. Count scales with the
 				// blast so a small weapon doesn't look like a big one.
+				// Upstream's client body, with the weapon's own texture set.
+				// A normal explosion (ParticleEmitter::emitExplosion): 4 per
+				// unit of size, thrown in random directions at 2.5 x size,
+				// the weapon's <explosioncolour>, alpha 0.8-0.9 fading to
+				// 0-0.1, 0.2-0.5 units growing to up to 2 x size + 2, over
+				// the weapon's life range, mass 0.2-0.5 (upstream integrates
+				// position += velocity * mass), additive if <luminance>.
+				// A ring (ExplosionRing, ExplosionRingDirectional): 400
+				// particles around an axis at 4 x size, blue-white, 0.2-0.5
+				// growing to 1.5-3, mass 0.5, no friction.
 				const float size = std::max(event.size, 0.5f);
-				Particle core = {};
-				core.x = x; core.y = y; core.z = z;
-				core.r = 1.0f; core.g = 0.95f; core.b = 0.8f;
-				core.worldSize = size * 1.6f;
-				core.life = 0.45f;
-				core.drag = 1.0f;
-				addParticle(core);
-
-				const int count = std::min(12 + (int) (size * 5.0f), 90);
-				for (int p = 0; p < count; p++) {
-					// Normalising a cube sample would clump towards the
-					// corners; rejecting long ones keeps the burst round.
-					float dx = randomSigned(), dy = randomSigned(), dz = randomSigned();
-					float len = sqrtf(dx * dx + dy * dy + dz * dz);
-					if (len < 0.001f || len > 1.0f) { p--; continue; }
-					dx /= len; dy /= len; dz /= len;
-
-					float speed = size * (0.8f + randomUnit() * 1.4f);
-					Particle particle = {};
-					particle.x = x; particle.y = y; particle.z = z;
-					particle.vx = dx * speed;
-					particle.vy = dy * speed * 0.8f + size * 0.4f;  // biased upward
-					particle.vz = dz * speed;
-					// Fade from the weapon's own colour towards smoke.
-					float heat = randomUnit();
-					particle.r = event.r * (0.6f + heat * 0.4f);
-					particle.g = event.g * (0.4f + heat * 0.6f);
-					particle.b = event.b * (0.3f + heat * 0.5f);
-					particle.worldSize = size * (0.35f + randomUnit() * 0.5f);
-					particle.life = 0.5f + randomUnit() * 0.7f;
-					particle.drag = 0.25f;
-					addParticle(particle);
+				const float life1 = event.life1 > 0.0f ? event.life1 : 0.5f;
+				const float life2 = event.life2 > life1 ? event.life2 : life1 + 0.5f;
+				if (event.explosionType == 0) {
+					const int count = (int) event.size * 4;
+					for (int p = 0; p < count; p++) {
+						const float rotXY = randomUnit() * 6.2831853f;
+						const float rotXZ = randomUnit() * 6.2831853f;
+						const float mass = 0.2f + randomUnit() * 0.3f;
+						Particle particle = {};
+						particle.x = x; particle.y = y; particle.z = z;
+						// Engine (x, y, up) -> render (x, up, -y).
+						particle.vx = sinf(rotXY) * cosf(rotXZ) * size * 2.5f * mass;
+						particle.vz = -cosf(rotXY) * cosf(rotXZ) * size * 2.5f * mass;
+						particle.vy = sinf(rotXZ) * size * 2.5f * mass;
+						particle.r = event.r; particle.g = event.g; particle.b = event.b;
+						const float born = 0.2f + randomUnit() * 0.3f;
+						const float dies = randomUnit() * (size * 2.0f + 2.0f);
+						particle.worldSize = born;
+						particle.growth = std::max(dies / born - 1.0f, 0.0f);
+						particle.life = life1 + randomUnit() * (life2 - life1);
+						particle.peakAlpha = 0.8f + randomUnit() * 0.1f;
+						particle.endAlpha = randomUnit() * 0.1f;
+						particle.drag = 0.985f;
+						particle.gravityScale = 0.0f;
+						particle.alphaBlend = !event.additive;
+						particle.windAffect = event.windAffected;
+						particle.mass = mass;
+						setSprite(particle, event.texture, event.animate);
+						addParticle(particle);
+					}
+				} else {
+					float ax = 0.0f, ay = 1.0f, az = 0.0f;
+					if (event.explosionType == 2) {
+						ax = event.endX; ay = event.endZ; az = -event.endY;
+						const float len = sqrtf(ax * ax + ay * ay + az * az);
+						if (len > 0.0001f) { ax /= len; ay /= len; az /= len; } else { ax = 0; ay = 1; az = 0; }
+					}
+					// A perpendicular to the axis, as emitExplosionRing picks it.
+					float ox = 0.0f, oy = 1.0f, oz = 0.0f;
+					if (fabsf(ay) > 0.7f) { ox = 1.0f; oy = 0.0f; }
+					float px = ay * oz - az * oy, py = az * ox - ax * oz, pz = ax * oy - ay * ox;
+					const float plen = sqrtf(px * px + py * py + pz * pz);
+					if (plen > 0.0001f) { px /= plen; py /= plen; pz /= plen; }
+					for (int p = 0; p < 400; p++) {
+						const float ang = randomUnit() * 6.2831853f;
+						// p rotated about the axis by ang (Rodrigues).
+						const float c = cosf(ang), sn = sinf(ang);
+						const float dotAP = ax * px + ay * py + az * pz;
+						const float rx2 = px * c + (ay * pz - az * py) * sn + ax * dotAP * (1.0f - c);
+						const float ry2 = py * c + (az * px - ax * pz) * sn + ay * dotAP * (1.0f - c);
+						const float rz2 = pz * c + (ax * py - ay * px) * sn + az * dotAP * (1.0f - c);
+						const float speed = size * 4.0f * 0.5f;   // mass 0.5
+						Particle particle = {};
+						particle.x = x; particle.y = y; particle.z = z;
+						particle.vx = rx2 * speed; particle.vy = ry2 * speed; particle.vz = rz2 * speed;
+						const float mix = randomUnit();
+						particle.r = 0.0f + 0.2f * mix; particle.g = 0.0f + 0.2f * mix; particle.b = 0.8f + 0.1f * mix;
+						const float born = 0.2f + randomUnit() * 0.3f;
+						const float dies = 1.5f + randomUnit() * 1.5f;
+						particle.worldSize = born;
+						particle.growth = std::max(dies / born - 1.0f, 0.0f);
+						particle.life = life1 + randomUnit() * (life2 - life1);
+						particle.peakAlpha = 0.9f + randomUnit() * 0.1f;
+						particle.endAlpha = randomUnit() * 0.1f;
+						particle.drag = 1.0f;
+						particle.gravityScale = 0.0f;
+						particle.alphaBlend = !event.additive;
+						particle.windAffect = event.windAffected;
+						particle.mass = 0.5f;
+						setSprite(particle, event.texture, event.animate);
+						addParticle(particle);
+					}
 				}
 				break;
 			}
 			case ScorchDroidEffects::eNapalm: {
-				// The flicker over the fire, not the fire - one of these is
-				// raised per draw tick at a randomly chosen burning point.
+				// The per-tick flame upstream raises at one burning point:
+				// the same flames particle, for a second or so.
 				Particle flame = {};
 				flame.x = x + randomSigned() * 0.5f;
-				flame.y = y + 0.3f;
+				flame.y = y + event.size * 2.0f;
 				flame.z = z + randomSigned() * 0.5f;
-				flame.vy = 1.5f + randomUnit();
-				flame.r = event.r; flame.g = event.g; flame.b = event.b;
-				flame.worldSize = event.size * (0.7f + randomUnit() * 0.6f);
+				flame.r = flame.g = flame.b = 1.0f;
+				flame.worldSize = event.size;
 				flame.life = 0.9f + randomUnit() * 0.6f;
-				flame.drag = 0.6f;
+				flame.peakAlpha = 0.6f + randomUnit() * 0.3f;
+				flame.endAlpha = 0.0f;
+				flame.drag = 1.0f;
+				flame.gravityScale = 0.0f;
+				flame.alphaBlend = !event.additive;
+				setSprite(flame, event.texture, true);
+				flame.framesPerSecond = 6.0f;
+				flame.frameOffset = (int) (randomUnit() * (float) std::max(flame.frames, 1));
+				flame.orient = 0;
 				addParticle(flame);
 				break;
 			}
 			case ScorchDroidEffects::eNapalmFire: {
-				// The fire itself, as upstream's emitter builds it: no
-				// velocity, no gravity, no growth, and a life of the whole
-				// napalmtime rather than a second - so the points that are
-				// alight stay alight and the field fills in.
+				// Napalm's emitter: white, alpha 0.9-0.6 fading to 0-0.1, a
+				// flat 1.5 units, for the whole napalm time, three units
+				// above the ground (NapalmRenderer: ground + size * 2), and
+				// the weapon's flames set stepped by time - NapalmRenderer
+				// advances a tenth of a frame per simulate, six frames a
+				// second at 60 fps - from a random start frame.
 				Particle fire = {};
 				fire.x = x;
-				// Upstream's NapalmRenderer re-pins each particle to the
-				// ground height plus twice its size every frame, which lifts
-				// the sprite so it sits on the ground rather than half in it.
-				// Pinned once at birth here; the ground under a fire does
-				// move as it burns, but not by enough to see against a flame
-				// three units tall.
 				fire.y = y + event.size * 2.0f;
 				fire.z = z;
-				fire.r = event.r; fire.g = event.g; fire.b = event.b;
-				// A little spread so three hundred sprites at one size don't
-				// read as a repeated stamp; upstream gets that variety from
-				// its animated texture instead.
-				fire.worldSize = event.size * (0.8f + randomUnit() * 0.4f);
+				fire.r = fire.g = fire.b = 1.0f;
+				fire.worldSize = event.size;
 				fire.growth = 0.0f;
 				fire.gravityScale = 0.0f;
 				fire.drag = 1.0f;
-				// Upstream's start alpha is 0.6-0.9, fading to 0-0.1.
 				fire.peakAlpha = 0.6f + randomUnit() * 0.3f;
-				// Staggered either side of the burn time so the field does
-				// not pulse in step with itself.
-				fire.life = std::max(event.value, 0.5f) * (0.7f + randomUnit() * 0.6f);
+				fire.endAlpha = randomUnit() * 0.1f;
+				fire.life = std::max(event.value, 0.5f);
+				fire.alphaBlend = !event.additive;
+				setSprite(fire, event.texture, true);
+				fire.framesPerSecond = 6.0f;
+				fire.frameOffset = (int) (randomUnit() * (float) std::max(fire.frames, 1));
+				fire.orient = 0;
 				addParticle(fire);
 				break;
 			}
@@ -4073,105 +4303,54 @@ namespace
 				break;
 			}
 			case ScorchDroidEffects::eTalk: {
-				// The speech bubble over a tank that just spoke. Upstream
-				// draws a textured quad; a glyph through the same label path
-				// costs nothing extra and reads the same at phone size.
-				if (floatingLabels.size() < kMaxFloatingLabels) {
-					FloatingLabel label;
-					label.x = x; label.y = y + 2.0f; label.z = z;
-					label.text = "\xF0\x9F\x92\xAC";   // speech balloon
-					label.life = 2.5f;
-					label.r = 1.0f; label.g = 1.0f; label.b = 1.0f;
-					floatingLabels.push_back(label);
-				}
+				// TalkRenderer: the talk.bmp bubble, 2 units, 8-8.5 s, fading
+				// to nothing, alpha-blended, over the tank.
+				Particle bubble = {};
+				bubble.x = x; bubble.y = y + 2.0f; bubble.z = z;
+				bubble.r = bubble.g = bubble.b = 1.0f;
+				bubble.worldSize = 2.0f;
+				bubble.life = 8.0f + randomUnit() * 0.5f;
+				bubble.peakAlpha = 1.0f; bubble.endAlpha = 0.0f;
+				bubble.drag = 1.0f; bubble.gravityScale = 0.0f;
+				bubble.alphaBlend = true;
+				setSprite(bubble, "talk", false);
+				bubble.orient = 0;
+				addParticle(bubble);
 				break;
 			}
 			case ScorchDroidEffects::eMushroom: {
-				// The nuke cloud. Upstream draws a textured sprite that
-				// rises and rolls; this builds the same silhouette out of
-				// the alpha-blended smoke particles the smoke work already
-				// added - a rising stem topped by a spreading cap - which
-				// costs no new texture and no new draw path.
-				//
-				// Deliberately slow and long-lived: what makes a mushroom
-				// cloud read is that it keeps growing after the flash has
-				// gone, so it outlasts the explosion by several seconds.
-				const float size = std::max(event.size, 1.0f);
-
-				// The stem.
-				for (int p = 0; p < 26; p++) {
-					const float up = randomUnit();
-					Particle puff = {};
-					puff.x = x + randomSigned() * size * 0.25f;
-					puff.y = y + up * size * 2.2f;
-					puff.z = z + randomSigned() * size * 0.25f;
-					puff.vx = randomSigned() * size * 0.15f;
-					puff.vy = size * (1.4f + randomUnit() * 0.8f);
-					puff.vz = randomSigned() * size * 0.15f;
-					puff.r = 0.85f; puff.g = 0.80f; puff.b = 0.72f;
-					puff.worldSize = size * (0.35f + randomUnit() * 0.25f);
-					puff.life = 3.5f + randomUnit() * 2.0f;
-					puff.drag = 0.7f;
-					puff.gravityScale = -0.1f;
-					puff.growth = 2.2f;
-					puff.peakAlpha = 0.55f + randomUnit() * 0.2f;
-					puff.alphaBlend = true;
-					addParticle(puff);
+				// ExplosionNukeRenderer: the cloud's base is the blast lowered
+				// by its size and clamped to the ground; the puffs come from
+				// stepMushroomEmitters over the next two seconds.
+				MushroomEmitter cloud;
+				cloud.size = std::max(event.size, 1.0f);
+				cloud.x = x; cloud.z = z;
+				cloud.y = std::max(y - cloud.size, sampledGroundHeight(x, z));
+				cloud.layer = 0; cloud.frames = 0;
+				if (!spriteAtlas.valid()) spriteAtlas = ScorchDroidParticleTextures::load();
+				if (const ScorchDroidParticleTextures::Set *set = spriteAtlas.find(event.texture)) {
+					cloud.layer = set->firstLayer; cloud.frames = set->count;
 				}
-
-				// The cap: a ring that spreads outward as it rises, which is
-				// the part that makes it a mushroom rather than a column.
-				for (int p = 0; p < 34; p++) {
-					const float angle = randomUnit() * 6.2831853f;
-					const float radius = size * (0.4f + randomUnit() * 0.9f);
-					Particle puff = {};
-					puff.x = x + cosf(angle) * radius;
-					puff.y = y + size * (2.2f + randomUnit() * 0.7f);
-					puff.z = z + sinf(angle) * radius;
-					puff.vx = cosf(angle) * size * 0.7f;
-					puff.vy = size * (0.5f + randomUnit() * 0.5f);
-					puff.vz = sinf(angle) * size * 0.7f;
-					// Warmer at the centre of the cap, as a real one is.
-					const float heat = 1.0f - std::min(radius / (size * 1.3f), 1.0f);
-					puff.r = 0.85f + heat * 0.15f;
-					puff.g = 0.78f + heat * 0.10f;
-					puff.b = 0.70f;
-					puff.worldSize = size * (0.5f + randomUnit() * 0.4f);
-					puff.life = 4.0f + randomUnit() * 2.5f;
-					puff.drag = 0.55f;
-					puff.gravityScale = -0.05f;
-					puff.growth = 2.6f;
-					puff.peakAlpha = 0.5f + randomUnit() * 0.25f;
-					puff.alphaBlend = true;
-					addParticle(puff);
-				}
+				mushroomEmitters.push_back(cloud);
 				break;
 			}
 			case ScorchDroidEffects::eSmoke:
 				spawnSmokePuff(x, y, z);
 				break;
 			case ScorchDroidEffects::eTeleport: {
-				// A column of light where a tank leaves or arrives. Sent
-				// twice per teleport, once at each end.
-				const float radius = std::max(event.size, 1.0f);
-				for (int p = 0; p < 40; p++) {
-					const float angle = randomUnit() * 6.2831853f;
-					const float r = radius * (0.3f + randomUnit() * 0.7f);
-					Particle spark = {};
-					spark.x = x + cosf(angle) * r;
-					spark.y = y + randomUnit() * radius * 3.0f;
-					spark.z = z + sinf(angle) * r;
-					// Rising, which is what makes it read as a column
-					// rather than a burst.
-					spark.vx = 0.0f;
-					spark.vy = 3.0f + randomUnit() * 4.0f;
-					spark.vz = 0.0f;
-					spark.r = 0.75f; spark.g = 0.85f; spark.b = 1.0f;
-					spark.worldSize = radius * 0.35f;
-					spark.life = 0.5f + randomUnit() * 0.4f;
-					spark.drag = 0.4f;
-					addParticle(spark);
-				}
+				// TeleportRenderer: one particle of the animated "trans" set,
+				// 0.7-1 units, 2-2.5 s, white fading to nothing, alpha-blended.
+				Particle warp = {};
+				warp.x = x; warp.y = y; warp.z = z;
+				warp.r = warp.g = warp.b = 1.0f;
+				warp.worldSize = 0.7f + randomUnit() * 0.3f;
+				warp.life = 2.0f + randomUnit() * 0.5f;
+				warp.peakAlpha = 1.0f; warp.endAlpha = 0.0f;
+				warp.drag = 1.0f; warp.gravityScale = 0.0f;
+				warp.alphaBlend = true;
+				setSprite(warp, "trans", true);
+				warp.orient = 0;
+				addParticle(warp);
 				break;
 			}
 			case ScorchDroidEffects::eShieldHit: {
@@ -4252,6 +4431,8 @@ namespace
 			}
 		}
 
+		stepMushroomEmitters(deltaSeconds);
+
 		size_t live = 0;
 		for (size_t i = 0; i < particles.size(); i++) {
 			Particle &particle = particles[i];
@@ -4259,7 +4440,21 @@ namespace
 			if (particle.age >= particle.life) continue;
 			// Rain and snow end at the ground plane, as upstream's
 			// renderers end them (position z < 0 -> life 0).
-			if (particle.kind != 0 && particle.y < 0.0f) continue;
+			if ((particle.kind == 1 || particle.kind == 2) && particle.y < 0.0f) continue;
+			if (particle.kind == 3) {
+				// ExplosionNukeRendererEntry::simulate: the puff's position
+				// is the path, scaled by the blast, not its velocity.
+				const int step = std::min((int) (particle.age / (16.0f / 3.0f) * (float) kMushroomSteps), kMushroomSteps - 1);
+				float pathW, pathH;
+				mushroomPath(step, pathW, pathH);
+				const float h = pathH * (10.0f + particle.mushroomSize) / 30.0f;
+				const float w = pathW + particle.mushroomSize / 2.0f;
+				particle.x = particle.startX + particle.spreadX * w;
+				particle.z = particle.startZ + particle.spreadZ * w;
+				particle.y = particle.startY + h;
+				particles[live++] = particle;
+				continue;
+			}
 
 			if (particle.windAffect) {
 				particle.vx += windAx * particle.mass * deltaSeconds;
@@ -4348,7 +4543,7 @@ namespace
 		glUniform1f(densityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 	}
 
-	void drawEffects(const Mat4 &viewProjection, float eyeX, float eyeY, float eyeZ,
+	void drawEffects(const Mat4 &viewProjection, const Mat4 &view, float eyeX, float eyeY, float eyeZ,
 					 float fovYRadians, float pixelScale = 1.0f,
 					 float clipBelowY = -1.0e9f)
 	{
@@ -4361,65 +4556,102 @@ namespace
 		glDepthMask(GL_FALSE);
 
 		if (!particles.empty()) {
-			// Two passes, because blend mode is per draw and not per vertex.
-			// Additive first (sparks and fireballs light what is behind
-			// them), then the alpha-blended smoke over the top, which is the
-			// order that lets smoke actually obscure a flame it drifts in
-			// front of.
+			ensureSpriteTexture();
+			// Upstream's particles are camera-facing quads (GLCameraFrustum::
+			// drawBilboard): corners at position +- right*size +- up*size,
+			// the texture in one of four orientations, colour and alpha as
+			// GL_MODULATE. Two passes, because blend mode is per draw and
+			// not per vertex: additive first, then the alpha-blended smoke
+			// over the top, which lets smoke obscure a flame in front of it.
+			const float rx = view.m[0], ry = view.m[4], rz = view.m[8];
+			const float ux = view.m[1], uy = view.m[5], uz = view.m[9];
+			// Texture corners for the four orientations, in the order
+			// (+r+u), (-r+u), (-r-u), (+r-u) as upstream lays them out.
+			static const float kUv[4][4][2] = {
+				{ { 1, 1 }, { 0, 1 }, { 0, 0 }, { 1, 0 } },
+				{ { 0, 1 }, { 0, 0 }, { 1, 0 }, { 1, 1 } },
+				{ { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } },
+				{ { 1, 0 }, { 1, 1 }, { 0, 1 }, { 0, 0 } },
+			};
 			std::vector<float> additive, blended;
-			additive.reserve(particles.size() * 8);
+			additive.reserve(particles.size() * 60);
 			for (size_t i = 0; i < particles.size(); i++) {
 				const Particle &particle = particles[i];
 				if (particle.y < clipBelowY) continue;
 				if (particle.kind == 1) continue;   // rain is drawn as streaks below
-				const float remaining = 1.0f - particle.age / particle.life;
+				const float percent = std::min(std::max(particle.age / particle.life, 0.0f), 1.0f);
+				const float remaining = 1.0f - percent;
 
-				const float dx = particle.x - eyeX, dy = particle.y - eyeY, dz = particle.z - eyeZ;
-				const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-				float pixels = worldSizeToPixels(particle.worldSize, distance, fovYRadians) * pixelScale;
-				// Grow as they age, the way a real puff spreads.
-				pixels *= 1.0f + (1.0f - remaining) * particle.growth;
-				pixels = std::min(std::max(pixels, 1.0f), 256.0f);
+				// Half-extent in world units, growing over the life.
+				const float half = particle.worldSize * (1.0f + percent * particle.growth);
 
-				// Fade out, weighted late - except snow, which upstream
-				// fades by distance alone: 0.7 at the camera to nothing
-				// 200 units away.
-				float alpha = particle.peakAlpha * remaining * remaining;
+				float alpha = particle.linearAlpha
+					? particle.peakAlpha + (particle.endAlpha - particle.peakAlpha) * percent
+					: particle.peakAlpha * remaining * remaining;
 				if (particle.kind == 2) {
-					alpha = std::max(0.0f, 0.7f * (1.0f - (distance * distance) / 40000.0f));
+					// Snow fades by distance alone, upstream's 0.7 at the
+					// camera to nothing 200 units away.
+					const float dx = particle.x - eyeX, dy = particle.y - eyeY, dz = particle.z - eyeZ;
+					alpha = std::max(0.0f, 0.7f * (1.0f - (dx * dx + dy * dy + dz * dz) / 40000.0f));
+				}
+				if (alpha <= 0.0f) continue;
+
+				int layer = particle.layer;
+				if (particle.frames > 1) {
+					const int frame = (particle.framesPerSecond > 0.0f)
+						? ((int) (particle.age * particle.framesPerSecond) + particle.frameOffset) % particle.frames
+						: std::min((int) ((float) (particle.frames - 1) * percent), particle.frames - 1);
+					layer += frame;
 				}
 
+				const float cx[4] = {
+					particle.x + rx * half + ux * half, particle.x - rx * half + ux * half,
+					particle.x - rx * half - ux * half, particle.x + rx * half - ux * half };
+				const float cy[4] = {
+					particle.y + ry * half + uy * half, particle.y - ry * half + uy * half,
+					particle.y - ry * half - uy * half, particle.y + ry * half - uy * half };
+				const float cz[4] = {
+					particle.z + rz * half + uz * half, particle.z - rz * half + uz * half,
+					particle.z - rz * half - uz * half, particle.z + rz * half - uz * half };
+				const float (*uv)[2] = kUv[particle.orient & 3];
 				std::vector<float> &into = particle.alphaBlend ? blended : additive;
-				into.push_back(particle.x);
-				into.push_back(particle.y);
-				into.push_back(particle.z);
-				into.push_back(particle.r);
-				into.push_back(particle.g);
-				into.push_back(particle.b);
-				into.push_back(alpha);
-				into.push_back(pixels);
+				static const int tri[6] = { 0, 1, 2, 0, 2, 3 };
+				for (int t = 0; t < 6; t++) {
+					const int c = tri[t];
+					into.push_back(cx[c]); into.push_back(cy[c]); into.push_back(cz[c]);
+					into.push_back(uv[c][0]); into.push_back(uv[c][1]);
+					into.push_back((float) layer);
+					into.push_back(particle.r); into.push_back(particle.g); into.push_back(particle.b);
+					into.push_back(alpha);
+				}
 			}
 
 			glUseProgram(particleProgram);
 			setFixedFunctionFog(particleFogColorLoc, particleFogDensityLoc);
 			glUniformMatrix4fv(particleMvpLoc, 1, GL_FALSE, viewProjection.m);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, spriteArrayTexture);
+			glUniform1i(particleSpritesLoc, 0);
 			glBindVertexArray(particleVao);
 			glBindBuffer(GL_ARRAY_BUFFER, particleVbo);
+			glDisable(GL_CULL_FACE);
 
 			if (!additive.empty()) {
 				glBufferData(GL_ARRAY_BUFFER, additive.size() * sizeof(float),
 							 additive.data(), GL_DYNAMIC_DRAW);
 				frameDrawCalls++;
-				glDrawArrays(GL_POINTS, 0, (GLsizei) (additive.size() / 8));
+				glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (additive.size() / 10));
 			}
 			if (!blended.empty()) {
 				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 				glBufferData(GL_ARRAY_BUFFER, blended.size() * sizeof(float),
 							 blended.data(), GL_DYNAMIC_DRAW);
 				frameDrawCalls++;
-				glDrawArrays(GL_POINTS, 0, (GLsizei) (blended.size() / 8));
-				glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // the beams below expect additive
+				glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (blended.size() / 10));
 			}
+			glEnable(GL_CULL_FACE);
+			glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // the beams below expect additive
 		}
 
 		{
@@ -5191,16 +5423,19 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	particleMvpLoc = glGetUniformLocation(particleProgram, "uMVP");
 	particleFogColorLoc = glGetUniformLocation(particleProgram, "uFogColor");
 	particleFogDensityLoc = glGetUniformLocation(particleProgram, "uFogDensity");
+	particleSpritesLoc = glGetUniformLocation(particleProgram, "uSprites");
 	glGenVertexArrays(1, &particleVao);
 	glBindVertexArray(particleVao);
 	glGenBuffers(1, &particleVbo);
 	glBindBuffer(GL_ARRAY_BUFFER, particleVbo);
 	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) 0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void *) 0);
 	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (3 * sizeof(float)));
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void *) (3 * sizeof(float)));
 	glEnableVertexAttribArray(2);
-	glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (7 * sizeof(float)));
+	glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void *) (5 * sizeof(float)));
+	glEnableVertexAttribArray(3);
+	glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void *) (6 * sizeof(float)));
 
 	// Beams reuse the sight program (position + rgb), so the layout must
 	// match what that shader declares.
@@ -5251,6 +5486,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainVao = terrainVbo = terrainIbo = 0;
 	groundTextureBuilt = false;
 	detailTexture = 0;
+	spriteArrayTexture = 0;
 	groundGeneration++;
 	groundTexture = 0;
 	groundLightBaked = false;
@@ -7003,7 +7239,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// against the screen's height, so the half-resolution buffer
 			// needs them scaled to match - otherwise every puff reflects at
 			// twice its size.
-			drawEffects(reflMvp, eyeX, reflEyeY, eyeZ, kFovYRadians,
+			drawEffects(reflMvp, reflView, eyeX, reflEyeY, eyeZ, kFovYRadians,
 						(float) rh / (float) std::max(surfaceHeight, 1), waterHeight);
 		}
 		glFrontFace(GL_CCW);
@@ -7631,7 +7867,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	}
 
 	// Effects last, so they blend additively over the finished scene.
-	drawEffects(mvp, eyeX, eyeY, eyeZ, kFovYRadians);
+	drawEffects(mvp, view, eyeX, eyeY, eyeZ, kFovYRadians);
 
 	// Project each tank to screen space for the Compose name plates. Done
 	// here rather than in Kotlin because this is the only place that has

@@ -1,0 +1,69 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: explosion and napalm events carry their texture set and flags
+
+The client bodies of Explosion and Napalm draw their particles with the
+weapon's own texture set (<explosiontexture>, <napalmtexture>), animated
+or not, over a life range, additively or not (<luminance>), blown by
+the wind or not, and for the ring explosion types around an axis. The
+port's effect events now carry all of that so its renderer can draw the
+same particles. Fields only, no logic.
+
+---
+diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
+--- a/src/common/actions/Explosion.cpp
++++ b/src/common/actions/Explosion.cpp
+@@ -100,6 +100,20 @@
+ 		// splash sound, in the client body below). The renderer decides if
+ 		// the blast is actually under the water, as Water::explosion does.
+ 		effect.value = params_->getCreateSplash() ? 1.0f : 0.0f;
++		// V1: what the client body's emitters would draw with - the
++		// weapon's texture set and whether it animates, the particle life
++		// range, additive or not (<luminance>), wind, and the explosion
++		// type with its axis for the ring kinds.
++		effect.texture = params_->getExplosionTexture();
++		effect.animate = params_->getAnimate();
++		effect.life1 = params_->getMinLife().asFloat();
++		effect.life2 = params_->getMaxLife().asFloat();
++		effect.additive = params_->getLuminance();
++		effect.windAffected = params_->getWindAffected();
++		effect.explosionType = (int) params_->getExplosionType();
++		effect.endX = velocity_[0].asFloat();
++		effect.endY = velocity_[1].asFloat();
++		effect.endZ = velocity_[2].asFloat();
+ 		ScorchDroidEffects::push(effect);
+ 	}
+ 	// The mushroom cloud, for nuke-class weapons. Upstream raises it on a
+@@ -117,6 +131,10 @@
+ 		cloud.z = position_[2].asFloat();
+ 		// Upstream's own size for the cloud sprite.
+ 		cloud.size = params_->getSize().asFloat() - 2.0f;
++		// The cloud uses the explosion's own texture set, never animated
++		// (ExplosionNukeRenderer is built with animate = false).
++		cloud.texture = params_->getExplosionTexture();
++		cloud.animate = false;
+ 		ScorchDroidEffects::push(cloud);
+ 	}
+ 
+diff --git a/src/common/actions/Napalm.cpp b/src/common/actions/Napalm.cpp
+--- a/src/common/actions/Napalm.cpp
++++ b/src/common/actions/Napalm.cpp
+@@ -204,6 +204,8 @@
+ 			effect.z = getHeight(entry->posX, entry->posY).asFloat();
+ 			effect.size = 1.5f;
+ 			effect.r = 1.0f; effect.g = 0.55f; effect.b = 0.1f;
++			effect.texture = params_->getNapalmTexture();
++			effect.additive = params_->getLuminance();
+ 			ScorchDroidEffects::push(effect);
+ 
+ 			// ...and the smoke above it. Upstream's client block raises
+@@ -475,6 +477,10 @@
+ 			// flames texture; with no texture here the colour has to be the
+ 			// fire's own.
+ 			fire.r = 1.0f; fire.g = 0.55f; fire.b = 0.1f;
++			// V1: the weapon's <napalmtexture> set (the animated flames) and
++			// whether it burns additively.
++			fire.texture = params_->getNapalmTexture();
++			fire.additive = params_->getLuminance();
+ 			ScorchDroidEffects::push(fire);
+ 		}
+ 	}

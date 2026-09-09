@@ -145,6 +145,7 @@ add_library(scorched_common STATIC
     porting/AmbientSound.cpp
     porting/OceanWaves.cpp
     porting/ShoreBreakers.cpp
+    porting/ParticleTextures.cpp
     porting/ScoreboardState.cpp
     porting/GameSetup.cpp
     porting/PlayerProfile.cpp

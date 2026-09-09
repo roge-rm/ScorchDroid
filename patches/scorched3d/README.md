@@ -143,3 +143,7 @@ work in a new file under `porting/` rather than in the submodule.
   the weapon's `<createsplash>` flag in its `value` field, so the renderer
   can spray and play the splash sound for a blast under the water as
   `Water::explosion` does. One field, no logic.
+- `0020-android-effect-texture-sets.patch` - the explosion, mushroom and
+  napalm events carry the weapon's texture set name, animate flag, life
+  range, luminance, wind flag and explosion type/axis, so the renderer can
+  draw upstream's textured particles. Fields only.

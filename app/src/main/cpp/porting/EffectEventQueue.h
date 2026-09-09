@@ -1,6 +1,7 @@
 #ifndef SCORCHDROID_EFFECT_EVENT_QUEUE_H
 #define SCORCHDROID_EFFECT_EVENT_QUEUE_H
 
+#include <string>
 #include <vector>
 
 // Android build: every weapon effect upstream draws - explosions, napalm
@@ -88,9 +89,22 @@ namespace ScorchDroidEffects
 		float value = 0.0f;
 
 		// 0..1 RGB. Explosions carry the weapon's own <explosioncolour>;
-		// the rest get a sensible constant from the pushing site, since
-		// upstream's equivalent colour lives in a texture we don't load.
+		// the rest get a sensible constant from the pushing site.
 		float r = 1.0f, g = 1.0f, b = 1.0f;
+
+		// V1: upstream's texture set for the particles this effect raises
+		// (a name from data/textureset.xml: the weapon's <explosiontexture>,
+		// <napalmtexture>...), whether the set animates over the particle's
+		// life, the particle life range, whether it is drawn additively
+		// (<luminance>) and whether the wind blows it. explosionType is
+		// ExplosionParams::ExplosionType; for the ring types the axis rides
+		// in endX/endY/endZ.
+		std::string texture;
+		float life1 = 0.0f, life2 = 0.0f;
+		bool animate = false;
+		bool additive = true;
+		bool windAffected = false;
+		int explosionType = 0;
 	};
 
 	void push(const EffectEvent &effect);
