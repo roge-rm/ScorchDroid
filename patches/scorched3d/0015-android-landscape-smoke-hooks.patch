@@ -120,7 +120,7 @@ index f2a81c23..8d52efee 100644
  #include <tanket/TanketAccessories.hpp>
  #include <tank/TankViewPoints.hpp>
  #include <tank/TankModelStore.hpp>
-@@ -117,6 +125,12 @@ void TanketMovement::init()
+@@ -117,6 +125,15 @@ void TanketMovement::init()
  		moveSoundSource_->setPosition(tanket->getLife().getTargetPosition().asVector());
  		moveSoundSource_->play(moveSound);
  	}
@@ -129,11 +129,14 @@ index f2a81c23..8d52efee 100644
 +	// drive; the event queue is one-shot, so the drive gets its sound once,
 +	// as it sets off. No !getServerMode() guard, for the reason given at the
 +	// smoke trail below.
-+	ScorchDroidAudio::pushSoundEvent(S3D::getModFile("data/wav/movement/tankmove.wav"));
++	Vector soundPosition = tanket->getLife().getTargetPosition().asVector();
++	ScorchDroidAudio::pushSoundEventAt(
++		S3D::getModFile("data/wav/movement/tankmove.wav"),
++		soundPosition[0], soundPosition[1], soundPosition[2]);
  #endif // #ifndef S3D_SERVER
  
  	// As with everything to do with movement
-@@ -263,6 +277,37 @@ void TanketMovement::simulationMove(fixed frameTime)
+@@ -263,6 +280,37 @@ void TanketMovement::simulationMove(fixed frameTime)
  						}
  					}
  				}

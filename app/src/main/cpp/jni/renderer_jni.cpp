@@ -62,6 +62,7 @@
 #include <common/FixedVector.hpp>
 #include <common/FixedVector4.hpp>
 #include <EngineState.hpp>
+#include <RenderState.hpp>
 #include <Mat4.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <MovementStore.h>
@@ -5540,6 +5541,22 @@ namespace
 		return heightMap.getHeight(sx, sz).asFloat();
 	}
 }  // namespace
+
+// See RenderState.hpp. Read off the same per-frame camera snapshot the pick
+// ray uses, rather than re-deriving the eye position - one derivation, one
+// mutex, and no second copy to fall out of step.
+//
+// The renderer's world axes are not the engine's: world Y is height where
+// the engine's is Z, and world Z runs the opposite way to landscape Y (see
+// worldZFromEngineY). Converted here so no caller has to remember that.
+bool renderListenerEnginePosition(float &x, float &y, float &z) {
+	std::lock_guard<std::mutex> lock(g_pickMutex);
+	if (!g_pickCamera.valid) return false;
+	x = g_pickCamera.eyeX;
+	y = engineYFromWorldZ(g_pickCamera.eyeZ);
+	z = g_pickCamera.eyeY;
+	return true;
+}
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {

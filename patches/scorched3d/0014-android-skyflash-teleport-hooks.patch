@@ -86,7 +86,7 @@ index d1861d92..a56026ac 100644
  #endif
  }
  
-@@ -103,6 +133,18 @@ void Teleport::simulate(fixed frameTime, bool &remove)
+@@ -103,6 +133,20 @@ void Teleport::simulate(fixed frameTime, bool &remove)
  				);
  			}
  		}
@@ -99,7 +99,9 @@ index d1861d92..a56026ac 100644
 +			if (tank && tank->getState().getState() == TankState::sNormal &&
 +				weapon_->getSound() && 0 != strcmp("none", weapon_->getSound()))
 +			{
-+				ScorchDroidAudio::pushSoundEvent(S3D::getModFile(weapon_->getSound()));
++				Vector soundPosition = tank->getLife().getTargetPosition().asVector();
++				ScorchDroidAudio::pushSoundEventAt(S3D::getModFile(weapon_->getSound()),
++					soundPosition[0], soundPosition[1], soundPosition[2]);
 +			}
 +		}
  #endif // #ifndef S3D_SERVER

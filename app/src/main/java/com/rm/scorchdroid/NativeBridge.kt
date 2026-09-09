@@ -44,6 +44,7 @@ object NativeBridge {
      * last call (see SoundEventQueue.h) - each entry is an absolute path to
      * an already-extracted .ogg file, ready to hand to a MediaPlayer.
      */
+    /** One "path|gain" row per sound that won a channel - see SoundEventQueue.h. */
     external fun pollSoundEvents(): Array<String>
 
     /** M4 economy: "my tank"'s current money (see TankScore::getMoney), or -1 if not added yet. */

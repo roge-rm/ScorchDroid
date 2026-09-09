@@ -659,11 +659,15 @@ namespace
 				// Upstream plays it from the client-only block this port
 				// compiles out, so until the hook this was one of eight sound
 				// sites that were simply silent.
-				std::vector<std::string> sounds = ScorchDroidAudio::drainSoundEvents();
+				// Listener sat right on the impact, so nothing is attenuated
+				// away and the check is about the hook, not the mix.
+				std::vector<ScorchDroidAudio::SelectedSound> sounds =
+					ScorchDroidAudio::drainSoundEvents(true,
+						hitPos[0].asFloat(), hitPos[1].asFloat(), hitPos[2].asFloat());
 				bool sawWav = false;
 				for (size_t i = 0; i < sounds.size(); i++)
 				{
-					if (sounds[i].find("data/wav/") != std::string::npos) sawWav = true;
+					if (sounds[i].file.find("data/wav/") != std::string::npos) sawWav = true;
 				}
 				check(sawWav, "...and the shield's own collision sound as a sound event");
 			}
@@ -2953,6 +2957,113 @@ static void testGameSetup()
 // M21: the landscape's own ambient sound. Read from upstream's tex*.xml and
 // the ambientsound*.xml files it includes, so what is worth pinning is that
 // the chain from "a landscape is loaded" to "these wav files" holds.
+// The mix, which is what stops a weapon with dozens of detonations being
+// painful rather than loud.
+//
+// Upstream never plays everything it is asked to: Sound::updateSources()
+// (client/sound/Sound.cpp) sorts by priority then distance, gives a fixed
+// pool of channels to the winners and stops the rest, and attenuates what
+// does play by distance. This port had none of that - one unbounded player
+// per event, every one at full gain - which is the bug this checks has not
+// come back.
+static void testSoundMixing()
+{
+	printf("sound mixing (upstream's channel budget and distance attenuation):\n");
+
+	const float listenerX = 100.0f, listenerY = 100.0f, listenerZ = 0.0f;
+
+	// A Death's Head's worth of detonations, spread from right on top of the
+	// listener out to well beyond earshot, pushed in the least helpful order
+	// so nothing can pass by accident of insertion.
+	ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+	const int pushed = 30;
+	for (int i = pushed - 1; i >= 0; i--)
+	{
+		ScorchDroidAudio::pushSoundEventAt("data/wav/explosions/explosion.wav",
+			listenerX + (float) i * 25.0f, listenerY, listenerZ);
+	}
+	std::vector< ScorchDroidAudio::SelectedSound > mixed =
+		ScorchDroidAudio::drainSoundEvents(true, listenerX, listenerY, listenerZ);
+
+	check((int) mixed.size() <= ScorchDroidAudio::kDefaultSoundChannels,
+		"a burst is cut to upstream's channel budget, not all played at once");
+	check((int) mixed.size() < pushed,
+		"...so most of a thirty-explosion burst never reaches the speaker");
+	printf("    %d explosions pushed, %d played\n", pushed, (int) mixed.size());
+
+	// Nearest wins. Every sound here carries upstream's eAction priority -
+	// as every sound raised from src/common does - so distance is the whole
+	// of the comparison, and gain falls with it.
+	bool descending = true;
+	for (size_t i = 1; i < mixed.size(); i++)
+	{
+		if (mixed[i].gain > mixed[i - 1].gain) descending = false;
+	}
+	check(descending, "the sounds that win a channel are the nearest ones, loudest first");
+	if (!mixed.empty())
+	{
+		printf("    gains: %.3f (nearest) down to %.3f\n",
+			mixed.front().gain, mixed.back().gain);
+		check(mixed.front().gain > mixed.back().gain,
+			"a distant explosion is quieter than one at your feet");
+	}
+
+	// The exact curve, not just the direction: OpenAL's AL_INVERSE_DISTANCE,
+	// which is the model upstream selects, at its default 75-unit reference
+	// distance and rolloff of 1.
+	{
+		ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+		ScorchDroidAudio::pushSoundEventAt("data/wav/explosions/explosion.wav",
+			listenerX + 150.0f, listenerY, listenerZ);
+		std::vector< ScorchDroidAudio::SelectedSound > one =
+			ScorchDroidAudio::drainSoundEvents(true, listenerX, listenerY, listenerZ);
+		check(one.size() == 1, "a single distant sound still plays");
+		if (one.size() == 1)
+		{
+			const float refDist = ScorchDroidAudio::kDefaultReferenceDistance;
+			const float expected = refDist / (refDist + 1.0f * (150.0f - refDist));
+			printf("    at 150 units: %.4f, AL_INVERSE_DISTANCE says %.4f\n",
+				one[0].gain, expected);
+			check(fabsf(one[0].gain - expected) < 0.001f,
+				"...attenuated by upstream's own inverse-distance curve");
+		}
+	}
+
+	// A sound with no position is upstream's setRelative() case - it sits at
+	// the listener and plays at full gain wherever the listener is.
+	{
+		ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+		ScorchDroidAudio::pushSoundEvent("data/wav/misc/beep.wav");
+		std::vector< ScorchDroidAudio::SelectedSound > relative =
+			ScorchDroidAudio::drainSoundEvents(true, listenerX, listenerY, listenerZ);
+		check(relative.size() == 1 && fabsf(relative[0].gain - 1.0f) < 0.001f,
+			"a sound with no position plays at full gain, as setRelative does");
+	}
+
+	// Far enough away and it is not worth a channel at all - the one that
+	// would otherwise be spent on something nobody can hear.
+	{
+		ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+		ScorchDroidAudio::pushSoundEventAt("data/wav/explosions/explosion.wav",
+			listenerX + 100000.0f, listenerY, listenerZ);
+		std::vector< ScorchDroidAudio::SelectedSound > tooFar =
+			ScorchDroidAudio::drainSoundEvents(true, listenerX, listenerY, listenerZ);
+		check(tooFar.empty(), "an explosion far over the horizon is dropped, not played silently");
+	}
+
+	// Before anything has been drawn there is no camera to measure from.
+	// Everything plays rather than everything being silently dropped.
+	{
+		ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+		ScorchDroidAudio::pushSoundEventAt("data/wav/explosions/explosion.wav",
+			listenerX + 100000.0f, listenerY, listenerZ);
+		std::vector< ScorchDroidAudio::SelectedSound > noListener =
+			ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+		check(noListener.size() == 1 && fabsf(noListener[0].gain - 1.0f) < 0.001f,
+			"with no camera yet, a sound plays unattenuated rather than vanishing");
+	}
+}
+
 static void testAmbientSound()
 {
 	printf("ambient sound (M21: the landscape's own atmosphere):\n");
@@ -3412,6 +3523,7 @@ int main(int argc, char **argv)
 	testServerRestart();
 	testGameSetup();
 	testPlayerProfile();
+	testSoundMixing();
 	testAmbientSound();
 	testOceanWaves();
 	testParticleTextures();
