@@ -43,6 +43,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var settings: GameSettings
     // M15: created once the data root exists; state-driven from the tick.
     private var music: MusicPlayer? = null
+    // M21: the landscape's own atmosphere. Reloaded when the landscape
+    // changes, which is every round.
+    private var ambient: AmbientPlayer? = null
+    private var lastLandscapeTex = ""
     // The running game's tick loop, so quit-to-menu can stop it. Non-null
     // exactly while a game is running.
     private var gameJob: Job? = null
@@ -290,6 +294,7 @@ class MainActivity : AppCompatActivity() {
                 it.load(NativeBridge.getSelectedMod())
                 settings.music = it
             }
+            ambient = AmbientPlayer(dataRoot.absolutePath).also { settings.ambient = it }
             settings.applyAll()
             presets = parsePresets(NativeBridge.getPresets())
             // Upstream's menu music is its "wait" loop.
@@ -493,6 +498,8 @@ class MainActivity : AppCompatActivity() {
         gameJob = null
         hudState.dialog = HudDialog.None
         NativeBridge.stopGame()
+        ambient?.stop()
+        lastLandscapeTex = ""
         hudState.reset()
         appScreen = AppScreen.MULTIPLAYER
     }
@@ -553,6 +560,11 @@ class MainActivity : AppCompatActivity() {
         gameJob?.cancel()
         gameJob = null
         NativeBridge.stopGame()
+        // M21: the landscape is gone, and so is its atmosphere. Cleared as
+        // well as stopped, so the next game reloads rather than assuming the
+        // same landscape came back.
+        ambient?.stop()
+        lastLandscapeTex = ""
         if (::gameSurface.isInitialized) {
             surfaceHost.removeView(gameSurface)
         }
@@ -705,6 +717,18 @@ class MainActivity : AppCompatActivity() {
                     else -> MusicPlayer.State.PLAYING
                 }
             )
+            // M21: the landscape brings its own atmosphere with it, and a
+            // new one arrives every round. The check is a string compare
+            // against a value the engine already holds; the XML behind the
+            // sounds is only read when it actually changed.
+            val tex = withContext(Dispatchers.Default) { NativeBridge.getLandscapeTex() }
+            if (tex != lastLandscapeTex) {
+                lastLandscapeTex = tex
+                val sounds = withContext(Dispatchers.Default) {
+                    parseAmbientSounds(NativeBridge.getAmbientSounds())
+                }
+                ambient?.apply(sounds)
+            }
             // M4: keep the weapon-select button's label in sync with
             // the current weapon, in case it changed via the shop
             // dialog or a fresh round's default selection.
@@ -1648,16 +1672,19 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         if (appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onResume()
         music?.resume()
+        ambient?.resume()
     }
 
     override fun onPause() {
         super.onPause()
         if (appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onPause()
         music?.pause()
+        ambient?.pause()
     }
 
     override fun onDestroy() {
         music?.release()
+        ambient?.release()
         music = null
         super.onDestroy()
         LanDiscovery.stopRegistration()

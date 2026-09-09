@@ -116,8 +116,25 @@ class GameSettings(context: Context) {
         prefs.edit().putFloat(KEY_MUSIC_VOLUME, musicVolume).apply()
     }
 
+    /**
+     * M21: the landscape's own ambient sound - waves, rain, birdsong. Its own
+     * switch rather than folded into sound effects, because it is the one
+     * that plays continuously and so the one most likely to be unwanted.
+     */
+    var ambientEnabled by mutableStateOf(prefs.getBoolean(KEY_AMBIENT, true))
+        private set
+
+    fun updateAmbientEnabled(value: Boolean) {
+        ambientEnabled = value
+        ambient?.enabled = value
+        prefs.edit().putBoolean(KEY_AMBIENT, value).apply()
+    }
+
     /** The music player, once the Activity has one; applyAll() pushes to it. */
     var music: MusicPlayer? = null
+
+    /** The ambient player, likewise. */
+    var ambient: AmbientPlayer? = null
 
     // --- HUD ----------------------------------------------------------------
 
@@ -217,6 +234,7 @@ class GameSettings(context: Context) {
         applyIdentity()
         SoundPlayer.enabled = soundEnabled
         music?.let { it.volume = musicVolume; it.enabled = musicEnabled }
+        ambient?.enabled = ambientEnabled
         NativeBridge.setRenderOptions(showTrees, showFog)
     }
 
@@ -229,6 +247,7 @@ class GameSettings(context: Context) {
         const val KEY_SOUND = "sound.enabled"
         const val KEY_MUSIC = "music.enabled"
         const val KEY_MUSIC_VOLUME = "music.volume"
+        const val KEY_AMBIENT = "sound.ambient"
         const val KEY_PLATES = "hud.namePlates"
         const val KEY_HEALTH = "hud.healthBars"
         const val KEY_TOAST = "hud.chatToastSeconds"

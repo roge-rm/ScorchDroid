@@ -63,6 +63,7 @@ std::mutex g_engineMutex;
 #include <ScoreboardState.h>
 #include <GameSetup.h>
 #include <PlayerProfile.h>
+#include <AmbientSound.h>
 #include <weapons/AccessoryStore.hpp>
 #include <weapons/AccessoryPart.hpp>
 #include <coms/ComsBuyAccessoryMessage.hpp>
@@ -1884,6 +1885,42 @@ Java_com_rm_scorchdroid_NativeBridge_getBots(JNIEnv *env, jobject /* this */) {
         env->DeleteLocalRef(value);
     }
     return result;
+}
+
+// M21: the ambient sounds the current landscape asks for, as
+// "file|gain|looped|min|max". Reads two small XML files, so the caller polls
+// getLandscapeTex() (which reads nothing) and only asks for these when the
+// landscape has actually changed.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getAmbientSounds(JNIEnv *env, jobject /* this */) {
+    std::vector<std::string> rows;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        if (ctx) {
+            std::vector<ScorchDroidAmbient::Sound> sounds =
+                    ScorchDroidAmbient::forCurrentLandscape(*ctx);
+            for (size_t i = 0; i < sounds.size(); i++) {
+                std::ostringstream row;
+                row << sounds[i].file << "|" << sounds[i].gain << "|"
+                    << (sounds[i].looped ? 1 : 0) << "|"
+                    << sounds[i].minSeconds << "|" << sounds[i].maxSeconds;
+                rows.push_back(row.str());
+            }
+        }
+    }
+    return toStringArray(env, rows);
+}
+
+// Which landscape is loaded, as the path of its texture definition. Cheap
+// enough to poll: it is a string the definition already holds.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getLandscapeTex(JNIEnv *env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    ScorchedContext *ctx = activeContext();
+    if (!ctx) return env->NewStringUTF("");
+    const char *tex = ctx->getLandscapeMaps().getDefinitions().getDefinition().getTex();
+    return env->NewStringUTF(tex ? tex : "");
 }
 
 // M19: the mix - every bot the slots are filled from, round-robin.
