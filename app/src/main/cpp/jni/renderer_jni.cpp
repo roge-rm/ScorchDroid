@@ -6933,31 +6933,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			if (inst.alive) addShadow(inst.x, inst.y, inst.z, 1.6f);
 		}
 
-		// Arena boundary. Upstream marks it with a ring of sprites every 32
-		// units (LandscapePoints::generate) so you can see where the play
-		// area ends - which matters, because the landscape mesh carries on
-		// past it and a shot that crosses it is gone. The arena is usually
-		// the whole map but a landscape can set it smaller.
-		{
-			GroundMaps &ground = ctx->getLandscapeMaps().getGroundMaps();
-			const int arenaX = ground.getArenaX(), arenaY = ground.getArenaY();
-			const int arenaW = ground.getArenaWidth(), arenaH = ground.getArenaHeight();
-			const int stepX = std::max(arenaW / 32, 1);
-			const int stepY = std::max(arenaH / 32, 1);
-			auto addMarker = [&](int lx, int ly) {
-				const float gy = heightAt(heightMap, mapW, mapH, (float) lx, (float) ly);
-				addShadow((float) lx, gy, worldZFromEngineY((float) ly), 1.0f);
-			};
-			for (int i = 0; i <= 32; i++) {
-				addMarker(arenaX + i * stepX, arenaY);
-				addMarker(arenaX + i * stepX, arenaY + arenaH);
-			}
-			for (int i = 1; i < 32; i++) {
-				addMarker(arenaX, arenaY + i * stepY);
-				addMarker(arenaX + arenaW, arenaY + i * stepY);
-			}
-		}
-
 		if (!quads.empty() && shadowProgram != 0) {
 			glUseProgram(shadowProgram);
 			glUniformMatrix4fv(shadowMvpLoc, 1, GL_FALSE, mvp.m);
@@ -7281,6 +7256,75 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					Mat4::rotateAxis(chunk.axisX, chunk.axisY, chunk.axisZ, chunk.angle),
 					Mat4::scale(gpu->scale * chunk.scale)));
 			drawMeshGroup(gpu->hull, meshMvpLoc, Mat4::multiply(mvp, rockModel));
+		}
+	}
+
+	// G7: the arena markers, upstream's LandscapePoints and WaterMapPoints.
+	// Every 32 units around the arena a small model of the wall type -
+	// wrap.ase, bounce.ase or concrete.ase, scaled 0.15 - stands on the
+	// ground, and a second set rides the water at the same points, 0.6
+	// above the wave. The arena is usually the whole map but a landscape
+	// can set it smaller, and a shot that crosses the edge is gone, so
+	// the ring matters. (This replaces a ring of sprites, which was also
+	// spaced by the arena's width over 32 rather than every 32 units.)
+	{
+		const OptionsTransient::WallType wall = ctx->getOptionsTransient().getWallType();
+		const char *file = nullptr;
+		switch (wall) {
+			case OptionsTransient::wallWrapAround: file = "data/meshes/wrap.ase"; break;
+			case OptionsTransient::wallBouncy:     file = "data/meshes/bounce.ase"; break;
+			case OptionsTransient::wallConcrete:   file = "data/meshes/concrete.ase"; break;
+			default: break;
+		}
+		if (file) {
+			ModelID markerId;
+			markerId.initFromString("ase", file, "none");
+			Model *model = loadModelSafely(markerId);
+			GpuModel *gpu = model ? uploadModel(model) : nullptr;
+			if (gpu) {
+				GroundMaps &ground = ctx->getLandscapeMaps().getGroundMaps();
+				HeightMap &markerMap = ground.getHeightMap();
+				const int arenaX = ground.getArenaX(), arenaY = ground.getArenaY();
+				const int arenaW = ground.getArenaWidth(), arenaH = ground.getArenaHeight();
+				const int pointsX = arenaW / 32, pointsY = arenaH / 32;
+				std::vector<std::pair<int, int>> points;
+				for (int i = 0; i <= pointsX; i++) {
+					points.push_back({ arenaX + 32 * i, arenaY });
+					points.push_back({ arenaX + 32 * i, arenaY + arenaH });
+				}
+				for (int i = 1; i <= pointsY - 1; i++) {
+					points.push_back({ arenaX, arenaY + 32 * i });
+					points.push_back({ arenaX + arenaW, arenaY + 32 * i });
+				}
+				static bool markersLogged = false;
+				if (!markersLogged) {
+					markersLogged = true;
+					LOGI("Arena markers: %s, %d points, water %s", file, (int) points.size(),
+						 waterVisible ? "yes" : "no");
+				}
+				glUniform4f(meshColorLoc, 1.0f, 1.0f, 1.0f, 1.0f);
+				const Mat4 markerScale = Mat4::scale(0.15f);
+				for (const std::pair<int, int> &pt : points) {
+					const float x = (float) pt.first;
+					const float z = worldZFromEngineY((float) pt.second);
+					// On the ground (LandscapePoints::draw).
+					const float gy = heightAt(markerMap, mapWidthUnits, mapHeightUnits, x, (float) pt.second);
+					drawMeshGroup(gpu->hull, meshMvpLoc,
+						Mat4::multiply(mvp, Mat4::multiply(Mat4::translate(x, gy, z), markerScale)));
+					// And on the water (WaterMapPoints::draw), riding the
+					// ocean tile 0.6 above the surface, where there is one.
+					if (waterVisible && !oceanUpload.empty()) {
+						const int n = ScorchDroidOcean::kResolution;
+						const float tile = ScorchDroidOcean::kTileLength;
+						const int tx = ((int) floorf(x / tile * n) % n + n) % n;
+						const int tz = ((int) floorf(z / tile * n) % n + n) % n;
+						const float wave = oceanUpload[((size_t) tz * n + tx) * 3];
+						drawMeshGroup(gpu->hull, meshMvpLoc,
+							Mat4::multiply(mvp, Mat4::multiply(
+								Mat4::translate(x, waterHeight + wave + 0.6f, z), markerScale)));
+					}
+				}
+			}
 		}
 	}
 
