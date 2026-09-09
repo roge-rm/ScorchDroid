@@ -1653,8 +1653,14 @@ class MainActivity : AppCompatActivity() {
                 return@launch
             }
 
-            val ip = getLocalIpAddress() ?: "unknown IP"
-            hudState.hostingLabel = "Hosting on $ip:$port"
+            // No address at all means no network is up, which "Hosting on
+            // unknown IP" managed to say without saying what to do about it.
+            val ip = getLocalIpAddress()
+            hudState.hostingLabel = if (ip != null) {
+                "Hosting on $ip:$port"
+            } else {
+                "No network - turn on Wi-Fi or your hotspot for others to join"
+            }
             LanDiscovery.registerService(applicationContext, port)
 
             // Wi-Fi Direct is advertised alongside, not instead: the two
@@ -1667,7 +1673,14 @@ class MainActivity : AppCompatActivity() {
                 WifiDirectTransport.hasPermissions(applicationContext)
             ) {
                 WifiDirectTransport.advertise(applicationContext, port) { advertising ->
-                    if (advertising) hudState.hostingLabel = "Hosting on $ip:$port + Wi-Fi Direct"
+                    if (!advertising) return@advertise
+                    // Worth saying even with no other network up: a Wi-Fi
+                    // Direct group is a way in on its own.
+                    hudState.hostingLabel = if (ip != null) {
+                        "Hosting on $ip:$port + Wi-Fi Direct"
+                    } else {
+                        "Hosting over Wi-Fi Direct"
+                    }
                 }
             }
         }
@@ -1701,6 +1714,7 @@ class MainActivity : AppCompatActivity() {
         var scansRunning = if (wifiDirect) 2 else 1
 
         fun manualEntryLabel() = "Enter address manually..."
+        fun helpLabel() = "How do I connect?"
 
         fun stopScans() {
             LanDiscovery.stopDiscovery()
@@ -1709,16 +1723,16 @@ class MainActivity : AppCompatActivity() {
 
         val listDialog = HudDialog.ListChoice(
             title = if (wifiDirect) "Searching for games..." else "Searching for LAN games...",
-            items = listOf(manualEntryLabel()),
+            items = listOf(manualEntryLabel(), helpLabel()),
             cancelLabel = "Cancel",
             onSelect = { index ->
                 resolved = true
                 stopScans()
                 hudState.dialog = HudDialog.None
-                if (index < found.size) {
-                    onSelected(found[index])
-                } else {
-                    promptManualAddress(onSelected, onCancelled)
+                when (index) {
+                    in found.indices -> onSelected(found[index])
+                    found.size -> promptManualAddress(onSelected, onCancelled)
+                    else -> showConnectionHelp { showFindGames(onSelected, onCancelled) }
                 }
             },
             onCancel = {
@@ -1736,7 +1750,7 @@ class MainActivity : AppCompatActivity() {
             listDialog.items = found.map { game ->
                 if (game.p2pDeviceAddress != null) "${game.name} - Wi-Fi Direct"
                 else "${game.name} - ${game.host}:${game.port}"
-            } + manualEntryLabel()
+            } + manualEntryLabel() + helpLabel()
         }
 
         fun add(game: LanDiscovery.FoundGame) {
@@ -1775,6 +1789,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * What to do when "Find Games" turns up nothing, which is the moment a
+     * player is most likely to conclude multiplayer is broken. All four
+     * routes work today and none of them is obvious from the outside -
+     * particularly the hotspot one, which needs no code at all and is the
+     * answer whenever there is no router in reach.
+     *
+     * [onDismiss] goes back to the search rather than out to the menu: a
+     * player who came here to find out how to connect still wants to.
+     */
+    private fun showConnectionHelp(onDismiss: () -> Unit) {
+        hudState.dialog = HudDialog.Message(
+            "Ways to play together:\n\n" +
+                "Same Wi-Fi - put both devices on the same network. One taps " +
+                "Host Game, the other taps Join Game.\n\n" +
+                "Wi-Fi Direct - no router needed. Both devices just need Wi-Fi " +
+                "switched on; the host's game shows up in this list marked " +
+                "\"Wi-Fi Direct\".\n\n" +
+                "Hotspot - turn on the host's hotspot from Quick Settings and " +
+                "connect the other device to it. Then Host and Join as usual.\n\n" +
+                "By address - some guest and office networks block the way games " +
+                "announce themselves. The host's screen shows its address; type " +
+                "that in with \"Enter address manually\"."
+        ) {
+            hudState.dialog = HudDialog.None
+            onDismiss()
+        }
+    }
+
     // M5 Phase 2: falls back to a typed "host:port" when nothing useful
     // showed up via NSD - the only way to reach a PC host today, since
     // desktop Scorched3D doesn't advertise itself via Android's NSD/mDNS.
@@ -1803,12 +1846,31 @@ class MainActivity : AppCompatActivity() {
 
     // Plain Android API - the actual LAN IP a peer would dial in to, not
     // something the native engine (which just binds INADDR_ANY) knows.
+    //
+    // Ranked rather than "the first one found", which was arbitrary as soon
+    // as a device had more than one address up, and a device hosting a game
+    // usually does. Normal Wi-Fi first, since that is the address someone on
+    // the same network types in. Then the hotspot interface, so a host who
+    // turned their hotspot on to play (see the connection help) still shows
+    // an address that works - their normal Wi-Fi is often down at that
+    // point. Wi-Fi Direct's own interface last: peers reach a group owner
+    // through the group, never by typing 192.168.49.1 at it.
     private fun getLocalIpAddress(): String? {
+        fun rank(interfaceName: String): Int = when {
+            interfaceName.startsWith("wlan") -> 0
+            interfaceName.startsWith("ap") ||
+                interfaceName.startsWith("swlan") ||
+                interfaceName.startsWith("rndis") -> 1
+            interfaceName.startsWith("p2p") -> 3
+            else -> 2
+        }
+
         return try {
             Collections.list(NetworkInterface.getNetworkInterfaces())
-                .flatMap { Collections.list(it.inetAddresses) }
-                .firstOrNull { !it.isLoopbackAddress && it is Inet4Address }
-                ?.hostAddress
+                .flatMap { nic -> Collections.list(nic.inetAddresses).map { nic.name to it } }
+                .filter { (_, address) -> !address.isLoopbackAddress && address is Inet4Address }
+                .minByOrNull { (name, _) -> rank(name) }
+                ?.second?.hostAddress
         } catch (e: Exception) {
             null
         }

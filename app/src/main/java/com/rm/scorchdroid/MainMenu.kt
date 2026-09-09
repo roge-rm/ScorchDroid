@@ -266,8 +266,8 @@ fun MultiplayerScreen(
     MenuBackdrop {
         Title("Multiplayer")
         Spacer(Modifier.height(36.dp))
-        MenuButton("Host Game", "Others on your network can join", onClick = onHost)
-        MenuButton("Join Game", "Find a game on your network", onClick = onJoin)
+        MenuButton("Host Game", "Over Wi-Fi, a hotspot, or Wi-Fi Direct", onClick = onHost)
+        MenuButton("Join Game", "Find a game nearby", onClick = onJoin)
         Spacer(Modifier.height(12.dp))
         TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
     }
