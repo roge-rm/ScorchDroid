@@ -268,6 +268,11 @@ namespace
 	// 16-unit layer is a few texels per pixel at distance.
 	GLuint oceanTexture = 0, oceanNormalTexture = 0;
 	GLint  waterWaveTexLoc = -1, waterWaveNormalTexLoc = -1, waterWaveTileLoc = -1;
+	// W10a: the landscape's own <foam> bitmap, which upstream tiles 25
+	// times across the map and reads the blue channel of to break the
+	// foam amount up into flecks (water.fshader's tex_foamamount.z).
+	GLuint waterFoamMaskTexture = 0;
+	GLint  waterFoamMaskLoc = -1;
 	// Water detail, the one water setting: 0 = Full (upstream's 2-unit grid,
 	// 24 tile updates a second - its own phase rate), 1 = Half (4 units,
 	// 12/s), 2 = Quarter (8 units, 6/s). The grid part lands with W11.
@@ -1353,6 +1358,10 @@ namespace
 		uniform vec3 uNoise0;
 		uniform vec3 uNoise1;
 		uniform sampler2D uWaveNormalTex;
+		// highp to match the vertex shader's declaration, see uTime above.
+		uniform highp float uWaveTileLength;
+		// W10a: the landscape's foam bitmap, tiled across the map.
+		uniform sampler2D uFoamMask;
 
 		// Upstream's water shininess, from water.fshader.
 		const float kWaterShininess = 120.0;
@@ -1428,6 +1437,19 @@ namespace
 			// Upstream's mix, shadow-weighted the same way.
 			vec3 water = mix(refraction, reflected, fresnel * min(1.0, s0 + 0.8))
 				+ specular * s0;
+
+			// Whitecaps, from water.fshader: the foam amount rides in the
+			// normal texture's alpha (upstream's tex_foamamount.x), faded
+			// by fog and taken back in shadow, then broken into flecks by
+			// the landscape's foam bitmap sampled 25 times across the map
+			// (its aofland coordinate, which is the map-relative position;
+			// landscape y runs the other way to world z). Mixed towards the
+			// sun's own diffuse colour, not white.
+			float aof = texture(uWaveNormalTex, vWorld / uWaveTileLength).a * fogFactor;
+			vec2 mapPer = vec2(vWorld.x, uMapSize.y - vWorld.y) / uMapSize;
+			float foam = max(min(aof, 1.0) - (1.0 - s0) * 0.5, 0.0)
+				* texture(uFoamMask, mapPer * 25.0).b;
+			water = mix(water, uSunDiffuse, foam);
 
 			fragColor = vec4(mix(uFogColor, water, fogFactor), uAlpha);
 		}
@@ -2617,7 +2639,7 @@ namespace
 					oceanNormalUpload[i * 4 + 0] = (unsigned char) (oceanReady.normalX[i] * 127.0f + 128.0f);
 					oceanNormalUpload[i * 4 + 1] = (unsigned char) (oceanReady.normalY[i] * 127.0f + 128.0f);
 					oceanNormalUpload[i * 4 + 2] = (unsigned char) (oceanReady.normalZ[i] * 127.0f + 128.0f);
-					oceanNormalUpload[i * 4 + 3] = 0;
+					oceanNormalUpload[i * 4 + 3] = (unsigned char) (oceanReady.foam[i] * 255.0f);
 				}
 				oceanHasNew = false;
 				haveNew = true;
@@ -2658,14 +2680,15 @@ namespace
 		glGenerateMipmap(GL_TEXTURE_2D);
 		if (oceanUploadLogsLeft > 0) {
 			oceanUploadLogsLeft--;
-			float peak = 0.0f, peakDisp = 0.0f, peakTilt = 0.0f;
+			float peak = 0.0f, peakDisp = 0.0f, peakTilt = 0.0f, peakFoam = 0.0f;
 			for (size_t i = 0; i < (size_t) n * n; i++) {
 				peak = std::max(peak, fabsf(oceanUpload[i * 3]));
 				peakDisp = std::max(peakDisp, std::max(fabsf(oceanUpload[i * 3 + 1]), fabsf(oceanUpload[i * 3 + 2])));
 				peakTilt = std::max(peakTilt, fabsf(oceanReady.normalX[i]));
+				peakFoam = std::max(peakFoam, oceanReady.foam[i]);
 			}
-			LOGI("Ocean tile uploaded: wind %.1f bearing %.2f, peak height %.2f, peak displacement %.2f, peak normal tilt %.3f",
-				 oceanSeededSpeed, oceanSeededDirection, peak, peakDisp, peakTilt);
+			LOGI("Ocean tile uploaded: wind %.1f bearing %.2f, peak height %.2f, peak displacement %.2f, peak normal tilt %.3f, peak foam %.2f",
+				 oceanSeededSpeed, oceanSeededDirection, peak, peakDisp, peakTilt, peakFoam);
 		}
 	}
 
@@ -2809,6 +2832,14 @@ namespace
 		glEnableVertexAttribArray(0);
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
 		glBindVertexArray(0);
+
+		// The landscape's foam bitmap (texdefault.xml: data/textures/foam.png,
+		// 128 square - upstream insists on exactly that size, since it also
+		// writes its foam amounts into the same image). Repeated, as the
+		// shader tiles it.
+		if (waterFoamMaskTexture != 0) glDeleteTextures(1, &waterFoamMaskTexture);
+		waterFoamMaskTexture = loadSkyTexture(water->foam, "", true);
+		if (waterFoamMaskTexture == 0) LOGI("Water: no foam bitmap (%s)", water->foam.c_str());
 
 		// Upstream's second ripple wind (Water2Renderer::generate):
 		//   windSpeed2 = max(0, RAND * 2 - 1 + windSpeed1)
@@ -4343,6 +4374,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterSkyZenithLoc = glGetUniformLocation(waterProgram, "uSkyZenith");
 	waterWaveTexLoc = glGetUniformLocation(waterProgram, "uWaveTex");
 	waterWaveNormalTexLoc = glGetUniformLocation(waterProgram, "uWaveNormalTex");
+	waterFoamMaskLoc = glGetUniformLocation(waterProgram, "uFoamMask");
 	waterWaveTileLoc = glGetUniformLocation(waterProgram, "uWaveTileLength");
 	waterReflectTexLoc = glGetUniformLocation(waterProgram, "uReflectionTex");
 	waterUseReflectLoc = glGetUniformLocation(waterProgram, "uUseReflection");
@@ -4459,7 +4491,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 
 	waterBuilt = false;
 	waterVisible = false;
-	waterVao = waterVbo = waterGridVao = waterGridVbo = 0;
+	waterVao = waterVbo = waterGridVao = waterGridVbo = waterFoamMaskTexture = 0;
 
 	skyBuilt = false;
 	skyVao = skyVbo = 0;
@@ -6373,6 +6405,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glActiveTexture(GL_TEXTURE6);
 		glBindTexture(GL_TEXTURE_2D, oceanNormalTexture);
 		glUniform1i(waterWaveNormalTexLoc, 6);
+		glActiveTexture(GL_TEXTURE7);
+		glBindTexture(GL_TEXTURE_2D, waterFoamMaskTexture);
+		glUniform1i(waterFoamMaskLoc, 7);
 		glUniformMatrix4fv(waterMvpLoc, 1, GL_FALSE, mvp.m);
 		// Upstream's reflection texture matrix: bias * proj * view of the
 		// *real* camera. The mirrored pass drew into the buffer with a view
