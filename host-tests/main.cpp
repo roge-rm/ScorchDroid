@@ -69,6 +69,7 @@
 #include <PlayerProfile.h>
 #include <AmbientSound.h>
 #include <OceanWaves.h>
+#include <ShoreBreakers.h>
 #include <landscapedef/LandscapeDefinitionsBase.hpp>
 #include <tankai/TankAIStore.hpp>
 #include <tankai/TankAI.hpp>
@@ -864,6 +865,65 @@ namespace
 				}
 				check(black < (int) ground.rgb.size() / 2,
 					"the landscape is not baked to mostly black");
+			}
+
+			// W10c: upstream's breakers (WaterWaves.cpp), the shoreline
+			// sprites. Pure heightmap work, so checked here: every segment
+			// must sit on a real shore with its perpendicular pointing out
+			// to sea, and there must be a sensible number of them.
+			{
+				LandscapeTex *landTex =
+					server->getLandscapeMaps().getDefinitions().getTex();
+				float waterHeight = 5.0f;
+				if (landTex && landTex->border &&
+					landTex->border->getType() == LandscapeTexType::eWater)
+				{
+					waterHeight = ((LandscapeTexBorderWater *)
+						landTex->border)->height.asFloat();
+				}
+				std::vector<ScorchDroidBreakers::Segment> segments =
+					ScorchDroidBreakers::build(server->getContext(), waterHeight, 7u);
+				std::vector<ScorchDroidBreakers::Segment> again =
+					ScorchDroidBreakers::build(server->getContext(), waterHeight, 7u);
+				printf("  (breakers: %d segments)\n", (int) segments.size());
+				check(!segments.empty(), "the shoreline has breakers");
+				check(segments.size() < 5000, "...a shore's worth, not every cell");
+				check(segments.size() == again.size(),
+					"the same seed gives the same breakers");
+
+				HeightMap &hm2 =
+					server->getLandscapeMaps().getGroundMaps().getHeightMap();
+				int seaward = 0, onShore = 0, offMap = 0, sets[2] = { 0, 0 };
+				for (size_t i = 0; i < segments.size(); i++)
+				{
+					const ScorchDroidBreakers::Segment &s = segments[i];
+					if (s.set == 0 || s.set == 1) sets[s.set]++;
+					// The seaward corners sit 6 units out along the perp;
+					// upstream flips the perp if 3 units out is land, so
+					// the point 3 units out from the shore corners should
+					// be water.
+					const int px = (int) ((s.ax + s.bx) * 0.5f + s.perpX * 3.0f);
+					const int py = (int) ((s.ay + s.by) * 0.5f + s.perpY * 3.0f);
+					if (px < 0 || py < 0 || px >= hm2.getMapWidth() || py >= hm2.getMapHeight())
+					{
+						offMap++;
+						continue;
+					}
+					if (hm2.getHeight(px, py).asFloat() <= waterHeight) seaward++;
+					// The shore corners are on or next to a shore cell:
+					// within a few units below the waterline.
+					const int sx = std::min(std::max((int) s.ax, 0), hm2.getMapWidth() - 1);
+					const int sy = std::min(std::max((int) s.ay, 0), hm2.getMapHeight() - 1);
+					const float g = hm2.getHeight(sx, sy).asFloat();
+					if (g < waterHeight + 1.0f && g > waterHeight - 6.0f) onShore++;
+				}
+				check(offMap == 0, "no breaker is placed off the map");
+				check(seaward * 10 >= (int) segments.size() * 9,
+					"nearly every breaker's perpendicular points out to sea");
+				check(onShore * 10 >= (int) segments.size() * 9,
+					"nearly every breaker starts at the waterline");
+				check(sets[0] > 0 && sets[1] > 0,
+					"the breakers are dealt between both sprite sets");
 			}
 
 			// M6 scorch marks - the other half of terrain destruction, and
