@@ -3294,7 +3294,20 @@ namespace
 		return worldSize * halfScreen / (distance * tanf(fovYRadians * 0.5f));
 	}
 
-	void drawEffects(const Mat4 &viewProjection, float eyeX, float eyeY, float eyeZ, float fovYRadians)
+	// W3: [pixelScale] scales the point sizes for a target that is not the
+	// screen - worldSizeToPixels measures against surfaceHeight, so a
+	// half-resolution reflection buffer needs half-size sprites or every
+	// puff of smoke reflects twice as large as it is.
+	//
+	// [clipBelowY] drops anything under the water plane, which is upstream's
+	// rule for what goes in the reflection (RenderTargets::draw skips targets
+	// below the waterline). Upstream does not apply it to its own particles -
+	// its reflection pass just draws the lot - but a mirrored particle from
+	// below the surface surfaces *above* it in the reflection, so the rule it
+	// already uses for targets is the right one here too.
+	void drawEffects(const Mat4 &viewProjection, float eyeX, float eyeY, float eyeZ,
+					 float fovYRadians, float pixelScale = 1.0f,
+					 float clipBelowY = -1.0e9f)
 	{
 		if (particles.empty() && beams.empty()) return;
 
@@ -3314,11 +3327,12 @@ namespace
 			additive.reserve(particles.size() * 8);
 			for (size_t i = 0; i < particles.size(); i++) {
 				const Particle &particle = particles[i];
+				if (particle.y < clipBelowY) continue;
 				const float remaining = 1.0f - particle.age / particle.life;
 
 				const float dx = particle.x - eyeX, dy = particle.y - eyeY, dz = particle.z - eyeZ;
 				const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
-				float pixels = worldSizeToPixels(particle.worldSize, distance, fovYRadians);
+				float pixels = worldSizeToPixels(particle.worldSize, distance, fovYRadians) * pixelScale;
 				// Grow as they age, the way a real puff spreads.
 				pixels *= 1.0f + (1.0f - remaining) * particle.growth;
 				pixels = std::min(std::max(pixels, 1.0f), 256.0f);
@@ -3361,6 +3375,9 @@ namespace
 			data.reserve(beams.size() * 12);
 			for (size_t i = 0; i < beams.size(); i++) {
 				const Beam &beam = beams[i];
+				// Same waterline rule as the particles above: a beam wholly
+				// under the surface has no reflection.
+				if (beam.y1 < clipBelowY && beam.y2 < clipBelowY) continue;
 				// The beam shader carries no alpha, so fade by dimming the
 				// colour - which is the same thing under additive blending.
 				const float fade = 1.0f - beam.age / beam.life;
@@ -3371,13 +3388,18 @@ namespace
 				data.push_back(r); data.push_back(g); data.push_back(b);
 			}
 
-			glUseProgram(sightProgram);
-			glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, viewProjection.m);
-			glBindVertexArray(beamVao);
-			glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
-			glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
-			glLineWidth(3.0f);
-			frameDrawCalls++; glDrawArrays(GL_LINES, 0, (GLsizei) beams.size() * 2);
+			if (!data.empty()) {
+				glUseProgram(sightProgram);
+				glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, viewProjection.m);
+				glBindVertexArray(beamVao);
+				glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
+				glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
+				glLineWidth(3.0f);
+				// Counted from the data rather than from beams.size(): the
+				// waterline cull above can drop some, and the old count would
+				// then have read past what was uploaded.
+				frameDrawCalls++; glDrawArrays(GL_LINES, 0, (GLsizei) (data.size() / 6));
+			}
 		}
 
 		glBindVertexArray(0);
@@ -4988,6 +5010,74 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	float fogColor[3];
 	currentFogColor(fogColor);
 
+	// W3: the sky's own layers - stars, the sun, and the clouds over both -
+	// as one callable pass. Upstream's reflection draws these too: its
+	// Landscape::drawWater calls sky_->drawBackdrop(true) *and*
+	// sky_->drawLayers(), and leaving the second one out is why a reflected
+	// sky here was a bare gradient under a clouded one.
+	auto drawSkyLayersPass = [&](const Mat4 &vp, const Mat4 &viewMatrix) {
+		// Stars first, then the sun, then the clouds over both. Stars share
+		// the cloud plane and shader but never scroll - that is what
+		// upstream's "skytexturestatic" means - and are drawn at upstream's
+		// own 0.7 alpha.
+		if (cloudsVisible && starTexture != 0 && cloudProgram != 0) {
+			glUseProgram(cloudProgram);
+			glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, vp.m);
+			glUniform2f(cloudScrollLoc, 0.0f, 0.0f);
+			glUniform1f(cloudTexScaleLoc, 1.0f / 700.0f);
+			glUniform3f(cloudTintLoc, 1.0f, 1.0f, 1.0f);
+			glUniform1f(cloudOpacityLoc, 0.7f);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, starTexture);
+			glUniform1i(cloudSamplerLoc, 0);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDepthMask(GL_FALSE);
+			glDisable(GL_CULL_FACE);
+			glBindVertexArray(cloudVao);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
+			glEnable(GL_CULL_FACE);
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+			glBindVertexArray(0);
+		}
+
+		// Billboarded against the basis it is given, so the mirrored pass
+		// gets a sun square-on to the mirrored camera rather than one edge-on.
+		drawSunSprite(vp, viewMatrix);
+
+		// Clouds sit between the sky and everything solid. Blended, and with
+		// no depth writes, so terrain drawn afterwards always wins - the layer
+		// is above the world but is not something you can hide behind.
+		if (cloudsVisible && cloudProgram != 0) {
+			glUseProgram(cloudProgram);
+			glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, vp.m);
+			glUniform2f(cloudScrollLoc, cloudScrollX, cloudScrollY);
+			// One tile per 400 units - big enough that the repeat isn't the
+			// first thing the eye finds.
+			glUniform1f(cloudTexScaleLoc, 1.0f / 400.0f);
+			// Tinted by the sun so a night map's clouds aren't daylit.
+			glUniform3f(cloudTintLoc,
+						0.4f + skyDescription.sunColor[0] * 0.6f,
+						0.4f + skyDescription.sunColor[1] * 0.6f,
+						0.4f + skyDescription.sunColor[2] * 0.6f);
+			glUniform1f(cloudOpacityLoc, 0.75f);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, cloudTexture);
+			glUniform1i(cloudSamplerLoc, 0);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDepthMask(GL_FALSE);
+			glDisable(GL_CULL_FACE);
+			glBindVertexArray(cloudVao);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
+			glEnable(GL_CULL_FACE);
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+			glBindVertexArray(0);
+		}
+	};
+
 	auto drawLandPass = [&](const Mat4 &vp, bool clipUnderwater) {
 		glUseProgram(terrainProgram);
 		// Set after the program is bound, not before - a uniform written
@@ -5074,6 +5164,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// Filled by the tank pass below: the markers for tanks with no model,
 	// and where the aim sight goes once the tanks are drawn.
 	std::vector<float> unmodelledMine, unmodelledOther;
+	std::vector<float> unmodelledShots, explosionPositions;
 	bool haveSight = false;
 	Mat4 sightTransform = Mat4::identity();
 	Mat4 sightBaseTransform = Mat4::identity();
@@ -5086,7 +5177,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// fullest, and hoisting would have meant moving the whole block
 	// above the water and changing the order the frame has always been
 	// drawn in.
-	auto drawSceneryPass = [&](const Mat4 &vp) {
+	//
+	// [cullBelowY] is upstream's own reflection rule, from
+	// RenderTargets::drawTargets: a target whose position is under the
+	// waterline is skipped entirely, so a half-drowned tree does not appear
+	// standing on the reflected surface.
+	auto drawSceneryPass = [&](const Mat4 &vp, float cullBelowY = -1.0e9f) {
 	glUseProgram(meshProgram);
 		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
 		glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
@@ -5115,6 +5211,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			std::map<int, std::vector<ScorchDroidInstances::Instance> > treeBuckets;
 
 			for (TargetInstance &inst : targetInstances) {
+				if (inst.y < cullBelowY) continue;
 				GLuint sourceVbo = 0;
 				int vertexCount = 0;
 				ScorchDroidInstances::Instance packed;
@@ -5223,7 +5320,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// its frame rate back.
 			if (g_showTrees && !treeBuckets.empty() && treeProgram != 0) {
 				glUseProgram(treeProgram);
-				glUniformMatrix4fv(treeViewProjLoc, 1, GL_FALSE, mvp.m);
+				// The pass's own matrix, not the frame's: this read `mvp`
+				// when the block was lifted into a lambda, which drew the
+				// reflection's trees from the real camera - two thousand of
+				// them in the wrong place, on top of the reflected land.
+				glUniformMatrix4fv(treeViewProjLoc, 1, GL_FALSE, vp.m);
 				glUniform3f(treeLightDirLoc, 0.4f, 0.82f, 0.35f);
 				glUniform3f(treeFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 				glUniform1f(treeFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
@@ -5267,10 +5368,15 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// at its fullest setting - a tank at the water's edge with nothing
 	// under it is the thing that gives a fake reflection away.
 	//
-	// The sight is bookkeeping for the real view: it records where to
-	// draw the aim blade afterwards, and the mirrored pass must not
-	// overwrite that with its own mirrored frames.
-	auto drawTanksPass = [&](const Mat4 &vp, bool collectSight) {
+	// [collect] marks the real view. The pass leaves two things behind for
+	// the draws that follow it - where the aim blade goes, and the markers
+	// for tanks whose model would not load - and the mirrored pass must
+	// contribute to neither: it would overwrite the sight frames with
+	// mirrored ones and push a second copy of every marker into a list that
+	// is drawn once, unmirrored.
+	//
+	// [cullBelowY] is upstream's waterline rule again (see the scenery pass).
+	auto drawTanksPass = [&](const Mat4 &vp, bool collect, float cullBelowY = -1.0e9f) {
 	for (TankInstance &inst : tankInstances) {
 			// Upstream's rule, verbatim: TargetRendererImplTank::render() opens
 			// with `if (tank_->getState().getState() != TankState::sNormal)
@@ -5284,9 +5390,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// follow camera reads its position, and losing that mid-round would
 			// snap the view away the moment you died.
 			if (!inst.alive) continue;
+			if (inst.y < cullBelowY) continue;
 
 			GpuModel *gpu = uploadModel(inst.model);
 			if (!gpu) {
+				if (!collect) continue;
 				auto &bucket = inst.mine ? unmodelledMine : unmodelledOther;
 				bucket.push_back(inst.x); bucket.push_back(inst.y + 1.5f); bucket.push_back(inst.z);
 				continue;
@@ -5339,7 +5447,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// StatePlaying, and it bails entirely unless the tank is sNormal).
 			// Our nearest equivalent is "my tank, alive" - this config has no
 			// strict turn order, so every live moment is your turn.
-			if (inst.mine && inst.alive) {
+			if (collect && inst.mine && inst.alive) {
 				haveSight = true;
 				// M22: upstream's sight needs three frames, not one - see
 				// buildOriginalSightGeometry.
@@ -5358,15 +5466,148 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 	};
 
+	// Real in-flight shot/explosion positions, straight from the running
+	// simulation's ActionController. Shots also report which tank fired
+	// them, so each one can use that tank's own projectile model (see the
+	// shotPlayerIds addition in patch 0009) rather than one shared mesh.
+	//
+	// W3: one callable pass, so the reflection can draw it too.
+	//
+	// Upstream does *not* reflect these: it draws in-flight shots from its
+	// ActionController's own 3D game state, which the reflection pass never
+	// runs - so a Scorched3D missile over water reflects its smoke trail and
+	// nothing else. That reads as an oversight rather than a choice, so this
+	// pass goes in the reflection and the omission is not copied.
+	//
+	// [primary] marks the real view: the trails are emitted here, once per
+	// frame, and emitting them again from the mirrored pass would double
+	// every rocket's smoke.
+	auto drawShotsPass = [&](const Mat4 &vp, bool primary, float cullBelowY = -1.0e9f) {
+		glUseProgram(meshProgram);
+		glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
+		glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+		glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
+		glUniform4f(meshColorLoc, 0.95f, 0.9f, 0.4f, 1.0f);
+		for (size_t i = 0; i < shotPositionsRaw.size(); i++) {
+			FixedVector &p = shotPositionsRaw[i];
+			float wx = p[0].asFloat(), wy = p[2].asFloat(), wz = worldZFromEngineY(p[1].asFloat());
+			if (wy < cullBelowY) continue;
+
+			// Upstream's precedence, all three steps of it (see
+			// Accessory::getWeaponMesh): the weapon's own <projectilemodel>,
+			// then the firing tank's, then a default missile for everything
+			// else. That last step is the one that matters - almost no weapon
+			// and almost no tank declares a projectile model, so without it the
+			// Baby Missile and most of the arsenal flew as a bare dot. It is
+			// also why a Gorilla throws bananas and Bender throws bottles:
+			// those tanks declare one and their shots inherit it.
+			//
+			// The first step was reading the accessory's own <model>, which is
+			// its inventory model, not the projectile's - a different field
+			// that these weapons do not set either. The weapon now comes from
+			// the shot itself rather than from its accessory (see patch 0009):
+			// for a weapon built out of other weapons those are different
+			// objects, and only the shot's own is a WeaponProjectile.
+			Model *projectileModel = nullptr;
+			float projectileScale = 1.0f;
+			if (i < shotWeapons.size() && shotWeapons[i]) {
+				{
+					WeaponProjectile *projectile = shotWeapons[i];
+					projectileModel = loadModelSafely(projectile->getModelID());
+					// <projectilescale>, which upstream applies on top of the
+					// mesh's own size normalisation. The Baby Missile is half
+					// size by it, and looks it beside a real Missile.
+					projectileScale = projectile->getScale(*ctx).asFloat();
+					// Flame and smoke trail. Upstream emits these from particle
+					// emitters attached to the shot (MissileActionRenderer), and
+					// both default to *on* for every projectile - so this is what
+					// makes an ordinary missile read as a missile rather than a
+					// travelling dot. Per-weapon colours, sizes and lifetimes are
+					// the weapon's own.
+					//
+					// Only from the real view: this raises particles rather
+					// than drawing them, and a second call from the mirrored
+					// pass would emit every rocket's trail twice a frame.
+					if (primary) emitProjectileTrail(projectile, wx, wy, wz);
+				}
+			}
+			if (!projectileModel && i < shotPlayerIds.size()) {
+				Tanket *firer = ctx->getTargetContainer().getTanketById(shotPlayerIds[i]);
+				Tank *firerTank = (firer && firer->getType() == Target::TypeTank) ? (Tank *) firer : nullptr;
+				if (firerTank) {
+					TankModel *tankModel = firerTank->getModelContainer().getTankModel();
+					if (tankModel) {
+						projectileModel = loadModelSafely(tankModel->getProjectileModelID());
+					}
+				}
+			}
+			if (!projectileModel) projectileModel = loadModelSafely(defaultProjectileModelId());
+
+			GpuModel *gpu = uploadModel(projectileModel);
+			if (!gpu) {
+				// Collected for the real view only - the fallback dots are
+				// drawn once, from the unmirrored camera.
+				if (primary) {
+					unmodelledShots.push_back(wx);
+					unmodelledShots.push_back(wy);
+					unmodelledShots.push_back(wz);
+				}
+				continue;
+			}
+			// Point the mesh along its actual flight path: a bearing about the
+			// up axis, then a pitch about X, like upstream's MissileMesh::draw.
+			// Velocity is an engine-space (x, y, height) direction.
+			//
+			// Re-derived for the corrected landscape-to-world map rather than
+			// carried over: the mesh's forward axis is world -Z after the
+			// upload's remap, so rotateY(a) * rotateX(b) sends it to
+			// (-cos b * sin a, sin b, -cos b * cos a). Matching that to the
+			// world velocity (vx, vz, -vy) gives b = asin(vz) and
+			// a = atan2(-vx, vy).
+			Mat4 orientation = Mat4::identity();
+			if (i < shotVelocities.size()) {
+				FixedVector &vel = shotVelocities[i];
+				float vx = vel[0].asFloat(), vy = vel[1].asFloat(), vz = vel[2].asFloat();
+				float len = sqrtf(vx * vx + vy * vy + vz * vz);
+				if (len > 0.0001f) {
+					vx /= len; vy /= len; vz /= len;
+					float angXY = atan2f(-vx, vy);
+					float angYZ = asinf(std::min(1.0f, std::max(-1.0f, vz)));
+					orientation = Mat4::multiply(Mat4::rotateY(angXY), Mat4::rotateX(angYZ));
+				}
+			}
+			Mat4 model = Mat4::multiply(
+				Mat4::translate(wx, wy, wz),
+				Mat4::multiply(orientation, Mat4::scale(gpu->scale * projectileScale)));
+			Mat4 shotMvp = Mat4::multiply(vp, model);
+			drawMeshGroup(gpu->hull, meshMvpLoc, shotMvp);
+			drawMeshGroup(gpu->turret, meshMvpLoc, shotMvp);
+			drawMeshGroup(gpu->gun, meshMvpLoc, shotMvp);
+		}
+	};
+
+
 
 	// W3: the reflection, when upstream's own is the one asked for.
 	//
 	// Upstream renders the scene a second time into a texture with the
 	// camera mirrored in the water plane (Water2Renderer), and samples that
 	// where this port samples a sky gradient. Same idea here, at half the
-	// screen's resolution and with the land and sky only - the tanks, trees
-	// and effects are left out, which is a real difference from upstream and
-	// the reason this is a switch rather than the only behaviour.
+	// screen's resolution.
+	//
+	// At the top setting this draws what upstream's own reflection pass
+	// draws, in upstream's own order - Landscape::drawWater is the list:
+	//
+	//     sky_->drawBackdrop(true);   // sky colour, stars, the sun
+	//     sky_->drawLayers();         // the clouds over them
+	//     actualDrawLandReflection();
+	//     RenderTargets::instance()->draw(true);          // tanks, scenery
+	//     ScorchedClient::instance()->getParticleEngine().draw(0);
+	//
+	// plus the shots in flight, which upstream leaves out for a structural
+	// reason rather than a visual one (see drawShotsPass). What upstream
+	// leaves out and so does this: the water's own points, which its own
+	// comment calls "bad reflections in large wind".
 	const int reflectionLevel = g_reflectionStyle.load();
 	const bool wantReflection =
 		reflectionLevel > 0 && waterVisible && surfaceWidth > 0 && surfaceHeight > 0;
@@ -5422,16 +5663,24 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				reflView.m[0], reflView.m[4], reflView.m[8],
 				reflView.m[1], reflView.m[5], reflView.m[9],
 				tanf(kFovYRadians * 0.5f), aspect);
+		// The clouds, stars and sun, which upstream's drawLayers() puts in
+		// its reflection as well - a mirrored gradient under a clouded sky
+		// was the giveaway that this was only half a reflection.
+		drawSkyLayersPass(reflMvp, reflView);
 		drawLandPass(reflMvp, true);
 		if (reflectionLevel >= 2) {
-			// Everything else solid: the scenery and the tanks. Not the
-			// shots, explosions or smoke - those are additive sprites drawn
-			// after the water in this renderer, and a mirrored copy of them
-			// under the surface reads as a second explosion rather than as a
-			// reflection. Upstream reflects them; this is where the two
-			// differ, and it is a deliberate stop rather than an oversight.
-			drawSceneryPass(reflMvp);
-			drawTanksPass(reflMvp, false);
+			// Everything else, with upstream's waterline rule applied to
+			// each: anything whose position is under the surface is skipped,
+			// because mirroring would raise it back above one.
+			drawSceneryPass(reflMvp, waterHeight);
+			drawTanksPass(reflMvp, false, waterHeight);
+			drawShotsPass(reflMvp, false, waterHeight);
+			// The explosions, smoke and trails. Point sizes are measured
+			// against the screen's height, so the half-resolution buffer
+			// needs them scaled to match - otherwise every puff reflects at
+			// twice its size.
+			drawEffects(reflMvp, eyeX, reflEyeY, eyeZ, kFovYRadians,
+						(float) rh / (float) std::max(surfaceHeight, 1), waterHeight);
 		}
 		glFrontFace(GL_CCW);
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -5444,63 +5693,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			view.m[1], view.m[5], view.m[9],
 			tanf(kFovYRadians * 0.5f), aspect);
 
-	// Stars first, then the sun, then the clouds over both. Stars share the
-	// cloud plane and shader but never scroll - that is what upstream's
-	// "skytexturestatic" means - and are drawn at upstream's own 0.7 alpha.
-	if (cloudsVisible && starTexture != 0 && cloudProgram != 0) {
-		glUseProgram(cloudProgram);
-		glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, mvp.m);
-		glUniform2f(cloudScrollLoc, 0.0f, 0.0f);
-		glUniform1f(cloudTexScaleLoc, 1.0f / 700.0f);
-		glUniform3f(cloudTintLoc, 1.0f, 1.0f, 1.0f);
-		glUniform1f(cloudOpacityLoc, 0.7f);
-		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, starTexture);
-		glUniform1i(cloudSamplerLoc, 0);
-		glEnable(GL_BLEND);
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		glDepthMask(GL_FALSE);
-		glDisable(GL_CULL_FACE);
-		glBindVertexArray(cloudVao);
-		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
-		glEnable(GL_CULL_FACE);
-		glDepthMask(GL_TRUE);
-		glDisable(GL_BLEND);
-		glBindVertexArray(0);
-	}
-
-	drawSunSprite(mvp, view);
-
-	// Clouds sit between the sky and everything solid. Blended, and with
-	// no depth writes, so terrain drawn afterwards always wins - the layer
-	// is above the world but is not something you can hide behind.
-	if (cloudsVisible && cloudProgram != 0) {
-		glUseProgram(cloudProgram);
-		glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, mvp.m);
-		glUniform2f(cloudScrollLoc, cloudScrollX, cloudScrollY);
-		// One tile per 400 units - big enough that the repeat isn't the
-		// first thing the eye finds.
-		glUniform1f(cloudTexScaleLoc, 1.0f / 400.0f);
-		// Tinted by the sun so a night map's clouds aren't daylit.
-		glUniform3f(cloudTintLoc,
-					0.4f + skyDescription.sunColor[0] * 0.6f,
-					0.4f + skyDescription.sunColor[1] * 0.6f,
-					0.4f + skyDescription.sunColor[2] * 0.6f);
-		glUniform1f(cloudOpacityLoc, 0.75f);
-		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, cloudTexture);
-		glUniform1i(cloudSamplerLoc, 0);
-		glEnable(GL_BLEND);
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		glDepthMask(GL_FALSE);
-		glDisable(GL_CULL_FACE);
-		glBindVertexArray(cloudVao);
-		frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
-		glEnable(GL_CULL_FACE);
-		glDepthMask(GL_TRUE);
-		glDisable(GL_BLEND);
-		glBindVertexArray(0);
-	}
+	drawSkyLayersPass(mvp, view);
 
 	// W3: the land, as one callable pass - the reflection draws it a
 	// second time from the mirrored camera, and duplicating seventy
@@ -5821,101 +6014,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	drawPoints(mvp, unmodelledOther, 26.0f, 0.95f, 0.25f, 0.2f);
 	drawPoints(mvp, unmodelledMine, 26.0f, 0.2f, 0.9f, 0.95f);
 
-	// Real in-flight shot/explosion positions, straight from the running
-	// simulation's ActionController. Shots also report which tank fired
-	// them, so each one can use that tank's own projectile model (see the
-	// shotPlayerIds addition in patch 0009) rather than one shared mesh.
-	std::vector<float> unmodelledShots, explosionPositions;
-	glUseProgram(meshProgram);
-	glUniform3f(meshLightDirLoc, 0.4f, 0.82f, 0.35f);
-	glUniform3f(meshFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-	glUniform1f(meshFogDensityLoc, skyDescription.fogDensity);
-	glUniform4f(meshColorLoc, 0.95f, 0.9f, 0.4f, 1.0f);
-	for (size_t i = 0; i < shotPositionsRaw.size(); i++) {
-		FixedVector &p = shotPositionsRaw[i];
-		float wx = p[0].asFloat(), wy = p[2].asFloat(), wz = worldZFromEngineY(p[1].asFloat());
-
-		// Upstream's precedence, all three steps of it (see
-		// Accessory::getWeaponMesh): the weapon's own <projectilemodel>,
-		// then the firing tank's, then a default missile for everything
-		// else. That last step is the one that matters - almost no weapon
-		// and almost no tank declares a projectile model, so without it the
-		// Baby Missile and most of the arsenal flew as a bare dot. It is
-		// also why a Gorilla throws bananas and Bender throws bottles:
-		// those tanks declare one and their shots inherit it.
-		//
-		// The first step was reading the accessory's own <model>, which is
-		// its inventory model, not the projectile's - a different field
-		// that these weapons do not set either. The weapon now comes from
-		// the shot itself rather than from its accessory (see patch 0009):
-		// for a weapon built out of other weapons those are different
-		// objects, and only the shot's own is a WeaponProjectile.
-		Model *projectileModel = nullptr;
-		float projectileScale = 1.0f;
-		if (i < shotWeapons.size() && shotWeapons[i]) {
-			{
-				WeaponProjectile *projectile = shotWeapons[i];
-				projectileModel = loadModelSafely(projectile->getModelID());
-				// <projectilescale>, which upstream applies on top of the
-				// mesh's own size normalisation. The Baby Missile is half
-				// size by it, and looks it beside a real Missile.
-				projectileScale = projectile->getScale(*ctx).asFloat();
-				// Flame and smoke trail. Upstream emits these from particle
-				// emitters attached to the shot (MissileActionRenderer), and
-				// both default to *on* for every projectile - so this is what
-				// makes an ordinary missile read as a missile rather than a
-				// travelling dot. Per-weapon colours, sizes and lifetimes are
-				// the weapon's own.
-				emitProjectileTrail(projectile, wx, wy, wz);
-			}
-		}
-		if (!projectileModel && i < shotPlayerIds.size()) {
-			Tanket *firer = ctx->getTargetContainer().getTanketById(shotPlayerIds[i]);
-			Tank *firerTank = (firer && firer->getType() == Target::TypeTank) ? (Tank *) firer : nullptr;
-			if (firerTank) {
-				TankModel *tankModel = firerTank->getModelContainer().getTankModel();
-				if (tankModel) {
-					projectileModel = loadModelSafely(tankModel->getProjectileModelID());
-				}
-			}
-		}
-		if (!projectileModel) projectileModel = loadModelSafely(defaultProjectileModelId());
-
-		GpuModel *gpu = uploadModel(projectileModel);
-		if (!gpu) {
-			unmodelledShots.push_back(wx); unmodelledShots.push_back(wy); unmodelledShots.push_back(wz);
-			continue;
-		}
-		// Point the mesh along its actual flight path: a bearing about the
-		// up axis, then a pitch about X, like upstream's MissileMesh::draw.
-		// Velocity is an engine-space (x, y, height) direction.
-		//
-		// Re-derived for the corrected landscape-to-world map rather than
-		// carried over: the mesh's forward axis is world -Z after the
-		// upload's remap, so rotateY(a) * rotateX(b) sends it to
-		// (-cos b * sin a, sin b, -cos b * cos a). Matching that to the
-		// world velocity (vx, vz, -vy) gives b = asin(vz) and
-		// a = atan2(-vx, vy).
-		Mat4 orientation = Mat4::identity();
-		if (i < shotVelocities.size()) {
-			FixedVector &vel = shotVelocities[i];
-			float vx = vel[0].asFloat(), vy = vel[1].asFloat(), vz = vel[2].asFloat();
-			float len = sqrtf(vx * vx + vy * vy + vz * vz);
-			if (len > 0.0001f) {
-				vx /= len; vy /= len; vz /= len;
-				float angXY = atan2f(-vx, vy);
-				float angYZ = asinf(std::min(1.0f, std::max(-1.0f, vz)));
-				orientation = Mat4::multiply(Mat4::rotateY(angXY), Mat4::rotateX(angYZ));
-			}
-		}
-		Mat4 model = Mat4::multiply(
-			Mat4::translate(wx, wy, wz),
-			Mat4::multiply(orientation, Mat4::scale(gpu->scale * projectileScale)));
-		Mat4 shotMvp = Mat4::multiply(mvp, model);
-		drawMeshGroup(gpu->hull, meshMvpLoc, shotMvp);
-		drawMeshGroup(gpu->turret, meshMvpLoc, shotMvp);
-		drawMeshGroup(gpu->gun, meshMvpLoc, shotMvp);
-	}
+	drawShotsPass(mvp, true);
 
 	for (FixedVector &p : explosionPositionsRaw) {
 		explosionPositions.push_back(p[0].asFloat());
@@ -6376,11 +6475,19 @@ Java_com_rm_scorchdroid_NativeBridge_setRenderOptions(
 // effect on the next landscape build, which the renderer forces as soon as
 // it sees the value change.
 // W3: how much the water reflects - 0 for the sky's own colours, 1 for the
-// sky and the land, 2 for the tanks and scenery as well, which is upstream's
-// own reflection short of its effects.
+// sky and the land, 2 for everything upstream reflects.
+//
+// Clamped to the range rather than tested against a single value: this was
+// `style == 1 ? 1 : 0` when it grew a third setting, which quietly mapped
+// "Everything" back onto "Sky" - the top of the slider turned reflections
+// off altogether, and looked exactly like a setting that had no effect.
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_setReflectionStyle(JNIEnv *env, jobject, jint style) {
-    g_reflectionStyle.store(style == 1 ? 1 : 0);
+    const int level = std::min(std::max((int) style, 0), 2);
+    g_reflectionStyle.store(level);
+    // Logged because the failure above was invisible: the setting moved, the
+    // renderer did nothing, and there was no way to tell which end was wrong.
+    LOGI("Water reflections: level %d (asked for %d)", level, (int) style);
 }
 
 // W4: which sea to draw - 0 for this port's two sine waves, 1 for
