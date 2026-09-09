@@ -195,6 +195,7 @@ namespace
 	GLuint waterProgram = 0, waterVao = 0, waterVbo = 0;
 	GLint  waterMvpLoc = -1, waterUpwellTopLoc = -1, waterUpwellBotLoc = -1;
 	GLint  waterHeightLoc = -1, waterSunDiffuseLoc = -1;
+	GLint  waterNoise0Loc = -1, waterNoise1Loc = -1;
 	GLint  waterShadowTexLoc = -1, waterShadowMatrixLoc = -1, waterShadowEnabledLoc = -1;
 	GLint  waterAlphaLoc = -1, waterTimeLoc = -1;
 	GLint  waterSkyHorizonLoc = -1, waterSkyZenithLoc = -1, waterEyePosLoc = -1;
@@ -1338,9 +1339,23 @@ namespace
 		uniform float uUseReflection;
 		uniform highp sampler2DShadow uShadowTex;
 		uniform int uShadowEnabled;
+		// Upstream's two noise layers: xy is the scroll offset, z the scale
+		// (its noise_xform_0 / noise_xform_1).
+		uniform vec3 uNoise0;
+		uniform vec3 uNoise1;
 
 		// Upstream's water shininess, from water.fshader.
 		const float kWaterShininess = 120.0;
+
+		// The slope of a small ripple field. This stands in for upstream's
+		// normal map, which it generates from the wave height field and
+		// samples at two scales - it has no equivalent here, and a handful of
+		// sines costs less than carrying one.
+		vec2 rippleSlope(vec2 p) {
+			return vec2(
+				cos(p.x * 6.2831) * 0.5 + cos((p.x + p.y) * 6.6) * 0.3,
+				cos(p.y * 5.1000) * 0.5 + cos((p.x - p.y) * 5.5) * 0.3);
+		}
 
 		float sunShadow() {
 			if (uShadowEnabled == 0) return 1.0;
@@ -1354,7 +1369,22 @@ namespace
 			// no longer comes from a pair of sines.
 			float a = sin(vWorld.x * 0.09 + uTime * 0.7);
 
-			vec3 n = normalize(vNormal);
+			float fogFactor = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
+
+			// Upstream's two noise layers, added to the geometric normal:
+			//   N = normalize(normal + N0 + N1)
+			// with both faded out by the fog factor. This is not decoration.
+			// The far water here is one flat quad with a constant normal, so
+			// without it every point shares a reflection vector and the
+			// specular term - pow(dot(R,E), 120) - stops being a glitter path
+			// and becomes one solid saturated lobe covering half the sea.
+			// That was the white water: a moon reflection with no surface to
+			// break it up. Upstream never has a flat normal to begin with.
+			vec2 t0 = vWorld * uNoise0.z + uNoise0.xy;
+			vec2 t1 = vWorld * uNoise1.z + uNoise1.xy;
+			vec2 s0 = rippleSlope(t0) * 0.30 * fogFactor;
+			vec2 s1 = rippleSlope(t1) * 0.18 * fogFactor;
+			vec3 n = normalize(vNormal + vec3(-s0.x - s1.x, 0.0, -s0.y - s1.y));
 			// E, the direction *to* the viewer, and L, the direction to the
 			// sun - both as upstream's shader has them.
 			vec3 E = normalize(uEyePos - vWorldPos);
@@ -1421,8 +1451,7 @@ namespace
 				foam = max(foam - (1.0 - s0) * 0.5, 0.0);
 				water = mix(water, uSunDiffuse, foam);
 			}
-			float fog = clamp(exp(-uFogDensity * vViewDepth), 0.0, 1.0);
-			fragColor = vec4(mix(uFogColor, water, fog), uAlpha);
+			fragColor = vec4(mix(uFogColor, water, fogFactor), uAlpha);
 		}
 	)";
 
@@ -4299,6 +4328,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterUpwellBotLoc = glGetUniformLocation(waterProgram, "uUpwellBot");
 	waterHeightLoc = glGetUniformLocation(waterProgram, "uWaterHeight");
 	waterSunDiffuseLoc = glGetUniformLocation(waterProgram, "uSunDiffuse");
+	waterNoise0Loc = glGetUniformLocation(waterProgram, "uNoise0");
+	waterNoise1Loc = glGetUniformLocation(waterProgram, "uNoise1");
 	waterReflectMatrixLoc = glGetUniformLocation(waterProgram, "uReflectMatrix");
 	waterShadowTexLoc = glGetUniformLocation(waterProgram, "uShadowTex");
 	waterShadowMatrixLoc = glGetUniformLocation(waterProgram, "uShadowMatrix");
@@ -6360,6 +6391,34 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform1f(waterHeightLoc, waterHeight);
 		glUniform3f(waterSunDiffuseLoc, skyDescription.diffuse[0],
 					skyDescription.diffuse[1], skyDescription.diffuse[2]);
+
+		// Upstream's own noise scroll, from Water2Renderer::drawWaterShaders:
+		//   D_0 = windDir1 * (windSpeed1 / (-64 * 6))
+		//   D_1 = windDir2 * (windSpeed2 / (-16 * 6))
+		//   noise_n_pos = D_n * (totalTime / 24), z = 8/256 and 32/256
+		// with windSpeed1 the game's own wind mapped its way (speed*2 + 3).
+		// The second layer is a slightly faster, slightly turned copy of the
+		// first, which is what stops the two from beating against each other.
+		{
+			Wind &waterWind = ctx->getSimulator().getWind();
+			FixedVector dir = waterWind.getWindDirection();
+			float wdx = dir[0].asFloat(), wdz = -dir[1].asFloat();
+			const float wlen = sqrtf(wdx * wdx + wdz * wdz);
+			if (wlen < 0.01f) { wdx = 0.707f; wdz = 0.707f; }   // a dead calm still drifts
+			else { wdx /= wlen; wdz /= wlen; }
+			const float speed1 = waterWind.getWindSpeed().asFloat() * 2.0f + 3.0f;
+			const float speed2 = speed1 * 1.15f;
+			const float t = (float) fmod(lastFrameSeconds, 3600.0) * 24.0f / 24.0f;
+			const float d0 = speed1 / (-64.0f * 6.0f) * t;
+			const float d1 = speed2 / (-16.0f * 6.0f) * t;
+			// The second layer is turned a little off the wind, as upstream
+			// jitters its own second direction.
+			const float c = 0.966f, s = 0.259f;   // 15 degrees
+			glUniform3f(waterNoise0Loc, wdx * d0, wdz * d0, 8.0f / 256.0f);
+			glUniform3f(waterNoise1Loc,
+						(wdx * c - wdz * s) * d1, (wdx * s + wdz * c) * d1,
+						32.0f / 256.0f);
+		}
 		glUniform1f(waterAlphaLoc, waterAlpha);
 		glUniform1f(waterTimeLoc, (float) fmod(lastFrameSeconds, 3600.0));
 		// The same two ends of the gradient the sky dome is drawn from, so a
