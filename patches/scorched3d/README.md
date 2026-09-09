@@ -147,3 +147,8 @@ work in a new file under `porting/` rather than in the submodule.
   napalm events carry the weapon's texture set name, animate flag, life
   range, luminance, wind flag and explosion type/axis, so the renderer can
   draw upstream's textured particles. Fields only.
+- `0021-android-bitmap-rows-bottom-up.patch` - the port's BMP loader
+  (0005) turned rows over on the way in, so every `.bmp` texture was
+  upside down against the JPEG and PNG loaders and upstream's SDL path;
+  tank and ship skins sampled the wrong half of their image. Rows now
+  land bottom-up like the rest.

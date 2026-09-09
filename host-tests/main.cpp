@@ -57,6 +57,11 @@
 #include <weapons/WeaponMoveTank.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <image/ImageFactory.hpp>
+#include <3dsparse/ModelStore.hpp>
+#include <3dsparse/Model.hpp>
+#include <3dsparse/Mesh.hpp>
+#include <tank/TankModelStore.hpp>
+#include <tank/TankModel.hpp>
 #include <DeformEventQueue.h>
 #include <landscapedef/LandscapeDefinition.hpp>
 #include <landscapedef/LandscapeTex.hpp>
@@ -166,6 +171,47 @@ namespace
 		bool started = ScorchedServer::startServer(settings, true, nullptr);
 		check(started, "ScorchedServer::startServer() succeeds against real upstream data");
 		if (!started) return;
+
+		// Every tank model the base game offers, through the renderer's own
+		// sizing rule (ModelRendererTank: scale = 2.2 / size when the
+		// model is over 3 units). A model whose vertices lie far outside
+		// its own bounds, or whose bounds are empty, draws at raw size -
+		// which for a MilkShape tank is a building.
+		{
+			std::vector<TankModel *> &tankModels =
+				ScorchedServer::instance()->getTankModels().getModels();
+			int sane = 0, insane = 0;
+			for (size_t i = 0; i < tankModels.size(); i++)
+			{
+				ModelID &id = tankModels[i]->getTankModelID();
+				if (!id.modelValid()) continue;
+				Model *model = ModelStore::instance()->loadModel(id);
+				if (!model) { insane++; printf("  model %s: failed to load\n", tankModels[i]->getName()); continue; }
+				FixedVector minV = model->getMin(), maxV = model->getMax();
+				float dx = (maxV[0] - minV[0]).asFloat(), dy = (maxV[1] - minV[1]).asFloat(), dz = (maxV[2] - minV[2]).asFloat();
+				float size = sqrtf(dx * dx + dy * dy + dz * dz);
+				float scale = (size > 3.0f) ? 2.2f / size : 1.0f;
+				float farthest = 0.0f;
+				for (Mesh *mesh : model->getMeshes())
+					for (Vertex *v : mesh->getVertexes())
+					{
+						float r = sqrtf(v->position[0].asFloat() * v->position[0].asFloat() +
+							v->position[1].asFloat() * v->position[1].asFloat() +
+							v->position[2].asFloat() * v->position[2].asFloat());
+						farthest = std::max(farthest, r);
+					}
+				float drawn = farthest * scale;
+				if (drawn > 3.0f || size <= 0.0f)
+				{
+					insane++;
+					printf("  model %s (%s): size %.1f scale %.3f farthest vertex %.1f -> drawn radius %.1f\n",
+						tankModels[i]->getName(), id.getMeshName(), size, scale, farthest, drawn);
+				}
+				else sane++;
+			}
+			printf("  %d tank models draw within 3 units, %d do not\n", sane, insane);
+			check(insane == 0, "every tank model draws within the 2.2-unit sizing rule");
+		}
 
 		AccessoryStore &store = ScorchedServer::instance()->getAccessoryStore();
 		Accessory *babyMissile = store.findByPrimaryAccessoryName("Baby Missile");
@@ -799,6 +845,29 @@ namespace
 		DeformLandscape::flattenArea(server->getContext(), flatPos, false);
 		check(ScorchDroidLandscape::takeDirtyRegion(dMinX, dMinY, dMaxX, dMaxY),
 			"flattenArea reports a dirty region too, not just explosions");
+
+		// The BMP loader hands rows back bottom-up like the JPEG and PNG
+		// loaders (row 0 is the bottom of the picture). nimitz.bmp's bottom
+		// row averages 0.45 grey and its top row 0.50, measured outside the
+		// game; a loader that turned the rows over swapped them, and every
+		// .bmp skin sampled the wrong half of its image.
+		{
+			Image bmp = ImageFactory::loadImage(S3D::eModLocation, "data/meshes/carrier/nimitz.bmp");
+			check(bmp.getWidth() == 512 && bmp.getHeight() == 128 && bmp.getComponents() == 3,
+				  "nimitz.bmp loads as a 512x128 RGB image");
+			auto rowMean = [&](int y) {
+				double sum = 0.0;
+				for (int x = 0; x < bmp.getWidth(); x++) {
+					unsigned char *p = bmp.getBitsPos(x, y);
+					sum += (p[0] + p[1] + p[2]) / 3.0;
+				}
+				return sum / bmp.getWidth() / 255.0;
+			};
+			double bottom = rowMean(0), top = rowMean(bmp.getHeight() - 1);
+			printf("  nimitz.bmp row 0 mean %.3f, last row mean %.3f\n", bottom, top);
+			check(bottom > 0.42 && bottom < 0.47 && top > 0.48 && top < 0.52,
+				  "the BMP loader keeps rows bottom-up: row 0 is the picture's bottom row");
+		}
 
 		// A greyscale JPEG (the storm set, used by the cavern map) comes
 		// out of the loader with one channel; everything downstream reads
