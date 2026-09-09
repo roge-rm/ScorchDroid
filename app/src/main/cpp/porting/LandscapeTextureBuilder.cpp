@@ -180,6 +180,20 @@ Texture build(ScorchedContext &context, int size, std::string *error)
 	return build(capture(context), size, error);
 }
 
+Image toRGB(Image src)
+{
+	if (src.getWidth() <= 0 || src.getHeight() <= 0 || src.getComponents() != 1) return src;
+	Image out(src.getWidth(), src.getHeight(), false);
+	for (int y = 0; y < src.getHeight(); y++) {
+		for (int x = 0; x < src.getWidth(); x++) {
+			const unsigned char g = *src.getBitsPos(x, y);
+			unsigned char *to = out.getBitsPos(x, y);
+			to[0] = to[1] = to[2] = g;
+		}
+	}
+	return out;
+}
+
 namespace
 {
 	// Upstream's bitmapScale (addHeightToBitmap): the source textures are
@@ -222,7 +236,7 @@ Texture build(const Inputs &in, int size, std::string *error)
 	// eTextureFile is the simple one: the landscape ships a ready-made
 	// ground image, so there's nothing to blend - just resample it.
 	if (in.textureType == 2) {
-		Image loaded = ImageFactory::loadImage(S3D::eModLocation, in.texture);
+		Image loaded = toRGB(ImageFactory::loadImage(S3D::eModLocation, in.texture));
 		if (loaded.getWidth() <= 0) {
 			if (error) *error = std::string("could not load landscape texture image: ") + in.texture;
 			return result;
@@ -250,14 +264,17 @@ Texture build(const Inputs &in, int size, std::string *error)
 	// Same loader upstream uses - these are ordinary mod-relative image
 	// files, and src/common/image (png/jpg/bmp) is in our build.
 	const float bitmapScale = (float) size / 1024.0f;
+	// Every sampler below reads three channels per texel, and the storm
+	// and vulcano sets ship greyscale JPEGs, which the loader hands back
+	// with one - see toRGB.
 	Image loadedSources[kNumberSources] = {
-		ImageFactory::loadImage(S3D::eModLocation, in.texture0),
-		ImageFactory::loadImage(S3D::eModLocation, in.texture1),
-		ImageFactory::loadImage(S3D::eModLocation, in.texture2),
-		ImageFactory::loadImage(S3D::eModLocation, in.texture3),
+		toRGB(ImageFactory::loadImage(S3D::eModLocation, in.texture0)),
+		toRGB(ImageFactory::loadImage(S3D::eModLocation, in.texture1)),
+		toRGB(ImageFactory::loadImage(S3D::eModLocation, in.texture2)),
+		toRGB(ImageFactory::loadImage(S3D::eModLocation, in.texture3)),
 	};
-	Image loadedRock = ImageFactory::loadImage(S3D::eModLocation, in.rockside);
-	Image loadedShore = ImageFactory::loadImage(S3D::eModLocation, in.shore);
+	Image loadedRock = toRGB(ImageFactory::loadImage(S3D::eModLocation, in.rockside));
+	Image loadedShore = toRGB(ImageFactory::loadImage(S3D::eModLocation, in.shore));
 
 	const std::string *sourceNames[kNumberSources] = {
 		&in.texture0, &in.texture1, &in.texture2, &in.texture3,

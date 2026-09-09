@@ -24,6 +24,8 @@ class ScorchedContext;
 // Deliberately GL-free and returning a plain pixel buffer, so the terrain
 // texture can be generated and checked without an EGL context (see
 // host-tests) - renderer_jni.cpp does the glTexImage2D upload separately.
+#include <image/Image.hpp>
+
 namespace LandscapeTextureBuilder
 {
 	struct Texture
@@ -82,6 +84,15 @@ namespace LandscapeTextureBuilder
 
 	// G2: the landscape's <detail> image as RGB, or an empty texture.
 	Texture loadDetail(const Inputs &inputs);
+
+	// A greyscale image (one component - what ImageJpgFactory returns for
+	// a greyscale JPEG, and the storm and vulcano texture sets are all
+	// greyscale JPEGs) widened to three equal channels. Anything else is
+	// returned unchanged. Every consumer of a landscape image here and in
+	// the renderer reads three channels, and reading three out of a
+	// one-channel buffer scrambles the picture into hue noise and then
+	// runs off the end of it.
+	Image toRGB(Image image);
 
 	// Generates a `size` x `size` RGB ground texture for the landscape
 	// currently loaded in [context]. Returns an invalid Texture if there's
