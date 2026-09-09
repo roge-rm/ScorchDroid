@@ -69,8 +69,8 @@ different; **missing** = not drawn at all.
 | Item | Upstream | Port | Status |
 |---|---|---|---|
 | Tank model | `.ase` hull/turret/gun, turret and gun rotate with aim | Same | match |
-| **Model textures** | Meshes draw their `*BITMAP` textures; tanks draw their skin `.jpg` (e.g. `tanks/a7v.jpg`) | **Every model is a flat colour**: tanks the player colour, scenery a fixed colour; no UVs uploaded | **gap** (V2) |
-| **Model materials** | Per-mesh ambient/diffuse/specular from the `.ase` | Not read | gap (V3, with the lighting) |
+| Model textures | Meshes draw their `*BITMAP` textures; tanks draw their skin `.jpg` (e.g. `tanks/a7v.jpg`); `/sphere_` textures are sphere-mapped | Same: UVs from `Face::tcoord`, textures by name with the alpha image, the skin on every `.ase` mesh, sphere map in the vertex shader (V2) | match |
+| Model materials | Per-mesh ambient/diffuse/emissive (specular is zero for `GL_LIGHT1`) from the `.ase`/MilkShape material, the "no texture" set when the model has no textures | Same, per mesh range; lit per vertex by the sun at its position with `<skyambience>`/`<skydiffuse>` and the 0.2 global ambient; no player-colour tint, as upstream has none (V3) | match |
 | Recoil | `fireOffSet_` = −0.25 on firing, the gun slides back and recovers over ~6 s | None | gap (V7) |
 | Shield | Textured sphere or hemisphere (`shield.bmp`, `grid2`, `shield2` magnetic), shield colour, flash on hit | Sphere/box/hemisphere drawn, hit ring of sparks | close; textures missing (V5) |
 | Parachute | Model drawn above a falling tank | Same | match |
@@ -145,6 +145,14 @@ V-numbers, ordered by how much they change the picture.
 - Budget: same particle counts as now; a textured quad costs no more than
   a point sprite on a tile GPU. No new setting; Effects detail already
   caps the count.
+
+**Status (2026-09-09): V1 acc9ae0, V2+V3 the commit after e3b6717.** V2
+and V3 add no setting: the textures are the models' own small images and
+the light is per vertex, cheaper than the per-fragment shade it replaced;
+draw calls rise only by the number of distinct materials per model
+(a T-55 3, a Bradley 5). Upstream's tree material (ambient 0.4, diffuse 1)
+and light are applied to the port's own tree program too. Emulator: the
+T-55 draws its olive skin, turret and barrel shaded by the sun.
 
 ### V2 – Textured models
 
