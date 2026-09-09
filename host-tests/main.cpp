@@ -881,14 +881,15 @@ namespace
 					else unchanged++;
 					deltaTotal += (before - after);
 				}
-				// Lighting here only ever multiplies by <= 1, so nothing
-				// may come out brighter - if any does, the light map has
-				// been applied to the wrong buffer or scaled wrongly.
-				check(brighter == 0, "baking light never brightens a texel");
+				// G3: upstream multiplies by light * 1.2, so ground in full
+				// sun comes out up to 20% brighter and ground in shadow
+				// darker. Both must happen on a real landscape; if neither
+				// does the map was applied to the wrong buffer.
+				check(brighter > 0, "baking light brightens sunlit ground (upstream's 1.2)");
 				check(darker > 0, "the light map actually changes the ground");
 				// And it must not flatten the whole thing to black, which
 				// is what a broken sun direction or normal would do.
-				check(unchanged + darker == (int) ground.rgb.size(),
+				check(unchanged + darker + brighter == (int) ground.rgb.size(),
 					"every texel is accounted for");
 				printf("  (light map: %d texels darkened, mean drop %.1f/255)\n",
 					darker, (double) deltaTotal / (double) ground.rgb.size());
