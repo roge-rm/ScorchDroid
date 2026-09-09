@@ -109,7 +109,10 @@ with clients joining via `WifiNetworkSpecifier`. That API has grown fragile —
 `getSoftApConfiguration()`, and the whole path needs location services actually
 switched on.
 
-## Phase 3 — Bluetooth RFCOMM via a transport bridge (not started)
+## Phase 3 — Bluetooth RFCOMM via a transport bridge (not started, parked)
+
+Parked 2026-09-09 in favour of other work, so this section is a design to pick
+up from rather than something in progress.
 
 Deliberately gated behind Phase 1's device test: Wi-Fi Direct removes the
 "we need a router" problem for the large majority of cases at a fraction of
