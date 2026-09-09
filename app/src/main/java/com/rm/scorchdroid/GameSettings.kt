@@ -238,8 +238,14 @@ class GameSettings(context: Context) {
      * this port's own; 1 adds the land, drawn a second time from a camera
      * mirrored in the water; 2 adds the tanks and scenery, which is what
      * Scorched3D reflects short of its effects.
+     *
+     * Defaults to the top, like every other quality setting here. It used to
+     * default to 0, which was both the lowest of the three and the only one
+     * that is not what Scorched3D does - so a fresh install got this port's
+     * invention rather than upstream's water, and got it at the cheapest
+     * setting, without anyone choosing either.
      */
-    var reflectionLevel by mutableIntStateOf(prefs.getInt(KEY_REFLECT, 0))
+    var reflectionLevel by mutableIntStateOf(prefs.getInt(KEY_REFLECT, 2))
         private set
 
     fun updateReflectionLevel(value: Int) {
@@ -285,11 +291,16 @@ class GameSettings(context: Context) {
      * How many particles may be alight at once - flame trails, explosions,
      * smoke, and a napalm field's fire, which is far and away the biggest
      * consumer. Upstream's own setting and upstream's own three sizes: 100 at
-     * low, 6000 at normal, 10000 at high (ScorchedClient.cpp). Normal is
-     * upstream's default and therefore the faithful one; low is a real rescue
-     * for a device that cannot draw a burning map.
+     * low, 6000 at normal, 10000 at high (ScorchedClient.cpp).
+     *
+     * Defaults to high. Upstream's own default is normal, so this is the one
+     * place these two rules pull apart - but high is still upstream's number
+     * rather than an invention, and the setting exists precisely so the
+     * player decides where to sit on that trade rather than inheriting a
+     * compromise nobody picked. Low is a real rescue for a device that cannot
+     * draw a burning map.
      */
-    var effectsDetail by mutableIntStateOf(prefs.getInt(KEY_EFFECTS, 1))
+    var effectsDetail by mutableIntStateOf(prefs.getInt(KEY_EFFECTS, 2))
         private set
 
     fun updateEffectsDetail(value: Int) {
