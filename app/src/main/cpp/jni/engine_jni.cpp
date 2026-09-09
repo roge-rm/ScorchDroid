@@ -3,6 +3,7 @@
 #include <string>
 #include <unistd.h>
 #include <cstdlib>
+#include <ctime>
 #include <mutex>
 
 // Guards ScorchedServer state shared between this simulation thread and the
@@ -327,6 +328,14 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
         LOGE("startLocalGame: engine already started (mode=%d)", (int) g_mode);
         return JNI_FALSE;
     }
+    // Upstream's main() seeds the C library's generator once at startup
+    // (common/main.hpp: srand(time)), and the port never ran that main.
+    // The landscape for each round and its terrain seed come from rand()
+    // (LandscapeDefinitions::getRandomLandscapeDefn), so without this every
+    // launch replayed the same maps in the same order with the same
+    // heightmaps. The simulator's own generator is seeded separately and
+    // was never affected.
+    srand((unsigned int) time(nullptr));
     // M10: the server reads the player's own setup rather than the shipped
     // config directly. Written out first, because some options - the mod above
     // all - are consumed *inside* startServerInternal(), which calls
