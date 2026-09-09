@@ -85,33 +85,151 @@ namespace
 namespace LandscapeTextureBuilder
 {
 
+// HeightMap::getHeight: zero outside the map.
+float Snapshot::heightAt(int x, int y) const
+{
+	if (x < 0 || y < 0 || x > width || y > height) return 0.0f;
+	return heights[(size_t) y * (width + 1) + x];
+}
+
+// HeightMap::getInterpHeight, transcribed.
+float Snapshot::interpHeight(float w, float h) const
+{
+	const float fw = floorf(w), fh = floorf(h);
+	const int ix = (int) fw, iy = (int) fh;
+	const float fx = w - fw, fy = h - fh;
+	const float a = heightAt(ix, iy), b = heightAt(ix, iy + 1);
+	const float c = heightAt(ix + 1, iy), d = heightAt(ix + 1, iy + 1);
+	const float e = a + (b - a) * fy;
+	const float f = c + (d - c) * fy;
+	return e + (f - e) * fx;
+}
+
+// HeightMap::getInterpNormal, transcribed: a bilinear blend of the four
+// corner normals, not renormalised - upstream does not either.
+void Snapshot::interpNormal(float w, float h, float out[3]) const
+{
+	const float fw = floorf(w), fh = floorf(h);
+	const int ix = (int) fw, iy = (int) fh;
+	const float fx = w - fw, fy = h - fh;
+	auto normalAt = [&](int x, int y, float n[3]) {
+		if (x < 0 || y < 0 || x > width || y > height) { n[0] = 0; n[1] = 0; n[2] = 1; return; }
+		const float *src = &normals[((size_t) y * (width + 1) + x) * 3];
+		n[0] = src[0]; n[1] = src[1]; n[2] = src[2];
+	};
+	float a[3], b[3], c[3], d[3];
+	normalAt(ix, iy, a); normalAt(ix, iy + 1, b);
+	normalAt(ix + 1, iy, c); normalAt(ix + 1, iy + 1, d);
+	for (int i = 0; i < 3; i++) {
+		const float e = a[i] + (b[i] - a[i]) * fy;
+		const float f = c[i] + (d[i] - c[i]) * fy;
+		out[i] = e + (f - e) * fx;
+	}
+}
+
+Inputs capture(ScorchedContext &context)
+{
+	Inputs in;
+	HeightMap &hmap = context.getLandscapeMaps().getGroundMaps().getHeightMap();
+	const int w = hmap.getMapWidth(), h = hmap.getMapHeight();
+	if (w <= 0 || h <= 0) return in;
+
+	in.map.width = w;
+	in.map.height = h;
+	in.map.heights.resize((size_t) (w + 1) * (h + 1));
+	in.map.normals.resize((size_t) (w + 1) * (h + 1) * 3);
+	for (int y = 0; y <= h; y++) {
+		for (int x = 0; x <= w; x++) {
+			const size_t i = (size_t) y * (w + 1) + x;
+			in.map.heights[i] = hmap.getHeight(x, y).asFloat();
+			FixedVector &n = hmap.getNormal(x, y);
+			in.map.normals[i * 3 + 0] = n[0].asFloat();
+			in.map.normals[i * 3 + 1] = n[1].asFloat();
+			in.map.normals[i * 3 + 2] = n[2].asFloat();
+		}
+	}
+
+	LandscapeTex *tex = context.getLandscapeMaps().getDefinitions().getTex();
+	if (tex && tex->texture) {
+		if (tex->texture->getType() == LandscapeTexType::eTextureGenerate) {
+			LandscapeTexTextureGenerate *g = (LandscapeTexTextureGenerate *) tex->texture;
+			in.textureType = 1;
+			in.texture0 = g->texture0; in.texture1 = g->texture1;
+			in.texture2 = g->texture2; in.texture3 = g->texture3;
+			in.rockside = g->rockside; in.shore = g->shore;
+		} else if (tex->texture->getType() == LandscapeTexType::eTextureFile) {
+			LandscapeTexTextureFile *f = (LandscapeTexTextureFile *) tex->texture;
+			in.textureType = 2;
+			in.texture = f->texture;
+			in.surroundTexture = f->surroundTexture;
+		}
+	}
+	if (tex) in.detail = tex->detail;
+
+	ScorchDroidSky::Description sky = ScorchDroidSky::describe(context);
+	for (int c = 0; c < 3; c++) {
+		in.sunPosition[c] = sky.sunPosition[c];
+		in.ambience[c] = sky.ambience[c];
+		in.diffuse[c] = sky.diffuse[c];
+	}
+	return in;
+}
+
 Texture build(ScorchedContext &context, int size, std::string *error)
+{
+	return build(capture(context), size, error);
+}
+
+namespace
+{
+	// Upstream's bitmapScale (addHeightToBitmap): the source textures are
+	// read one source pixel per output texel, wrapping, so a 256-pixel
+	// texture repeats every 256 texels - every 64 map units at upstream's
+	// default 1024. At any other size the sources are first resized by
+	// size / 1024 (createResize is a nearest resample) so the repeat in
+	// map units stays the same. Without this a 512 texture had every
+	// source repeating every 128 units, twice as coarse as upstream.
+	Image rescaleSource(Image &src, float scale)
+	{
+		if (scale == 1.0f || src.getWidth() <= 0 || src.getHeight() <= 0) return src;
+		const int w = std::max(1, (int) (scale * src.getWidth()));
+		const int h = std::max(1, (int) (scale * src.getHeight()));
+		Image out(w, h, src.getComponents() == 4);
+		const int comps = out.getComponents();
+		for (int y = 0; y < h; y++) {
+			const int sy = std::min(src.getHeight() - 1, y * src.getHeight() / h);
+			for (int x = 0; x < w; x++) {
+				const int sx = std::min(src.getWidth() - 1, x * src.getWidth() / w);
+				unsigned char *from = src.getBitsPos(sx, sy);
+				unsigned char *to = out.getBitsPos(x, y);
+				for (int c = 0; c < comps && c < src.getComponents(); c++) to[c] = from[c];
+			}
+		}
+		return out;
+	}
+}
+
+Texture build(const Inputs &in, int size, std::string *error)
 {
 	Texture result;
 	auto fail = [&](const char *why) { if (error) *error = why; return result; };
 	if (size <= 0) return fail("bad size");
-
-	HeightMap &hmap = context.getLandscapeMaps().getGroundMaps().getHeightMap();
-	if (hmap.getMapWidth() <= 0 || hmap.getMapHeight() <= 0) return fail("no landscape generated yet");
-
-	LandscapeTex *tex = context.getLandscapeMaps().getDefinitions().getTex();
-	if (!tex || !tex->texture) return fail("landscape definition has no texture block");
+	if (!in.map.valid()) return fail("no landscape generated yet");
+	if (in.textureType == 0) return fail("landscape definition has no texture block");
 
 	// Upstream supports two ground-texture styles and real landscapes use
 	// both, so we need both too (see Landscape::generate()'s two branches).
 	// eTextureFile is the simple one: the landscape ships a ready-made
 	// ground image, so there's nothing to blend - just resample it.
-	if (tex->texture->getType() == LandscapeTexType::eTextureFile) {
-		LandscapeTexTextureFile *fileTex = (LandscapeTexTextureFile *) tex->texture;
-		Image loaded = ImageFactory::loadImage(S3D::eModLocation, fileTex->texture);
+	if (in.textureType == 2) {
+		Image loaded = ImageFactory::loadImage(S3D::eModLocation, in.texture);
 		if (loaded.getWidth() <= 0) {
-			if (error) *error = std::string("could not load landscape texture image: ") + fileTex->texture;
+			if (error) *error = std::string("could not load landscape texture image: ") + in.texture;
 			return result;
 		}
 
-		// Nearest-neighbour resample into our own buffer. Upstream calls
-		// Image::createResize() here, which this build of Image doesn't
-		// have - and sampling directly avoids the dependency entirely.
+		// Nearest-neighbour resample into our own buffer, which is what
+		// upstream's createResize(1024, 1024) does.
 		result.width = size;
 		result.height = size;
 		result.rgb.assign(size_t(size) * size * 3, 0);
@@ -129,38 +247,43 @@ Texture build(ScorchedContext &context, int size, std::string *error)
 		return result;
 	}
 
-	if (tex->texture->getType() != LandscapeTexType::eTextureGenerate) {
-		return fail("landscape texture style is neither eTextureGenerate nor eTextureFile");
-	}
-	LandscapeTexTextureGenerate *generate = (LandscapeTexTextureGenerate *) tex->texture;
-
 	// Same loader upstream uses - these are ordinary mod-relative image
 	// files, and src/common/image (png/jpg/bmp) is in our build.
-	Image sources[kNumberSources] = {
-		ImageFactory::loadImage(S3D::eModLocation, generate->texture0),
-		ImageFactory::loadImage(S3D::eModLocation, generate->texture1),
-		ImageFactory::loadImage(S3D::eModLocation, generate->texture2),
-		ImageFactory::loadImage(S3D::eModLocation, generate->texture3),
+	const float bitmapScale = (float) size / 1024.0f;
+	Image loadedSources[kNumberSources] = {
+		ImageFactory::loadImage(S3D::eModLocation, in.texture0),
+		ImageFactory::loadImage(S3D::eModLocation, in.texture1),
+		ImageFactory::loadImage(S3D::eModLocation, in.texture2),
+		ImageFactory::loadImage(S3D::eModLocation, in.texture3),
 	};
-	Image rock = ImageFactory::loadImage(S3D::eModLocation, generate->rockside);
-	Image shore = ImageFactory::loadImage(S3D::eModLocation, generate->shore);
+	Image loadedRock = ImageFactory::loadImage(S3D::eModLocation, in.rockside);
+	Image loadedShore = ImageFactory::loadImage(S3D::eModLocation, in.shore);
 
-	const char *sourceNames[kNumberSources] = {
-		generate->texture0.c_str(), generate->texture1.c_str(),
-		generate->texture2.c_str(), generate->texture3.c_str(),
+	const std::string *sourceNames[kNumberSources] = {
+		&in.texture0, &in.texture1, &in.texture2, &in.texture3,
 	};
 	for (int i = 0; i < kNumberSources; i++) {
-		if (sources[i].getWidth() <= 0) {
-			if (error) *error = std::string("could not load ground texture image: ") + sourceNames[i];
+		if (loadedSources[i].getWidth() <= 0) {
+			if (error) *error = std::string("could not load ground texture image: ") + *sourceNames[i];
 			return result;
 		}
 	}
+	Image sources[kNumberSources] = {
+		rescaleSource(loadedSources[0], bitmapScale),
+		rescaleSource(loadedSources[1], bitmapScale),
+		rescaleSource(loadedSources[2], bitmapScale),
+		rescaleSource(loadedSources[3], bitmapScale),
+	};
+	Image rock = rescaleSource(loadedRock, bitmapScale);
+	Image shore = rescaleSource(loadedShore, bitmapScale);
+
+	const Snapshot &hmap = in.map;
 
 	// Noise term needs the map's peak height (upstream scans for it too).
 	float maxMapHeight = 0.0f;
-	for (int y = 0; y < hmap.getMapHeight(); y++) {
-		for (int x = 0; x < hmap.getMapWidth(); x++) {
-			maxMapHeight = std::max(maxMapHeight, hmap.getHeight(x, y).asFloat());
+	for (int y = 0; y < hmap.height; y++) {
+		for (int x = 0; x < hmap.width; x++) {
+			maxMapHeight = std::max(maxMapHeight, hmap.heightAt(x, y));
 		}
 	}
 	if (maxMapHeight <= 0.0f) maxMapHeight = 1.0f;
@@ -169,24 +292,23 @@ Texture build(ScorchedContext &context, int size, std::string *error)
 	result.height = size;
 	result.rgb.assign(size_t(size) * size * 3, 0);
 
-	const float hdx = (float) hmap.getMapWidth() / (float) size;
-	const float hdy = (float) hmap.getMapHeight() / (float) size;
+	const float hdx = (float) hmap.width / (float) size;
+	const float hdy = (float) hmap.height / (float) size;
 
-	FixedVector normalVec;
 	for (int by = 0; by < size; by++) {
 		float hy = by * hdy;
 		for (int bx = 0; bx < size; bx++) {
 			float hx = bx * hdx;
 
-			hmap.getInterpNormal(fixed::fromFloat(hx), fixed::fromFloat(hy), normalVec);
-			float normalZ = normalVec[2].asFloat();
-			float height = hmap.getInterpHeight(fixed::fromFloat(hx), fixed::fromFloat(hy)).asFloat();
+			float normal[3];
+			hmap.interpNormal(hx, hy, normal);
+			float normalZ = normal[2];
+			float height = hmap.interpHeight(hx, hy);
 
 			// Sample the map from the opposite corner as cheap noise, so the
 			// height bands don't band up into visible contour lines.
-			float offsetHeight = hmap.getInterpHeight(
-				fixed::fromFloat((float) hmap.getMapWidth() - hx),
-				fixed::fromFloat((float) hmap.getMapHeight() - hy)).asFloat();
+			float offsetHeight = hmap.interpHeight(
+				(float) hmap.width - hx, (float) hmap.height - hy);
 			height *= (1.0f - (kNoiseMax / 2.0f)) + ((offsetHeight * kNoiseMax) / maxMapHeight);
 
 			// Which height band, and how far into it (for cross-fading).
@@ -243,6 +365,26 @@ Texture build(ScorchedContext &context, int size, std::string *error)
 		}
 	}
 
+	return result;
+}
+
+Texture loadDetail(const Inputs &in)
+{
+	Texture result;
+	if (in.detail.empty()) return result;
+	Image image = ImageFactory::loadImage(S3D::eModLocation, in.detail);
+	if (!image.getBits() || image.getWidth() <= 0 || image.getHeight() <= 0) return result;
+	result.width = image.getWidth();
+	result.height = image.getHeight();
+	result.rgb.resize((size_t) result.width * result.height * 3);
+	for (int y = 0; y < result.height; y++) {
+		for (int x = 0; x < result.width; x++) {
+			unsigned char *src = image.getBitsPos(x, y);
+			unsigned char *dest = &result.rgb[((size_t) y * result.width + x) * 3];
+			if (image.getComponents() == 1) { dest[0] = dest[1] = dest[2] = src[0]; }
+			else { dest[0] = src[0]; dest[1] = src[1]; dest[2] = src[2]; }
+		}
+	}
 	return result;
 }
 
@@ -363,7 +505,7 @@ Texture applyMovementMask(
 // [end] a texel at a time, reporting the greatest depth by which the ground
 // rises above the ray. That depth - not a distance along the ray - is what
 // upstream softens the shadow edge with.
-static bool findGroundIntersection(HeightMap &hMap,
+static bool findGroundIntersection(const Snapshot &hMap,
 								   float startX, float startY, float startZ,
 								   float endX, float endY, float endZ,
 								   float &depth, float stopDepth)
@@ -380,12 +522,11 @@ static bool findGroundIntersection(HeightMap &hMap,
 	if (scale < 0.0001f) return false;
 	dx /= scale; dy /= scale; dz /= scale;
 
-	const int width = hMap.getMapWidth();
-	const int height = hMap.getMapHeight();
+	const int width = hMap.width;
+	const int height = hMap.height;
 
 	while (px >= 0.0f && py >= 0.0f && px <= (float) width && py <= (float) height) {
-		const float ground =
-			hMap.getHeight((int) px, (int) py).asFloat() - 0.1f;
+		const float ground = hMap.heightAt((int) px, (int) py) - 0.1f;
 		const float above = ground - pz;
 		if (above > 0.0f) {
 			if (above > depth) depth = above;
@@ -399,12 +540,14 @@ static bool findGroundIntersection(HeightMap &hMap,
 
 bool applyLightMap(ScorchedContext &context, Texture &texture)
 {
+	return applyLightMap(capture(context), texture);
+}
+
+bool applyLightMap(const Inputs &in, Texture &texture)
+{
 	if (!texture.valid()) return false;
-
-	HeightMap &hMap = context.getLandscapeMaps().getGroundMaps().getHeightMap();
-	if (hMap.getMapWidth() <= 0 || hMap.getMapHeight() <= 0) return false;
-
-	ScorchDroidSky::Description sky = ScorchDroidSky::describe(context);
+	const Snapshot &hMap = in.map;
+	if (!hMap.valid()) return false;
 
 	// Upstream's own two constants: a 256x256 light map regardless of the
 	// texture's size, and a soft edge three units deep.
@@ -414,36 +557,33 @@ bool applyLightMap(ScorchedContext &context, Texture &texture)
 	std::vector<float> light((size_t) lightMapSize * lightMapSize * 3, 1.0f);
 	for (int y = 0; y < lightMapSize; y++) {
 		for (int x = 0; x < lightMapSize; x++) {
-			const float dx = (float) x / (float) lightMapSize * (float) hMap.getMapWidth();
-			const float dy = (float) y / (float) lightMapSize * (float) hMap.getMapHeight();
-			const float dz = hMap.getInterpHeight(
-				fixed::fromFloat(dx), fixed::fromFloat(dy)).asFloat();
+			const float dx = (float) x / (float) lightMapSize * (float) hMap.width;
+			const float dy = (float) y / (float) lightMapSize * (float) hMap.height;
+			const float dz = hMap.interpHeight(dx, dy);
 
-			FixedVector fixedNormal;
-			hMap.getInterpNormal(fixed::fromFloat(dx), fixed::fromFloat(dy), fixedNormal);
+			float normal[3];
+			hMap.interpNormal(dx, dy, normal);
 
-			float sx = sky.sunPosition[0] - dx;
-			float sy = sky.sunPosition[1] - dy;
-			float sz = sky.sunPosition[2] - dz;
+			float sx = in.sunPosition[0] - dx;
+			float sy = in.sunPosition[1] - dy;
+			float sz = in.sunPosition[2] - dz;
 			const float slen = std::sqrt(sx * sx + sy * sy + sz * sz);
 			if (slen > 0.0001f) { sx /= slen; sy /= slen; sz /= slen; }
 
 			// Upstream's half-lambert: (n.l)/2 + 0.5, so ground facing away
 			// still catches something rather than going flat black.
-			float lambert = (fixedNormal[0].asFloat() * sx +
-							 fixedNormal[1].asFloat() * sy +
-							 fixedNormal[2].asFloat() * sz) * 0.5f + 0.5f;
+			float lambert = (normal[0] * sx + normal[1] * sy + normal[2] * sz) * 0.5f + 0.5f;
 
 			float depth = 0.0f;
 			if (findGroundIntersection(hMap, dx, dy, dz,
-					sky.sunPosition[0], sky.sunPosition[1], sky.sunPosition[2],
+					in.sunPosition[0], in.sunPosition[1], in.sunPosition[2],
 					depth, softShadow)) {
 				lambert *= (depth < softShadow) ? (1.0f - depth / softShadow) : 0.0f;
 			}
 
 			float *out = &light[((size_t) y * lightMapSize + x) * 3];
 			for (int c = 0; c < 3; c++) {
-				out[c] = std::min(1.0f, sky.diffuse[c] * lambert + sky.ambience[c]);
+				out[c] = std::min(1.0f, in.diffuse[c] * lambert + in.ambience[c]);
 			}
 		}
 	}

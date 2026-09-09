@@ -35,6 +35,54 @@ namespace LandscapeTextureBuilder
 		bool valid() const { return width > 0 && height > 0 && rgb.size() == size_t(width) * height * 3; }
 	};
 
+	// G1: everything the builder reads from the engine, copied out under
+	// the engine lock so the build itself can run on a worker thread while
+	// the game goes on. Upstream generates on the client at load time
+	// behind a progress bar; at 1024 square the build is a second or so on
+	// a phone, which the GL thread cannot spend at the start of a round.
+	//
+	// The heightmap is a plain float copy with the normals already worked
+	// out (HeightMap::getNormal, called here while the lock is held). Not
+	// a HeightMap: its interpolation methods keep static scratch vectors,
+	// so a worker calling them alongside the engine thread would corrupt
+	// both sides' results. The bilinear reads are transcribed instead.
+	struct Snapshot
+	{
+		int width = 0, height = 0;         // cells; (width+1)*(height+1) samples
+		std::vector<float> heights;
+		std::vector<float> normals;        // x, y, z per sample
+		bool valid() const { return width > 0 && height > 0; }
+		float heightAt(int x, int y) const;
+		float interpHeight(float w, float h) const;
+		void  interpNormal(float w, float h, float out[3]) const;
+	};
+
+	struct Inputs
+	{
+		Snapshot map;
+		// 0 none, 1 <texture type="generate">, 2 <texture type="file">.
+		int textureType = 0;
+		std::string texture0, texture1, texture2, texture3, rockside, shore;
+		std::string texture, surroundTexture;
+		std::string detail;
+		// The sun and the sky's two light colours, for the light map.
+		float sunPosition[3] = { 0.0f, 0.0f, 0.0f };
+		float ambience[3] = { 0.0f, 0.0f, 0.0f };
+		float diffuse[3] = { 1.0f, 1.0f, 1.0f };
+		bool valid() const { return map.valid() && textureType != 0; }
+	};
+
+	// Copies what the build needs. Call with the engine lock held; costs a
+	// few milliseconds for a 256 map (one HeightMap::getNormal per cell).
+	Inputs capture(ScorchedContext &context);
+
+	// The build proper: GL-free and engine-free, safe on any thread.
+	Texture build(const Inputs &inputs, int size, std::string *error = nullptr);
+	bool applyLightMap(const Inputs &inputs, Texture &texture);
+
+	// G2: the landscape's <detail> image as RGB, or an empty texture.
+	Texture loadDetail(const Inputs &inputs);
+
 	// Generates a `size` x `size` RGB ground texture for the landscape
 	// currently loaded in [context]. Returns an invalid Texture if there's
 	// no landscape yet, or if the definition doesn't use the generated

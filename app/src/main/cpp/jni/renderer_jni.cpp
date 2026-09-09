@@ -156,6 +156,33 @@ namespace
 	// every earlier one - marks accumulate over a round the way upstream's
 	// do. Re-reading it back off the GPU each time would be far worse.
 	LandscapeTextureBuilder::Texture groundTextureData;
+	// G1: the ground texture is built on a worker thread. The GL thread
+	// captures the builder's inputs under the engine lock, hands them to
+	// the worker, and adopts the result when it is done - so the game does
+	// not stall for the second a 1024-square build takes, and the terrain
+	// draws with its height-ramp fallback until then. A job is tagged with
+	// the generation it was started for, so a landscape or setting change
+	// mid-build simply discards it.
+	struct GroundJob {
+		unsigned int generation = 0;
+		int size = 0;
+		bool bake = false;
+		LandscapeTextureBuilder::Inputs inputs;
+		LandscapeTextureBuilder::Texture ground;
+		LandscapeTextureBuilder::Texture detail;
+		bool lightBaked = false;
+		std::string error;
+		bool done = false;
+	};
+	std::thread groundThread;
+	std::mutex groundMutex;
+	GroundJob groundJob;              // guarded by groundMutex once the thread runs
+	unsigned int groundGeneration = 0;
+	bool   groundJobRunning = false;
+	// G2: the landscape's <detail> image, tiled every 16 units over the
+	// ground, the surround and the cavern roof - see the terrain shader.
+	GLuint detailTexture = 0;
+	GLint  terrainDetailTexLoc = -1, terrainHasDetailLoc = -1;
 	// M6 tank movement: the version of ScorchDroidMovement's mask currently
 	// painted over the ground, and whether anything is painted at all. The
 	// mask itself is recomputed on the simulation side (see engine_jni's
@@ -813,6 +840,7 @@ namespace
 		out vec2 vTexCoord;
 		out float vViewDepth;
 		out vec4 vShadowCoord;
+		out vec2 vDetailCoord;
 		// W3: for the reflection pass, which has to drop everything below
 		// the waterline - GLES3 has no clip planes, so the fragment shader
 		// does it.
@@ -822,6 +850,12 @@ namespace
 			vTexCoord = aTexCoord;
 			vHeight01 = clamp((aPosition.y - uMinHeight) / uHeightRange, 0.0, 1.0);
 			vShadowCoord = uShadowMatrix * vec4(aPosition, 1.0);
+			// G2: one detail tile per 16 landscape units, upstream's own
+			// tiling (GraphicalLandscapeMap::reset builds its second
+			// texture coordinate as x/width * width/16, i.e. x/16; the
+			// surround's works out the same). From the world position so
+			// the one line serves the terrain, the surround and the roof.
+			vDetailCoord = aPosition.xz / 16.0;
 			// Order matters: gl_Position has to be written before its w can
 			// be read. The other way round this reads an undefined value and
 			// the terrain silently stops fogging.
@@ -844,8 +878,15 @@ namespace
 		in vec2 vTexCoord;
 		in float vViewDepth;
 		in vec4 vShadowCoord;
+		in vec2 vDetailCoord;
 		in float vWorldY;
 		out vec4 fragColor;
+		// G2: the landscape's own <detail> image. Upstream blends it into
+		// the ground (land.fshader) and the cavern roof (SkyRoof::draw,
+		// texture unit 2); without it a surface close up is the generated
+		// texture magnified with nothing at high frequency in it.
+		uniform sampler2D uDetailTexture;
+		uniform int uHasDetail;
 		// Upstream's sampler2DShadow, sampled with textureProj - the hardware
 		// does the depth comparison and, with a linear filter, gives back a
 		// bilinear average of four comparisons rather than a hard bit.
@@ -892,6 +933,13 @@ namespace
 				baseColor = texture(uGroundTexture, vTexCoord).rgb;
 			} else {
 				baseColor = mix(vec3(0.22, 0.34, 0.13), vec3(0.58, 0.52, 0.42), vHeight01);
+			}
+			// Upstream's own blend, from land.fshader:
+			//   ((groundColor * 3.5) + detailColor) / 4
+			// before the lighting, so ground, surround and roof all get it.
+			if (uHasDetail == 1) {
+				vec3 detail = texture(uDetailTexture, vDetailCoord).rgb;
+				baseColor = (baseColor * 3.5 + detail) / 4.0;
 			}
 			vec3 lit;
 			if (uLightBaked == 1) {
@@ -1689,6 +1737,9 @@ namespace
 			terrainBuilt = false;
 			groundTextureBuilt = false;
 			groundLightBaked = false;
+			if (detailTexture) glDeleteTextures(1, &detailTexture);
+			detailTexture = 0;
+			groundGeneration++;   // any build in flight is for the old one
 			// The new landscape gets a freshly built texture, so whatever
 			// was painted over the old one is gone with it - and the
 			// version has to be forced to re-sync, or a mask published
@@ -1837,39 +1888,95 @@ namespace
 			 w, h, verts1D, verts1D, terrainMinHeight, terrainMaxHeight);
 	}
 
-	// M6: generates and uploads the real ground texture once a landscape
-	// exists (see LandscapeTextureBuilder). Failure is non-fatal - the
-	// terrain shader falls back to its old height-ramp colouring rather
-	// than drawing nothing, so a landscape definition we can't texture
-	// still renders.
+	// G1: upstream's texture size follows its TexureSize option - 256 at
+	// Low, 1024 at the default, 2048 at High. Here it follows the Landscape
+	// detail slider, which already sets the mesh: the full 256 grid gets
+	// upstream's default 1024, half of it 512, anything less 256.
+	int groundTextureSizeFor(int grid)
+	{
+		if (grid >= kTerrainGridMax) return 1024;
+		if (grid >= kTerrainGridMax / 2) return 512;
+		return 256;
+	}
+
+	// M6/G1: generates and uploads the real ground texture once a landscape
+	// exists (see LandscapeTextureBuilder). The build runs on a worker
+	// (see GroundJob); this is called every frame and does a little each
+	// time: start the job, then adopt it when it is done. Failure is
+	// non-fatal - the terrain shader falls back to its old height-ramp
+	// colouring rather than drawing nothing, so a landscape definition we
+	// can't texture still renders, and so does one still being built.
 	void buildGroundTextureIfNeeded(ScorchedContext &ctx)
 	{
 		if (groundTextureBuilt) return;
-		groundTextureBuilt = true;  // one attempt per landscape, success or not
 
-		std::string groundError;
-		groundTextureData = LandscapeTextureBuilder::build(ctx, 512, &groundError);
-		// Sun lighting and terrain self-shadowing are baked in here, before
-		// the upload, exactly where upstream does it (Landscape.cpp, right
-		// after generating the texture). The terrain is then drawn unlit -
-		// see uLightBaked in the terrain shader.
-		// ...but only when there are no shadows to light it with. Upstream's
-		// own condition, verbatim: `if (!GLStateExtension::hasHardwareShadows())`
-		// it bakes, and otherwise leaves the texture unlit and lights the
-		// terrain per fragment in the land shader against the shadow map.
-		// Doing both would light the ground twice and flatten the shadows the
-		// map is there to draw.
-		groundBakedForShadows = (g_shadowLevel.load() > 0);
-		if (!groundBakedForShadows) {
-			groundLightBaked = LandscapeTextureBuilder::applyLightMap(ctx, groundTextureData);
-			if (groundLightBaked) LOGI("Ground light map baked (sun lighting + terrain shadows)");
-		} else {
-			groundLightBaked = false;
-			LOGI("Ground light map not baked - the shadow map lights the terrain");
+		if (!groundJobRunning) {
+			// Sun lighting and terrain self-shadowing are baked in - before
+			// the upload, exactly where upstream does it (Landscape.cpp,
+			// right after generating the texture) - but only when there
+			// are no shadows to light it with. Upstream's own condition,
+			// verbatim: `if (!GLStateExtension::hasHardwareShadows())` it
+			// bakes, and otherwise leaves the texture unlit and lights the
+			// terrain per fragment in the land shader against the shadow
+			// map. Doing both would light the ground twice.
+			groundBakedForShadows = (g_shadowLevel.load() > 0);
+			if (groundThread.joinable()) groundThread.join();
+			groundJob = GroundJob();
+			groundJob.generation = ++groundGeneration;
+			groundJob.size = groundTextureSizeFor(terrainGrid);
+			groundJob.bake = !groundBakedForShadows;
+			// Under the engine lock, which this frame holds: the only
+			// engine access the build makes.
+			groundJob.inputs = LandscapeTextureBuilder::capture(ctx);
+			groundJobRunning = true;
+			LOGI("Ground texture: building %dx%d on a worker%s", groundJob.size, groundJob.size,
+				 groundJob.bake ? " with the light map" : "");
+			groundThread = std::thread([]() {
+				// Everything below reads only the job's own copies.
+				LandscapeTextureBuilder::Inputs inputs;
+				int size; bool bake;
+				{
+					std::lock_guard<std::mutex> lock(groundMutex);
+					inputs = groundJob.inputs;
+					size = groundJob.size;
+					bake = groundJob.bake;
+				}
+				std::string error;
+				LandscapeTextureBuilder::Texture ground = LandscapeTextureBuilder::build(inputs, size, &error);
+				bool lightBaked = false;
+				if (ground.valid() && bake) lightBaked = LandscapeTextureBuilder::applyLightMap(inputs, ground);
+				LandscapeTextureBuilder::Texture detail = LandscapeTextureBuilder::loadDetail(inputs);
+				std::lock_guard<std::mutex> lock(groundMutex);
+				groundJob.ground = std::move(ground);
+				groundJob.detail = std::move(detail);
+				groundJob.lightBaked = lightBaked;
+				groundJob.error = error;
+				groundJob.done = true;
+			});
+			return;
 		}
+
+		// Adopt a finished job, if it is still the one we want.
+		{
+			std::lock_guard<std::mutex> lock(groundMutex);
+			if (!groundJob.done) return;
+		}
+		groundThread.join();
+		groundJobRunning = false;
+		if (groundJob.generation != groundGeneration) {
+			LOGI("Ground texture: discarding a build for a previous landscape");
+			return;   // the next frame starts the right one
+		}
+		groundTextureBuilt = true;  // one attempt per landscape, success or not
+		groundTextureData = std::move(groundJob.ground);
+		groundLightBaked = groundJob.lightBaked;
+		if (groundLightBaked) LOGI("Ground light map baked (sun lighting + terrain shadows)");
+		else if (!groundBakedForShadows) LOGI("Ground light map not baked - the builder had no landscape");
+		else LOGI("Ground light map not baked - the shadow map lights the terrain");
+
 		LandscapeTextureBuilder::Texture &ground = groundTextureData;
 		if (!ground.valid()) {
-			LOGE("ground texture generation failed (%s) - falling back to flat height colours", groundError.c_str());
+			LOGE("ground texture generation failed (%s) - falling back to flat height colours", groundJob.error.c_str());
 			return;
 		}
 
@@ -1883,6 +1990,30 @@ namespace
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		LOGI("Ground texture built: %dx%d", ground.width, ground.height);
+
+		// G2: the detail image, mipmapped and repeating (upstream's
+		// detailTexture_.replace(bitmapDetail, true)).
+		LandscapeTextureBuilder::Texture &detail = groundJob.detail;
+		if (detail.valid()) {
+			if (detailTexture == 0) glGenTextures(1, &detailTexture);
+			glBindTexture(GL_TEXTURE_2D, detailTexture);
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, detail.width, detail.height, 0,
+						 GL_RGB, GL_UNSIGNED_BYTE, detail.rgb.data());
+			glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+			glGenerateMipmap(GL_TEXTURE_2D);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+			LOGI("Detail texture: %dx%d, one tile per 16 units", detail.width, detail.height);
+		} else {
+			LOGI("Detail texture: none (%s)", groundJob.inputs.detail.c_str());
+		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		groundJob.ground = LandscapeTextureBuilder::Texture();
+		groundJob.detail = LandscapeTextureBuilder::Texture();
+		groundJob.inputs = LandscapeTextureBuilder::Inputs();
 	}
 
 
@@ -4781,6 +4912,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainAmbienceLoc = glGetUniformLocation(terrainProgram, "uAmbience");
 	terrainDiffuseLoc = glGetUniformLocation(terrainProgram, "uDiffuse");
 	terrainSunDirLoc = glGetUniformLocation(terrainProgram, "uSunDir");
+	terrainDetailTexLoc = glGetUniformLocation(terrainProgram, "uDetailTexture");
+	terrainHasDetailLoc = glGetUniformLocation(terrainProgram, "uHasDetail");
 	terrainMinHeightLoc = glGetUniformLocation(terrainProgram, "uMinHeight");
 	terrainHeightRangeLoc = glGetUniformLocation(terrainProgram, "uHeightRange");
 	terrainLightDirLoc = glGetUniformLocation(terrainProgram, "uLightDir");
@@ -4980,6 +5113,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainBuilt = false;
 	terrainVao = terrainVbo = terrainIbo = 0;
 	groundTextureBuilt = false;
+	detailTexture = 0;
+	groundGeneration++;
 	groundTexture = 0;
 	groundLightBaked = false;
 	movementOverlayPainted = false;
@@ -5957,6 +6092,15 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glUniform1i(terrainShadowEnabledLoc, shadowValid ? 1 : 0);
 		glUniformMatrix4fv(terrainShadowMatrixLoc, 1, GL_FALSE, shadowMatrix.m);
 		glUniform1i(terrainShadowTexLoc, 5);
+		// G2: unit 8, bound once for the whole pass since the ground, the
+		// surround and the roof all blend the same image.
+		glUniform1i(terrainHasDetailLoc, detailTexture != 0 ? 1 : 0);
+		if (detailTexture != 0) {
+			glActiveTexture(GL_TEXTURE8);
+			glBindTexture(GL_TEXTURE_2D, detailTexture);
+			glUniform1i(terrainDetailTexLoc, 8);
+			glActiveTexture(GL_TEXTURE0);
+		}
 		glUniform3f(terrainAmbienceLoc, skyDescription.ambience[0],
 					skyDescription.ambience[1], skyDescription.ambience[2]);
 		glUniform3f(terrainDiffuseLoc, skyDescription.diffuse[0],

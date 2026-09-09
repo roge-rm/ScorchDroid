@@ -822,6 +822,41 @@ namespace
 			check(maxC > minC, "the generated ground texture actually varies (height/slope blending ran)");
 			check(total > 0, "the generated ground texture isn't entirely black (source images loaded)");
 
+			// G1: upstream's bitmapScale. The sources are read one source
+			// pixel per output texel after being resized by size/1024, so
+			// they repeat at the same distance in map units whatever the
+			// size - and, as a consequence, the 128 build's texel (x, y)
+			// reads the very same source pixel as the 512 build's (4x, 4y),
+			// at the same interpolated height and normal. So the two must
+			// agree texel for texel. Without the rescale they disagree
+			// everywhere (the 512 tiles every source at half the frequency).
+			{
+				LandscapeTextureBuilder::Texture big =
+					LandscapeTextureBuilder::build(server->getContext(), 512);
+				check(big.valid(), "the ground texture builds at 512 too");
+				if (big.valid())
+				{
+					const int n = ground.width;
+					long same = 0, total = 0;
+					for (int y = 0; y < n; y++)
+					{
+						for (int x = 0; x < n; x++)
+						{
+							for (int c = 0; c < 3; c++)
+							{
+								const int a = ground.rgb[((size_t) y * n + x) * 3 + c];
+								const int b = big.rgb[((size_t) (y * 4) * 512 + x * 4) * 3 + c];
+								if (abs(a - b) <= 2) same++;
+								total++;
+							}
+						}
+					}
+					printf("  (ground texture: %ld of %ld texel channels agree between 128 and 512)\n", same, total);
+					check(same * 100 >= total * 95,
+						"the source textures tile at the same distance whatever the size");
+				}
+			}
+
 			// M6 shadows: upstream bakes the sun (and the shadows hills
 			// cast on each other) into this texture rather than shading
 			// per fragment - ImageModifier::addLightMapToBitmap, called
