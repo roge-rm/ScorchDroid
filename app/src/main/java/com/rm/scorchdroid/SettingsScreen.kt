@@ -246,6 +246,15 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                         )
 
                         SwitchRow(
+                            "Scorched3D's ocean",
+                            "Its own wave spectrum, driven by the round's wind, instead of " +
+                                "this port's two rolling waves. Costs a little CPU",
+                            settings.originalOcean,
+                        ) {
+                            settings.updateOriginalOcean(it)
+                        }
+
+                        SwitchRow(
                             "Scorched3D's aim sight",
                             "Its own: a protractor ring around the tank and a separate " +
                                 "bearing marker on the ground. Off is this port's single blade",

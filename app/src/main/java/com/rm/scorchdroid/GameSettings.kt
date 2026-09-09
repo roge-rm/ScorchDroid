@@ -234,6 +234,20 @@ class GameSettings(context: Context) {
     }
 
     /**
+     * W4: which sea to draw. False is this port's two sine waves; true is
+     * Scorched3D's own ocean - a Tessendorf spectrum inverse-FFTed into a
+     * tile, which is what gives it wind-driven, irregular crests.
+     */
+    var originalOcean by mutableStateOf(prefs.getBoolean(KEY_OCEAN, false))
+        private set
+
+    fun updateOriginalOcean(value: Boolean) {
+        originalOcean = value
+        prefs.edit().putBoolean(KEY_OCEAN, value).apply()
+        NativeBridge.setOceanStyle(if (value) 1 else 0)
+    }
+
+    /**
      * M22: which aim sight to draw. False is this port's own blade - one wide
      * wedge along the barrel; true is Scorched3D's own, which surrounds the
      * tank with a protractor ring and puts a separate marker for the bearing
@@ -271,6 +285,7 @@ class GameSettings(context: Context) {
         NativeBridge.setRenderOptions(showTrees, showFog)
         NativeBridge.setSightStyle(if (originalSight) 1 else 0)
         NativeBridge.setTerrainDetail(terrainDetail)
+        NativeBridge.setOceanStyle(if (originalOcean) 1 else 0)
     }
 
     private companion object {
@@ -294,6 +309,7 @@ class GameSettings(context: Context) {
         const val KEY_FOG = "graphics.fog"
         const val KEY_SIGHT = "graphics.originalSight"
         const val KEY_DETAIL = "graphics.terrainDetail"
+        const val KEY_OCEAN = "graphics.originalOcean"
         // The maximum the renderer allows - see kTerrainGridMax.
         const val DEFAULT_DETAIL = 256
     }

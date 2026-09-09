@@ -68,6 +68,7 @@
 #include <GameSetup.h>
 #include <PlayerProfile.h>
 #include <AmbientSound.h>
+#include <OceanWaves.h>
 #include <landscapedef/LandscapeDefinitionsBase.hpp>
 #include <tankai/TankAIStore.hpp>
 #include <tankai/TankAI.hpp>
@@ -2708,6 +2709,122 @@ static void testAmbientSound()
 	}
 }
 
+// W4: upstream's ocean, generated the way it generates it. The arithmetic is
+// the part that goes subtly wrong - a sign or an index in the mirrored half
+// of the spectrum gives a surface that looks plausible and is not a sea - so
+// the properties that must hold are checked rather than the pixels.
+static void testOceanWaves()
+{
+	printf("ocean waves (W4: upstream's Tessendorf spectrum):\n");
+
+	ScorchDroidOcean::Tile tile;
+	ScorchDroidOcean::reseed(10.0f, 0.7f, 12345u);
+	ScorchDroidOcean::generate(0.0f, tile);
+
+	const int n = ScorchDroidOcean::kResolution;
+	check((int) tile.height.size() == n * n, "the tile is generated at upstream's resolution");
+
+	// The height field must be real. It comes out of a complex transform, and
+	// it is only real because h(-k) = conj(h(k)) - the one property that a
+	// wrong index in the mirrored half silently breaks.
+	float peak = 0.0f, mean = 0.0f;
+	for (size_t i = 0; i < tile.height.size(); i++)
+	{
+		peak = std::max(peak, fabsf(tile.height[i]));
+		mean += tile.height[i];
+	}
+	mean /= (float) tile.height.size();
+	check(peak > 0.9f && peak <= 1.0001f, "...normalised to a unit peak");
+	check(fabsf(mean) < 0.05f, "...with no net displacement, as a sea has none");
+
+	// A sea is not a plane and not noise: neighbouring points must be
+	// correlated, or the "waves" are just a random field.
+	float neighbourDiff = 0.0f, randomDiff = 0.0f;
+	for (int y = 0; y < n; y++)
+	{
+		for (int x = 0; x < n - 1; x++)
+		{
+			neighbourDiff += fabsf(tile.height[y * n + x] - tile.height[y * n + x + 1]);
+			randomDiff += fabsf(tile.height[y * n + x] - tile.height[((y * 7 + 13) % n) * n + ((x * 11 + 29) % n)]);
+		}
+	}
+	check(neighbourDiff * 2.0f < randomDiff,
+		"neighbouring points are much closer than distant ones - it is a surface, not noise");
+
+	// The slopes have to agree with the heights they came from, or the
+	// lighting will not match the shape. Compared by correlation rather than
+	// by magnitude: the slopes are exact (the spectrum is differentiated
+	// analytically, by multiplying by ik) while a central difference across
+	// one cell badly understates any wave near the grid's own resolution, so
+	// the two agree in direction far better than in size. Measured: 0.89 in
+	// the shortest-wave case and 0.98 in the longest.
+	const float cell = ScorchDroidOcean::kTileLength / (float) n;
+	double sumA = 0.0, sumB = 0.0, sumAA = 0.0, sumBB = 0.0, sumAB = 0.0;
+	int samples = 0;
+	for (int y = 1; y < n - 1; y++)
+	{
+		for (int x = 1; x < n - 1; x++)
+		{
+			const double fd =
+				(tile.height[y * n + x + 1] - tile.height[y * n + x - 1]) / (2.0 * cell);
+			const double analytic = tile.slopeX[y * n + x];
+			sumA += fd; sumB += analytic;
+			sumAA += fd * fd; sumBB += analytic * analytic; sumAB += fd * analytic;
+			samples++;
+		}
+	}
+	const double numerator = samples * sumAB - sumA * sumB;
+	const double denominator =
+		sqrt((samples * sumAA - sumA * sumA) * (samples * sumBB - sumB * sumB));
+	check(denominator > 0.0 && numerator / denominator > 0.8,
+		"the slopes agree with a finite difference of the heights they came from");
+
+	// Time only rotates each wave's phase, so the sea moves but keeps its
+	// character - and it repeats on upstream's own cycle.
+	ScorchDroidOcean::Tile later;
+	ScorchDroidOcean::generate(2.0f, later);
+	float moved = 0.0f;
+	for (size_t i = 0; i < tile.height.size(); i++)
+	{
+		moved += fabsf(later.height[i] - tile.height[i]);
+	}
+	check(moved > 0.0f, "the surface moves with time");
+
+	ScorchDroidOcean::Tile cycled;
+	ScorchDroidOcean::generate(10.24f, cycled);
+	float drift = 0.0f;
+	for (size_t i = 0; i < tile.height.size(); i++)
+	{
+		drift = std::max(drift, fabsf(cycled.height[i] - tile.height[i]));
+	}
+	check(drift < 0.02f,
+		"...and comes back to where it started after upstream's 10.24s cycle");
+
+	// The wind is what makes this a spectrum rather than a ripple. The
+	// Phillips spectrum peaks at k = g/v^2, so a stronger wind builds
+	// *longer* waves - which is the opposite of the intuition that it should
+	// look rougher, and worth pinning for exactly that reason. Counted as
+	// zero crossings along a row: measured 41.7 per row at wind 4 and 2.4 at
+	// wind 20.
+	auto crossingsPerRow = [&](float speed) {
+		ScorchDroidOcean::Tile t;
+		ScorchDroidOcean::reseed(speed, 0.7f, 12345u);
+		ScorchDroidOcean::generate(0.0f, t);
+		int crossings = 0;
+		for (int y = 0; y < n; y++)
+		{
+			for (int x = 0; x < n - 1; x++)
+			{
+				if ((t.height[y * n + x] < 0.0f) != (t.height[y * n + x + 1] < 0.0f)) crossings++;
+			}
+		}
+		return (float) crossings / (float) n;
+	};
+	const float calm = crossingsPerRow(4.0f);
+	const float gale = crossingsPerRow(20.0f);
+	check(gale < calm * 0.5f, "a stronger wind builds a longer-wavelength sea");
+}
+
 // M16: who the player is - the name, and now the tank model, colour and
 // avatar. The lists are all read from shipped data, so what is worth pinning
 // is that they are found at all and that a choice survives being made.
@@ -2846,6 +2963,7 @@ int main(int argc, char **argv)
 	testGameSetup();
 	testPlayerProfile();
 	testAmbientSound();
+	testOceanWaves();
 
 	printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
 		failures, failures == 1 ? "" : "s");
