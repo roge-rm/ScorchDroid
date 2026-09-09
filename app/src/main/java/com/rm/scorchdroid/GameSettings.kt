@@ -216,6 +216,24 @@ class GameSettings(context: Context) {
     }
 
     /**
+     * M23: how finely the landscape is drawn - the resolution of the mesh the
+     * heightmap is sampled into.
+     *
+     * The default is the maximum, which is the heightmap's own resolution and
+     * so what upstream draws. It is a setting rather than a fixed compromise
+     * because the right answer depends on the device, and this is the screen
+     * where that choice belongs.
+     */
+    var terrainDetail by mutableIntStateOf(prefs.getInt(KEY_DETAIL, DEFAULT_DETAIL))
+        private set
+
+    fun updateTerrainDetail(value: Int) {
+        terrainDetail = value
+        prefs.edit().putInt(KEY_DETAIL, value).apply()
+        NativeBridge.setTerrainDetail(value)
+    }
+
+    /**
      * M22: which aim sight to draw. False is this port's own blade - one wide
      * wedge along the barrel; true is Scorched3D's own, which surrounds the
      * tank with a protractor ring and puts a separate marker for the bearing
@@ -252,6 +270,7 @@ class GameSettings(context: Context) {
         ambient?.enabled = ambientEnabled
         NativeBridge.setRenderOptions(showTrees, showFog)
         NativeBridge.setSightStyle(if (originalSight) 1 else 0)
+        NativeBridge.setTerrainDetail(terrainDetail)
     }
 
     private companion object {
@@ -274,5 +293,8 @@ class GameSettings(context: Context) {
         const val KEY_TREES = "graphics.trees"
         const val KEY_FOG = "graphics.fog"
         const val KEY_SIGHT = "graphics.originalSight"
+        const val KEY_DETAIL = "graphics.terrainDetail"
+        // The maximum the renderer allows - see kTerrainGridMax.
+        const val DEFAULT_DETAIL = 256
     }
 }

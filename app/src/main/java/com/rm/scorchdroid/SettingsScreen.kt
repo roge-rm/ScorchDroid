@@ -214,6 +214,37 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.applyAll()
                         }
 
+                        // M23: the terrain's own resolution. The range comes
+                        // from the renderer rather than being repeated here.
+                        val detailRange = remember {
+                            val parts = NativeBridge.getTerrainDetailRange().split("|")
+                            val min = parts.getOrNull(0)?.toIntOrNull() ?: 32
+                            val max = parts.getOrNull(1)?.toIntOrNull() ?: 256
+                            min.toFloat()..max.toFloat()
+                        }
+                        SliderRow(
+                            "Landscape detail",
+                            if (settings.terrainDetail >= detailRange.endInclusive.toInt()) {
+                                "Full"
+                            } else {
+                                "${settings.terrainDetail}"
+                            },
+                            settings.terrainDetail.toFloat(),
+                            detailRange,
+                        ) {
+                            // Rounded to a multiple of 16: the mesh is rebuilt
+                            // on every change, and a slider that fired for
+                            // each pixel of travel would rebuild it dozens of
+                            // times on one drag.
+                            settings.updateTerrainDetail((it / 16f).roundToInt() * 16)
+                        }
+                        Text(
+                            "How finely the ground is drawn. Full is the whole heightmap, " +
+                                "as Scorched3D draws it; lower is cheaper on a slow device.",
+                            color = Color.White.copy(alpha = 0.55f),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+
                         SwitchRow(
                             "Scorched3D's aim sight",
                             "Its own: a protractor ring around the tank and a separate " +
