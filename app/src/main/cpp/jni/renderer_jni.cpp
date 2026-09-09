@@ -2045,28 +2045,19 @@ namespace
 	}
 
 
-	// What distance fades towards. Upstream fogs to the landscape's own
-	// <fog> colour, but the shipped landscapes set a flat grey while their
-	// sky horizon is blue, which shows as a grey band above the sea. The
-	// horizon end of the sky gradient is what the distance *actually* meets,
-	// so fading to that instead makes land and sky agree - a deliberate
-	// deviation, with the definition's colour kept as the fallback for any
-	// landscape whose colour map won't load.
+	// What distance fades towards: the landscape's own <fog> colour, as
+	// upstream has it (Landscape::generate sets GL_FOG_COLOR from it and
+	// every shader mixes towards gl_Fog.color). This port used to fog to
+	// the sky gradient's horizon row instead, because the shipped daytime
+	// maps set a flat grey <fog> that showed as a band against a blue
+	// horizon when the fog started at zero distance. With upstream's fog -
+	// nothing inside 350 units, then three times as dense - that grey reads
+	// as distance haze, as it does on the PC; and on a dark map the old
+	// choice turned the whole far sea the colour of the moonlit horizon,
+	// a white band with a hard edge that upstream never shows.
 	void currentFogColor(float out[3])
 	{
-		// Fog goes to whatever is actually at the far distance. Under open
-		// sky that is the horizon, so the sky gradient's bottom row wins
-		// over the landscape's own <fog> - distance then blends into the
-		// skyline instead of towards a colour that doesn't match it.
-		//
-		// A cavern has no horizon: the far distance is the cave wall, and
-		// fogging to a bright sky blue nothing can see lights the inside of
-		// the cave the colour of a sky. So a roofed landscape falls back to
-		// its <fog>, which for texcavern is upstream's own dark grey.
-		const float *source = (skyDescription.valid && !roofVisible)
-			? skyDescription.gradient[0]
-			: skyDescription.fog;
-		for (int i = 0; i < 3; i++) out[i] = source[i];
+		for (int i = 0; i < 3; i++) out[i] = skyDescription.fog[i];
 	}
 
 	// Loads a landscape image into a GL texture, with its mask as alpha.
