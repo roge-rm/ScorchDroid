@@ -1,0 +1,31 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: bitmap rows bottom-up, as every other loader's are
+
+The port's own ImageBitmapFactory (patch 0005, replacing the SDL one)
+turned a BMP's rows over on the way in. A BMP is stored bottom-up, and
+the Image convention - upstream's SDL path, the JPEG and PNG loaders,
+and what glTexImage2D expects - is bottom-up too, so the flip left
+every .bmp texture upside down: tank and ship skins sampled the wrong
+half of their image (a grey destroyer drew in its hull's navy), the
+tree needle masks, the breaker crescents and the speech bubble were
+inverted. Rows now land in file order; a top-down file (negative
+height) is the one that gets turned over.
+
+---
+diff --git a/src/common/image/ImageBitmapFactory.cpp b/src/common/image/ImageBitmapFactory.cpp
+--- a/src/common/image/ImageBitmapFactory.cpp
++++ b/src/common/image/ImageBitmapFactory.cpp
+@@ -95,7 +95,12 @@
+ 			return Image();
+ 		}
+ 
+-		int destRowIndex = topDown ? row : (result.getHeight() - row - 1);
++		// Image rows run bottom-up, the way every other loader here and
++		// upstream's SDL_LoadBMP path leave them (row 0 is the bottom of
++		// the picture, which is also what glTexImage2D expects). A BMP
++		// file is stored bottom-up too, so its rows land in file order;
++		// only a top-down file (negative height) is turned over.
++		int destRowIndex = topDown ? (result.getHeight() - row - 1) : row;
+ 		unsigned char *destRow = result.getBits() + (destRowIndex * (result.getWidth() * result.getComponents()));
+ 		unsigned char *from = rowBuffer.data();
+ 		for (int j = 0; j < result.getWidth(); j++)
