@@ -261,7 +261,7 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             "Water reflections",
                             when (settings.reflectionLevel) {
                                 0 -> "Sky"
-                                1 -> "Land"
+                                1 -> "Sky and land"
                                 else -> "Everything"
                             },
                             settings.reflectionLevel.toFloat(),
@@ -270,9 +270,10 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateReflectionLevel(it.roundToInt())
                         }
                         Text(
-                            "Sky is this port's own colour reflection. Land and Everything " +
-                                "draw the scene a second time, mirrored in the water, as " +
-                                "Scorched3D does.",
+                            "Sky is this port's own colour reflection. The other two draw " +
+                                "the scene a second time, mirrored in the water, as " +
+                                "Scorched3D does - Everything adds the clouds, tanks, " +
+                                "scenery, shots and explosions it reflects.",
                             color = Color.White.copy(alpha = 0.55f),
                             style = MaterialTheme.typography.bodySmall,
                         )
