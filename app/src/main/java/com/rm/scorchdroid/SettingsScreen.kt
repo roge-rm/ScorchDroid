@@ -239,8 +239,9 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateTerrainDetail((it / 16f).roundToInt() * 16)
                         }
                         Text(
-                            "How finely the ground is drawn. Full is the whole heightmap, " +
-                                "as Scorched3D draws it; lower is cheaper on a slow device.",
+                            "How finely the ground is drawn. Full is the whole heightmap " +
+                                "and Scorched3D's own 1024 ground texture; half the slider is " +
+                                "a 512 texture, below that 256. Lower is cheaper on a slow device.",
                             color = Color.White.copy(alpha = 0.55f),
                             style = MaterialTheme.typography.bodySmall,
                         )
