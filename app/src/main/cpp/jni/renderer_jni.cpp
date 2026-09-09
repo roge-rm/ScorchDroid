@@ -1382,9 +1382,14 @@ namespace
 			// break it up. Upstream never has a flat normal to begin with.
 			vec2 t0 = vWorld * uNoise0.z + uNoise0.xy;
 			vec2 t1 = vWorld * uNoise1.z + uNoise1.xy;
-			vec2 s0 = rippleSlope(t0) * 0.30 * fogFactor;
-			vec2 s1 = rippleSlope(t1) * 0.18 * fogFactor;
-			vec3 n = normalize(vNormal + vec3(-s0.x - s1.x, 0.0, -s0.y - s1.y));
+			// Named ripple0/ripple1, not s0/s1: `s0` is already the shadow
+			// term further down, and shadowing it here made the whole water
+			// shader fail to compile - which is not a visible failure, because
+			// the water simply stops being drawn.
+			vec2 ripple0 = rippleSlope(t0) * 0.30 * fogFactor;
+			vec2 ripple1 = rippleSlope(t1) * 0.18 * fogFactor;
+			vec3 n = normalize(vNormal +
+				vec3(-ripple0.x - ripple1.x, 0.0, -ripple0.y - ripple1.y));
 			// E, the direction *to* the viewer, and L, the direction to the
 			// sun - both as upstream's shader has them.
 			vec3 E = normalize(uEyePos - vWorldPos);
