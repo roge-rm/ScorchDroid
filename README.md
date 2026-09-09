@@ -16,11 +16,15 @@ Cheers, enjoy! rm
 
 - The real Scorched3D simulation, not an approximation: upstream's weapons, accessories, terrain
   destruction, wind, shields, parachutes, tank movement, and bot AI.
-- A 3D landscape rendered from the real heightmap, with the generated ground texture, water with
-  shoreline foam, moving waves and a Fresnel-weighted sky reflection, a sky with the landscape's own colour gradient, clouds, sun and
-  stars, distance fog, baked sun shadows, trees and scenery, and cavern roofs.
-- Weapon effects driven by the simulation's own events — explosions, napalm, lasers, lightning,
-  shield hits, sky flashes, teleports, smoke, mushroom clouds, thrown debris, arena wall flashes,
+- Scorched3D's own picture, method for method: the landscape from the real heightmap with the
+  ground texture built the way upstream builds it, its detail texture and its light; a Tessendorf
+  ocean with choppy crests that grow with the wind, whitecaps, breakers along every shore, and the
+  whole scene reflected in it; the sun as a positional light with its shadow map; the sky dome with
+  the landscape's own gradient, clouds, sun, stars and fog; tanks, scenery, ships and aircraft in
+  their own textures and materials; trees; cavern roofs; rain and snow where a landscape asks.
+- Weapon effects driven by the simulation's own events, drawn with Scorched3D's own particle
+  textures and animations — explosions, napalm, lasers, lightning, shield hits, sky flashes,
+  teleports, smoke that streams downwind, mushroom clouds, thrown debris, arena wall flashes,
   floating damage numbers and speech bubbles.
 - Scorched3D's own sound and music: its effects raised from the simulation's own events, and its
   three loops keyed to the state of the game by its own `music.xml`.
