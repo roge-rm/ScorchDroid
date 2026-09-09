@@ -118,6 +118,20 @@ static void crashBacktraceHandler(int sig)
 	_exit(139);
 }
 
+// Optional soak: keep a joined client ticking for this many extra seconds
+// so the steady-play rate is measured across several rounds rather than
+// across the handful of seconds it takes the clock correction to converge.
+// Off by default - the normal suite should not get slower to carry a
+// measurement - and read by both processes, since the host has to keep
+// stepping for at least as long as the client intends to listen.
+static int netSoakSeconds()
+{
+	const char *env = getenv("SCORCHDROID_NET_SOAK_SECONDS");
+	if (!env) return 0;
+	int seconds = atoi(env);
+	return (seconds > 0) ? seconds : 0;
+}
+
 namespace
 {
 	int failures = 0;
@@ -1905,7 +1919,12 @@ namespace
 		// genuinely misleading place to start debugging. Only the failure
 		// path is ever this slow; a healthy run exits in about fifteen
 		// seconds.
-		for (int i = 0; i < 700; i++)
+		// Plus whatever the client intends to spend soaking (see
+		// netSoakSeconds): the client cannot measure steady play unless the
+		// host is still stepping, and a host that gives up first shows as
+		// "the client never joined", which is a misleading place to start.
+		const int hostTickBudget = 700 + netSoakSeconds() * 10;
+		for (int i = 0; i < hostTickBudget; i++)
 		{
 			unsigned int ticksDifference = tickClock.getTicksDifference();
 			fixed timeDifference(true, ((Sint64) ticksDifference) * 10);
@@ -1956,7 +1975,43 @@ namespace
 					"joined tanks=%u width=%u height=%u timediff=%lld startdiff=%lld ticks=%d",
 					&clientTanks, &clientWidth, &clientHeight, &clientTimeDiff,
 					&clientStartDiff, &clientSettleTicks) == 6;
+
+			// Reported, never asserted - see the client's own comment on why
+			// this is a second line. The leading space lets it skip the
+			// newline the first line left behind.
+			unsigned int joinIn = 0, joinOut = 0, peakIn = 0, peakOut = 0, totalIn = 0, totalOut = 0;
+			float joinSecs = 0.0f, soakSecs = 0.0f;
+			bool trafficParsed = parsed &&
+				fscanf(resultFile,
+					" traffic joinin=%u joinout=%u joinsecs=%f peakin=%u peakout=%u"
+					" totalin=%u totalout=%u soaksecs=%f",
+					&joinIn, &joinOut, &joinSecs, &peakIn, &peakOut,
+					&totalIn, &totalOut, &soakSecs) == 8;
 			if (resultFile) fclose(resultFile);
+
+			if (trafficParsed)
+			{
+				// Printed in the units the transport decision is actually made
+				// in (kbit/s), not raw byte counts. Steady play is what the
+				// totals minus the handshake come to, which is only meaningful
+				// once a soak has run - see netSoakSeconds.
+				float joinRate = (joinSecs > 0.0f) ?
+					((float) (joinIn + joinOut) * 8.0f / joinSecs / 1000.0f) : 0.0f;
+				fprintf(stderr,
+					"  (network cost: join %u B in / %u B out in %.2fs = %.0f kbit/s;"
+					" peak %.1f kbit/s in, %.1f kbit/s out)\n",
+					joinIn, joinOut, joinSecs, joinRate,
+					(float) peakIn * 8.0f / 1000.0f, (float) peakOut * 8.0f / 1000.0f);
+				if (soakSecs > 1.0f)
+				{
+					fprintf(stderr,
+						"  (steady play over %.0fs: %u B in / %u B out ="
+						" %.2f kbit/s in, %.2f kbit/s out)\n",
+						soakSecs, totalIn - joinIn, totalOut - joinOut,
+						(float) (totalIn - joinIn) * 8.0f / soakSecs / 1000.0f,
+						(float) (totalOut - joinOut) * 8.0f / soakSecs / 1000.0f);
+				}
+			}
 			check(parsed, "parsed the client process's result file");
 
 			if (parsed)
@@ -2024,6 +2079,70 @@ namespace
 	}
 }
 
+// How many bytes a real join and real play actually cost, which is the
+// question that decides whether a non-IP transport (Bluetooth RFCOMM tops
+// out in the low hundreds of kbit/s) can carry this game at all. Nothing
+// new has to be instrumented to answer it: the protocol layer already
+// counts every byte it reads and writes into NetInterface's static
+// bytesIn_/bytesOut_ (NetServerTCP3Send.cpp:130, NetServerTCP3Recv.cpp:114).
+//
+// Sampled in the *client* process specifically. Those counters are
+// process-global statics, so in the host process they carry the sum of
+// every other test's traffic as well; the child is freshly exec'd and only
+// ever has the one connection, so its counters are exactly this join.
+//
+// Rates are folded in over windows of at least a second rather than per
+// tick, so the peak is a real bytes-per-second figure instead of whatever
+// happened to land inside one 100ms tick.
+//
+// What it measured, 2026-09-09, one client joining the host across a 90s
+// soak covering several rounds:
+//   join         46,247 B out / 987 B in over 2.5s (~150 kbit/s burst)
+//   steady play  12,056 B in / 2,744 B out over 90s
+//                = 1.07 kbit/s in, 0.24 kbit/s out, peaking at 3.1 kbit/s
+// So play itself is essentially free - a Bluetooth RFCOMM link (low
+// hundreds of kbit/s) has around two orders of magnitude of headroom, and
+// the whole cost of a join sits in one burst.
+//
+// That burst is ComsHaveModFilesMessage: the client enumerates every file
+// of the "none" global mod - 1130 of them - as name + length + crc, which
+// is 46,247/1130 = 41 bytes each. Nothing else comes close, and the
+// landscape is not in it at all (it travels as a definition both ends
+// regenerate, so the level message is under a kilobyte). Worth knowing
+// before blaming a slow join on the transport.
+struct NetTrafficMeter
+{
+	unsigned int windowIn_       = 0;
+	unsigned int windowOut_      = 0;
+	unsigned int peakInPerSec_   = 0;
+	unsigned int peakOutPerSec_  = 0;
+	float        windowSeconds_  = 0.0f;
+	Clock        windowClock_;
+
+	void start()
+	{
+		windowIn_  = NetInterface::getBytesIn();
+		windowOut_ = NetInterface::getBytesOut();
+		windowClock_.getTimeDifference();  // Discard whatever accumulated before now.
+		windowSeconds_ = 0.0f;
+	}
+
+	void sample()
+	{
+		windowSeconds_ += windowClock_.getTimeDifference();
+		if (windowSeconds_ < 1.0f) return;
+
+		unsigned int in       = NetInterface::getBytesIn() - windowIn_;
+		unsigned int out      = NetInterface::getBytesOut() - windowOut_;
+		unsigned int inPerSec  = (unsigned int) ((float) in / windowSeconds_);
+		unsigned int outPerSec = (unsigned int) ((float) out / windowSeconds_);
+		if (inPerSec > peakInPerSec_) peakInPerSec_ = inPerSec;
+		if (outPerSec > peakOutPerSec_) peakOutPerSec_ = outPerSec;
+
+		start();
+	}
+};
+
 // Runs as a genuinely separate process (see testClientJoin() above for why)
 // - joins the host at host:port as a real ClientContext and writes a
 // one-line result to resultPath for the parent process to check, since a
@@ -2037,6 +2156,12 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 	}
 	setenv("HOME", "/tmp/scorchdroid-host-tests-home-client", 1);
 	S3D::setSettingsDir("scorchdroid-host-tests-client");
+
+	// Handshake cost is measured from just before the connect, so it covers
+	// the whole thing - TCP connect, auth, mod-file exchange and the
+	// ComsLoadLevelMessage - not just the part after the socket is up.
+	Clock joinClock;
+	NetTrafficMeter meter;
 
 	ClientContext client;
 	bool connecting = client.connectToServer(host, port);
@@ -2069,12 +2194,22 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 	// than a fixed number of ticks - a fixed 2s wait was a coin flip against
 	// the host's send-step schedule (see testClientJoin()'s check). Bounded
 	// so a genuine regression still fails instead of hanging.
+	// Read before anything else runs, so these are the handshake alone.
+	float        joinSeconds  = joinClock.getTimeDifference();
+	unsigned int joinBytesIn  = NetInterface::getBytesIn();
+	unsigned int joinBytesOut = NetInterface::getBytesOut();
+	unsigned int peakInPerSec = 0, peakOutPerSec = 0;
+	float        soakSeconds  = 0.0f;
+
 	if (joined)
 	{
+		meter.start();
+
 		bool ownTankSeen = false;
 		for (int i = 0; i < 100 && !ownTankSeen; i++)
 		{
 			client.tick();
+			meter.sample();
 			std::map<unsigned int, Tank *> &tanks = client.getTargetContainer().getTanks();
 			std::map<unsigned int, Tank *>::iterator itor;
 			for (itor = tanks.begin(); itor != tanks.end(); ++itor)
@@ -2110,10 +2245,32 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 		for (settleTicks = 0; settleTicks < 300; settleTicks++)
 		{
 			client.tick();
+			meter.sample();
 			long long diff = (long long) syncing.getServerTimeDifference().getInternalData();
 			if (diff < converged && diff > -converged) break;
 			usleep(100 * 1000);
 		}
+
+		// Steady-play measurement, opt-in (see netSoakSeconds). Everything
+		// above finishes within a few seconds of joining, which is still
+		// the tail of the join burst; a rate that means anything for
+		// choosing a transport has to span whole rounds - buying, firing,
+		// the round-end scores and the next level message.
+		int soakBudget = netSoakSeconds();
+		if (soakBudget > 0)
+		{
+			Clock soakClock;
+			for (int i = 0; i < soakBudget * 10; i++)
+			{
+				client.tick();
+				meter.sample();
+				usleep(100 * 1000);
+			}
+			soakSeconds = soakClock.getTimeDifference();
+		}
+
+		peakInPerSec  = meter.peakInPerSec_;
+		peakOutPerSec = meter.peakOutPerSec_;
 	}
 
 	FILE *f = fopen(resultPath, "w");
@@ -2130,6 +2287,14 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 			client.getLandscapeMaps().getGroundMaps().getHeightMap().getMapHeight(),
 			(long long) sync.getServerTimeDifference().getInternalData(),
 			startDiff, settleTicks);
+
+		// A separate line, deliberately: the join assertions above parse the
+		// first one, and a measurement that failed to sample should never be
+		// able to turn a working join into a test failure.
+		fprintf(f, "traffic joinin=%u joinout=%u joinsecs=%.3f peakin=%u peakout=%u"
+			" totalin=%u totalout=%u soaksecs=%.3f\n",
+			joinBytesIn, joinBytesOut, joinSeconds, peakInPerSec, peakOutPerSec,
+			NetInterface::getBytesIn(), NetInterface::getBytesOut(), soakSeconds);
 	}
 	else
 	{
