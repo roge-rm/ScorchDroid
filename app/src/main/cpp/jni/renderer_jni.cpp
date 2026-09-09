@@ -248,7 +248,7 @@ namespace
 	// fine off the GL thread and not fine on it.
 	GLint terrainClipEnabledLoc = -1, terrainClipBelowLoc = -1;
 	GLint terrainShadowMatrixLoc = -1, terrainShadowTexLoc = -1, terrainShadowEnabledLoc = -1;
-	GLint terrainAmbienceLoc = -1, terrainDiffuseLoc = -1, terrainSunDirLoc = -1;
+	GLint terrainAmbienceLoc = -1, terrainDiffuseLoc = -1, terrainSunPosLoc = -1;
 	// W3: the reflection this port draws the water with when upstream's own
 	// reflection is asked for - the scene mirrored in the water plane,
 	// rendered into a half-size target and sampled by the water shader.
@@ -847,11 +847,20 @@ namespace
 		out float vViewDepth;
 		out vec4 vShadowCoord;
 		out vec2 vDetailCoord;
+		// G5: upstream lights the land from GL_LIGHT1 *at the sun's
+		// position*, a point 900 units out from the map centre, so the
+		// light direction is worked out per vertex (land.vshader:
+		// lightDir = normalize(lightpos - vertex)) and varies a little
+		// across the map. A single directional vector was up to ~8 degrees
+		// off at the map's edges.
+		uniform vec3 uSunPos;
+		out vec3 vLightDir;
 		// W3: for the reflection pass, which has to drop everything below
 		// the waterline - GLES3 has no clip planes, so the fragment shader
 		// does it.
 		out float vWorldY;
 		void main() {
+			vLightDir = uSunPos - aPosition;
 			vNormal = aNormal;
 			vTexCoord = aTexCoord;
 			vHeight01 = clamp((aPosition.y - uMinHeight) / uHeightRange, 0.0, 1.0);
@@ -903,7 +912,7 @@ namespace
 		// texture by the result.
 		uniform vec3 uAmbience;
 		uniform vec3 uDiffuse;
-		uniform vec3 uSunDir;
+		in vec3 vLightDir;
 
 		// 1.0 in full light, 0.0 in full shade. Outside the sun's frustum
 		// there is nothing to test against, so everything there is lit -
@@ -964,7 +973,7 @@ namespace
 				// cast from the sun and the two have to agree or a slope will
 				// be lit from one side and shadowed from the other.
 				vec3 n = normalize(vNormal);
-				float ndotl = max(dot(n, normalize(uSunDir)), 0.0) * sunShadow();
+				float ndotl = max(dot(n, normalize(vLightDir)), 0.0) * sunShadow();
 				lit = baseColor * (uDiffuse * ndotl + uAmbience);
 			} else {
 				vec3 n = normalize(vNormal);
@@ -4902,7 +4911,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	terrainShadowEnabledLoc = glGetUniformLocation(terrainProgram, "uShadowEnabled");
 	terrainAmbienceLoc = glGetUniformLocation(terrainProgram, "uAmbience");
 	terrainDiffuseLoc = glGetUniformLocation(terrainProgram, "uDiffuse");
-	terrainSunDirLoc = glGetUniformLocation(terrainProgram, "uSunDir");
+	terrainSunPosLoc = glGetUniformLocation(terrainProgram, "uSunPos");
 	terrainDetailTexLoc = glGetUniformLocation(terrainProgram, "uDetailTexture");
 	terrainHasDetailLoc = glGetUniformLocation(terrainProgram, "uHasDetail");
 	terrainMinHeightLoc = glGetUniformLocation(terrainProgram, "uMinHeight");
@@ -6096,11 +6105,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					skyDescription.ambience[1], skyDescription.ambience[2]);
 		glUniform3f(terrainDiffuseLoc, skyDescription.diffuse[0],
 					skyDescription.diffuse[1], skyDescription.diffuse[2]);
-		// The sun as the shadow map sees it, in world axes.
-		glUniform3f(terrainSunDirLoc,
-					skyDescription.sunDirection[0],
-					skyDescription.sunDirection[2],
-					-skyDescription.sunDirection[1]);
+		// The sun's position, in render axes (Sun::setPosition's point 900
+		// units out, which is also where the shadow map is cast from).
+		glUniform3f(terrainSunPosLoc,
+					skyDescription.sunPosition[0],
+					skyDescription.sunPosition[2],
+					worldZFromEngineY(skyDescription.sunPosition[1]));
 		if (groundTexture != 0) {
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, groundTexture);
