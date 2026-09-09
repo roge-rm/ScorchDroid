@@ -30,8 +30,10 @@ namespace ScorchDroidOcean
 	struct Tile
 	{
 		// Row-major, kResolution^2. Height is a displacement about the water
-		// plane; the slopes are d(height)/dx and d(height)/dz at that point,
-		// which is what a normal is built from.
+		// plane in world units, at upstream's own scale (so it grows with
+		// the wind, from a few tenths of a unit in a calm to about four in
+		// a gale); the slopes are d(height)/dx and d(height)/dz at that
+		// point, which is what a normal is built from.
 		std::vector<float> height;
 		std::vector<float> slopeX;
 		std::vector<float> slopeZ;
@@ -43,7 +45,10 @@ namespace ScorchDroidOcean
 	//
 	// windSpeed is upstream's own parameter in its own units (its default is
 	// around 10); windDirection is the bearing the wind blows towards, in
-	// radians, measured the way the engine measures its own wind.
+	// radians, in the *tile's* frame: x along the tile's x, and y along the
+	// tile's y, which the renderer lays along world z. World z runs the
+	// opposite way to the engine's y, so a caller with an engine wind
+	// vector passes atan2(dir.x, -dir.y), not atan2(dir.x, dir.y).
 	void reseed(float windSpeed, float windDirectionRadians, unsigned int seed);
 
 	// Advances to [seconds] and fills [out] with that moment's surface. The

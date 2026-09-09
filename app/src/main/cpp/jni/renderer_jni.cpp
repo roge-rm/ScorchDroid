@@ -2603,13 +2603,18 @@ namespace
 		// Upstream seeds its generator from the game's own wind, and falls
 		// back to a diagonal breeze when the round is dead calm - a flat sea
 		// is not a sea.
+		// The tile's y axis lies along world z, and world z runs the
+		// opposite way to the engine's y (worldZFromEngineY), so the
+		// engine's wind is mirrored in y before it seeds the spectrum -
+		// the same flip the noise scroll below makes. Without it the
+		// swell ran mirrored against both the wind and the ripples.
 		Wind &wind = ctx.getSimulator().getWind();
 		FixedVector direction = wind.getWindDirection();
-		float bearing = atan2f(direction[0].asFloat(), direction[1].asFloat());
+		float bearing = atan2f(direction[0].asFloat(), -direction[1].asFloat());
 		if (direction[0] == fixed(0) && direction[1] == fixed(0)) {
 			// Upstream's own fallback for a dead calm round: a diagonal
 			// breeze, because a flat sea is not a sea.
-			bearing = atan2f(0.8f, 0.8f);
+			bearing = atan2f(0.8f, -0.8f);
 		}
 		// Upstream's own mapping, verbatim (Water2::generate): the game's
 		// 0-5 wind becomes 3-13 for the spectrum. Worth taking exactly
@@ -6469,8 +6474,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 		// Then the grid inside the ring, which does move. Its amplitude
 		// fades to zero at its own edge, so it meets the skirt flush.
+		// The ocean tile is already in world units at upstream's own
+		// scale (OceanWaves.h), so it is drawn at 1; the sine sea is a
+		// unit wave and keeps its own height.
 		if (waterGridVertexCount > 0) {
-			glUniform1f(waterWaveAmpLoc, 0.45f);
+			glUniform1f(waterWaveAmpLoc, useOcean ? 1.0f : 0.45f);
 			glBindVertexArray(waterGridVao);
 			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, waterGridVertexCount);
 		}
