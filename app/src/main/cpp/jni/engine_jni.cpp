@@ -322,7 +322,7 @@ static void promoteHumanToPlaying(ScorchedServer *server, Tank *tank) {
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
-        JNIEnv *env, jobject /* this */, jboolean debugBuild) {
+        JNIEnv *env, jobject /* this */) {
     std::lock_guard<std::mutex> lock(g_engineMutex);
     if (g_mode != EngineMode::kNone) {
         LOGE("startLocalGame: engine already started (mode=%d)", (int) g_mode);
@@ -383,25 +383,10 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
 
     OptionsScorched &options = ScorchedServer::instance()->getOptionsGame();
 
-    // Debug builds start rich, purely so testing does not have to play
-    // several rounds to afford the thing being tested - a nuke to see the
-    // mushroom cloud, a shield to see a shield hit. Gated on BuildConfig.DEBUG
-    // from the caller and applied *after* the config is read, so the shipped
-    // scorchdroid_server.xml keeps upstream's own starting money and a
-    // release build is unaffected. This is the one place this port touches a
-    // gameplay number, and it must never reach a release.
-    if (debugBuild) {
-        const int kDebugStartMoney = 100000;
-        const bool ok = options.getMainOptions().getStartMoneyEntry()
-            .setValue(kDebugStartMoney);
-        LOGI("Debug build: starting money set to %d (accepted=%d)",
-             kDebugStartMoney, ok ? 1 : 0);
-    }
-
-    // Once, after every write above. The setup screen's own choices no longer
-    // need it - they arrive through the session config, before the snapshot is
-    // taken - but the debug money flag above is still written after startup
-    // and does.
+    // Debug builds used to start rich here (100000 rather than the config's
+    // money) so testing need not grind for a nuke; dan asked for that to go
+    // once the effects work was done, so the port now touches no gameplay
+    // number at all.
     //
     // updateChangeSet() re-takes the snapshot OptionsScorched keeps of the
     // main options. Without it these writes are undone the moment the first
@@ -409,7 +394,8 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
     // that snapshot *back* over the main options, and the snapshot was taken
     // inside startServer() - before any of this ran. The entries then still
     // report themselves as "changed" while holding the file's values, which
-    // is as confusing as it sounds. testGameSetup fails without this line.
+    // is as confusing as it sounds. Kept although nothing is written after
+    // startup any more: testGameSetup pins the behaviour and it is cheap.
     options.updateChangeSet();
     LOGI("Game options applied: rounds=%d turns=%d money=%d",
          options.getNoRounds(), options.getNoTurns(),

@@ -12,11 +12,10 @@ object NativeBridge {
 
     /**
      * M2 vertical slice: boots a real local game via
-     * ScorchedServer::startServer. [debugBuild] makes the engine start players rich
-     * (100000 rather than the config's 10000) so testing need not grind for
-     * a nuke or a shield; pass BuildConfig.DEBUG so release is untouched.
+     * ScorchedServer::startServer, with the money and every other option
+     * exactly as the config and the setup screen set them.
      */
-    external fun startLocalGame(debugBuild: Boolean): Boolean
+    external fun startLocalGame(): Boolean
 
     /** Advances the real game simulation by one step (see ServerSimulator). */
     external fun tickEngine()
