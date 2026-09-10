@@ -1,0 +1,80 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: show the game's own messages
+
+Kills, joins and round notices go through ChannelManager::showText, whose
+S3D_SERVER branch only writes to the Logger - upstream's client shows
+them through ClientChannelManager in the other branch. A build that is
+S3D_SERVER but still has a screen had nowhere to put them, so none of it
+was ever seen. Reported against a real game: "[Player 1] killed [(Bot)
+Jezebel] with a [Napalm]" shows in Scorched3D and nowhere here.
+
+Parsed rather than logged raw. The message arrives as markup and
+ChannelTextParser - which lives in common/common, so this needs nothing
+from the client - resolves the player and weapon references into the
+names they stand for.
+
+Typed chat does not come through here (it goes through
+ServerChannelManager::sendText, which engine_jni polls separately), so
+nothing arrives twice.
+
+No game logic changes.
+
+diff --git a/src/common/common/ChannelManager.cpp b/src/common/common/ChannelManager.cpp
+index d46665fa..765cf017 100644
+--- a/src/common/common/ChannelManager.cpp
++++ b/src/common/common/ChannelManager.cpp
+@@ -24,6 +24,12 @@
+ 	#include <client/ClientChannelManager.hpp>
+ #else
+ 	#include <common/Logger.hpp>
++	// Android build: these lines are the game talking - kills, joins,
++	// round notices - and this port shows them in the same place it shows
++	// what players type. See ChatStore.h.
++	#include <ChatStore.h>
++	#include <common/ChannelTextParser.hpp>
++	#include <lang/LangString.hpp>
+ #endif
+ 
+ ChannelManager::ChannelManager()
+@@ -40,5 +46,41 @@ void ChannelManager::showText(ScorchedContext &context, const ChannelText &text)
+ #else
+ 	ChannelText &nonConst = (ChannelText &) text;
+ 	Logger::log(LangStringUtil::convertFromLang(nonConst.getMessage()));
++
++	// Android build: and on to the chat log, which is where a player can
++	// actually see it. Upstream's client shows these through its own
++	// ClientChannelManager in the branch above; a build that is S3D_SERVER
++	// but still has a screen had nowhere to put them, so every kill, every
++	// join and every round notice went to the log and no further.
++	//
++	// Parsed rather than logged raw: the message arrives as markup -
++	// "[p:{0}] killed [p:{1}] with a [w:{2}]" - and ChannelTextParser is
++	// what turns those references into the names and weapon they stand for.
++	// It lives in common/common, so this needs nothing from the client.
++	{
++		ChannelTextParser parser;
++		parser.parseText(context, nonConst.getMessage());
++
++		// ChannelTextParser marks each player reference with codepoint 3473
++		// (ChannelTextParser::createPlayerEntry), which upstream's own font
++		// draws as the little player icon before the name. Nothing here has
++		// that font, so it would arrive as a stray Sinhala letter or a tofu
++		// box in the middle of every kill message. The brackets around the
++		// name are kept - upstream shows those too.
++		LangString marked = parser.getString();
++		LangString clean;
++		for (size_t i = 0; i < marked.size(); i++)
++		{
++			if (marked[i] != 3473) clean.push_back(marked[i]);
++		}
++
++		ScorchDroidChat::Line line;
++		line.channel = nonConst.getChannel();
++		// No speaker: this is the game talking, not a player, which is what
++		// an empty name means downstream.
++		line.who = "";
++		line.text = LangStringUtil::convertFromLang(clean);
++		if (!line.text.empty()) ScorchDroidChat::push(line);
++	}
+ #endif
+ }

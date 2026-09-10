@@ -54,6 +54,8 @@
 #include <TargetModelStore.h>
 #include <SkyDescription.hpp>
 #include <ChatStore.h>
+#include <common/ChannelManager.hpp>
+#include <common/ChannelText.hpp>
 #include <InstanceBuffer.hpp>
 #include <TreeGeometry.hpp>
 #include <weapons/WeaponMoveTank.hpp>
@@ -312,6 +314,59 @@ namespace
 		server->getSimulator().simulate();
 		check(server->getTargetContainer().getTankById(tankId) != nullptr,
 			"human tank is still present after further simulation (not re-destroyed)");
+	}
+
+	// The game's own messages - kills, joins, round notices - reaching the
+	// chat log.
+	//
+	// They go through ChannelManager::showText, whose S3D_SERVER branch only
+	// wrote to the Logger: upstream shows them from the other branch, through
+	// a client this port does not have. So none of it was ever seen on the
+	// device, which is how it was reported - a kill line that shows in
+	// Scorched3D and nowhere here.
+	//
+	// The markup is the part worth testing. These arrive as
+	// "[p:{0}] killed [p:{1}] with a [w:{2}]" and are only readable once
+	// ChannelTextParser has resolved those references into real names.
+	void testGameMessagesReachTheChatLog()
+	{
+		printf("the game's own messages (kills, joins) reach the chat log:\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+		std::map< unsigned int, Tank * > &tanks = server->getTargetContainer().getTanks();
+		check(!tanks.empty(), "there is a tank to name in a message");
+		if (tanks.empty()) return;
+
+		Tank *tank = tanks.begin()->second;
+		const std::string tankName = LangStringUtil::convertFromLang(tank->getTargetName());
+
+		const unsigned int before = ScorchDroidChat::version();
+		ChannelText text("combat",
+			LANG_RESOURCE_1("TEST_KILL", "[p:{0}] was killed", tank->getTargetName()));
+		ChannelManager::showText(server->getContext(), text);
+
+		check(ScorchDroidChat::version() > before, "a combat message reaches the chat log");
+
+		std::vector< ScorchDroidChat::Line > lines = ScorchDroidChat::snapshot();
+		check(!lines.empty(), "...and is there to read");
+		if (lines.empty()) return;
+
+		const ScorchDroidChat::Line &line = lines.back();
+		printf("    channel \"%s\", text \"%s\"\n", line.channel.c_str(), line.text.c_str());
+		check(line.channel == "combat", "...on the channel it was sent on");
+		check(line.who.empty(), "...with no speaker, since this is the game talking");
+		// The whole point: the reference resolved to the tank's real name
+		// rather than arriving as "[p:...]" for a player to decipher.
+		check(line.text.find(tankName) != std::string::npos,
+			"...and the [p:] reference resolved into the player's actual name");
+		check(line.text.find("[p:") == std::string::npos,
+			"...leaving no markup behind");
+		// ChannelTextParser marks a player reference with codepoint 3473,
+		// which upstream's own font draws as a little player icon. Nothing
+		// here has that font, so it has to be stripped or every kill message
+		// carries a stray Sinhala letter. UTF-8 for U+0D91 is e0 b6 91.
+		check(line.text.find("\xe0\xb6\x91") == std::string::npos,
+			"...and no icon glyph this port has no font for");
 	}
 
 	// Why selectWeapon and fireWeapon check the accessory type.
@@ -3760,6 +3815,7 @@ int main(int argc, char **argv)
 	testHumanTankHasNoAI();
 	testEconomyBuyAndSelect();
 	testNonWeaponCannotBeFired();
+	testGameMessagesReachTheChatLog();
 	testDefenseAccessories();
 	testNonShotMoves();
 	testTerrainDeformation();
