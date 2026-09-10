@@ -296,12 +296,28 @@ private fun ShopRow(
 
 /**
  * A minimal scrollbar for a [LazyColumn]. Compose ships no scrollbar of its
- * own, and without one a long shop list gives no clue how much is below the
- * fold. Position and size come from the item index rather than pixel
- * offsets, which is exact here because every row is the same height.
+ * own, and without one a list that runs past the fold gives no clue there is
+ * anything below it - which is exactly how the score table and every one of
+ * the choice dialogs read before this was shared with them.
+ *
+ * Position and size come from the item index rather than pixel offsets. That
+ * is exact where every row is the same height, as in the shop and the choice
+ * lists, and approximate where a row can wrap to two lines, as a chat line
+ * can. Approximate is the right trade for an indicator: it is answering "is
+ * there more, and roughly where am I", not driving the scroll.
+ *
+ * Draws nothing at all when everything already fits, so a short list is not
+ * given a full-height thumb to puzzle over.
+ *
+ * [reverseLayout] must match the list's own, or the thumb runs backwards -
+ * the chat log is laid out bottom-up so that it opens on the newest line.
  */
 @Composable
-private fun ListScrollbar(listState: LazyListState, modifier: Modifier = Modifier) {
+private fun ListScrollbar(
+    listState: LazyListState,
+    modifier: Modifier = Modifier,
+    reverseLayout: Boolean = false,
+) {
     val info = listState.layoutInfo
     val total = info.totalItemsCount
     val onScreen = info.visibleItemsInfo.size
@@ -309,7 +325,10 @@ private fun ListScrollbar(listState: LazyListState, modifier: Modifier = Modifie
 
     val thumbFraction = onScreen.toFloat() / total.toFloat()
     val maxFirstIndex = (total - onScreen).toFloat()
-    val scrolled = if (maxFirstIndex > 0f) listState.firstVisibleItemIndex / maxFirstIndex else 0f
+    val position = if (maxFirstIndex > 0f) listState.firstVisibleItemIndex / maxFirstIndex else 0f
+    // firstVisibleItemIndex counts from whichever end the list starts at, so
+    // under reverseLayout index 0 is the bottom of the track, not the top.
+    val scrolled = if (reverseLayout) 1f - position else position
 
     BoxWithConstraints(
         modifier = modifier
@@ -346,16 +365,20 @@ fun HudDialogHost(dialog: HudDialog) {
             onDismissRequest = dialog.onCancel,
             title = { Text(dialog.title) },
             text = {
-                LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
-                    itemsIndexed(dialog.items) { index, label ->
-                        Text(
-                            label,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { dialog.onSelect(index) }
-                                .padding(vertical = 12.dp),
-                        )
+                val listState = rememberLazyListState()
+                Box(Modifier.heightIn(max = 400.dp)) {
+                    LazyColumn(state = listState, modifier = Modifier.padding(end = 10.dp)) {
+                        itemsIndexed(dialog.items) { index, label ->
+                            Text(
+                                label,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { dialog.onSelect(index) }
+                                    .padding(vertical = 12.dp),
+                            )
+                        }
                     }
+                    ListScrollbar(listState, Modifier.align(Alignment.CenterEnd))
                 }
             },
             confirmButton = {},
@@ -451,65 +474,69 @@ private fun ScoresContent(dialog: HudDialog.Scores) {
             ScoreCell("Money", weight = 1.5f, header = true)
         }
         HorizontalDivider()
-        LazyColumn(modifier = Modifier.weight(1f, fill = false)) {
-            items(dialog.entries, key = { it.playerId }) { entry ->
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(vertical = 3.dp),
-                ) {
+        val tableState = rememberLazyListState()
+        Box(Modifier.weight(1f, fill = false)) {
+            LazyColumn(state = tableState, modifier = Modifier.padding(end = 10.dp)) {
+                items(dialog.entries, key = { it.playerId }) { entry ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(3f).padding(end = 6.dp),
+                        modifier = Modifier.padding(vertical = 3.dp),
                     ) {
-                        // M16: the player's avatar, which is where upstream
-                        // shows one too. Every bot has the computer face and
-                        // a human has whichever they chose, so the column is
-                        // either full or - if a player picked none - has a
-                        // gap the colour dot beside it still fills.
-                        val avatar = rememberAvatarBitmap(dialog.dataRoot, entry.avatar)
-                        if (avatar != null) {
-                            Image(
-                                bitmap = avatar,
-                                contentDescription = null,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(3f).padding(end = 6.dp),
+                        ) {
+                            // M16: the player's avatar, which is where upstream
+                            // shows one too. Every bot has the computer face and
+                            // a human has whichever they chose, so the column is
+                            // either full or - if a player picked none - has a
+                            // gap the colour dot beside it still fills.
+                            val avatar = rememberAvatarBitmap(dialog.dataRoot, entry.avatar)
+                            if (avatar != null) {
+                                Image(
+                                    bitmap = avatar,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(18.dp)
+                                        .clip(RoundedCornerShape(3.dp)),
+                                )
+                                Spacer(Modifier.width(5.dp))
+                            }
+                            // The tank's own engine colour, so a row can be
+                            // matched to a tank on the battlefield at a glance -
+                            // the name plates use the same one.
+                            Box(
                                 modifier = Modifier
-                                    .size(18.dp)
-                                    .clip(RoundedCornerShape(3.dp)),
+                                    .size(10.dp)
+                                    .background(Color(entry.colorArgb), CircleShape),
                             )
-                            Spacer(Modifier.width(5.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                // No "(bot)" suffix: the engine already
+                                // prefixes an AI's name with "(Bot) ", so adding
+                                // one produced "(Bot) Fred (bot)".
+                                text = entry.name,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = if (entry.isMe) FontWeight.Bold else FontWeight.Normal,
+                                // A dead player is still in the round and still
+                                // scores, so they are dimmed rather than hidden.
+                                color = if (entry.alive) {
+                                    MaterialTheme.colorScheme.onSurface
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
-                        // The tank's own engine colour, so a row can be
-                        // matched to a tank on the battlefield at a glance -
-                        // the name plates use the same one.
-                        Box(
-                            modifier = Modifier
-                                .size(10.dp)
-                                .background(Color(entry.colorArgb), CircleShape),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            // No "(bot)" suffix: the engine already
-                            // prefixes an AI's name with "(Bot) ", so adding
-                            // one produced "(Bot) Fred (bot)".
-                            text = entry.name,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = if (entry.isMe) FontWeight.Bold else FontWeight.Normal,
-                            // A dead player is still in the round and still
-                            // scores, so they are dimmed rather than hidden.
-                            color = if (entry.alive) {
-                                MaterialTheme.colorScheme.onSurface
-                            } else {
-                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.45f)
-                            },
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        ScoreCell(entry.score.toString(), weight = 1.2f)
+                        ScoreCell(entry.kills.toString(), weight = 1f)
+                        ScoreCell(entry.wins.toString(), weight = 1f)
+                        ScoreCell("$${entry.money}", weight = 1.5f)
                     }
-                    ScoreCell(entry.score.toString(), weight = 1.2f)
-                    ScoreCell(entry.kills.toString(), weight = 1f)
-                    ScoreCell(entry.wins.toString(), weight = 1f)
-                    ScoreCell("$${entry.money}", weight = 1.5f)
                 }
             }
+            ListScrollbar(tableState, Modifier.align(Alignment.CenterEnd))
         }
 
         // The chat history lives here rather than in a dialog of its own:
@@ -531,17 +558,24 @@ private fun ScoresContent(dialog: HudDialog.Scores) {
             // arrive. Without it the panel opened on the oldest lines it
             // held - four "Game starting in N seconds..." - and clipped
             // everything anyone had actually said.
-            LazyColumn(
-                modifier = Modifier.heightIn(max = 140.dp),
-                reverseLayout = true,
-            ) {
-                items(dialog.chat.asReversed(), key = { it.id }) { line ->
-                    Text(
-                        text = if (line.who.isEmpty()) line.text else "${line.who}: ${line.text}",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(vertical = 1.dp),
-                    )
+            val chatState = rememberLazyListState()
+            Box(Modifier.heightIn(max = 140.dp)) {
+                LazyColumn(
+                    state = chatState,
+                    modifier = Modifier.padding(end = 10.dp),
+                    reverseLayout = true,
+                ) {
+                    items(dialog.chat.asReversed(), key = { it.id }) { line ->
+                        Text(
+                            text = if (line.who.isEmpty()) line.text else "${line.who}: ${line.text}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(vertical = 1.dp),
+                        )
+                    }
                 }
+                // Matches the list's own reverseLayout, or the thumb sits at
+                // the top while the view is pinned to the newest line.
+                ListScrollbar(chatState, Modifier.align(Alignment.CenterEnd), reverseLayout = true)
             }
         }
     }
