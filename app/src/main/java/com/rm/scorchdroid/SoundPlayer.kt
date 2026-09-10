@@ -78,6 +78,11 @@ object SoundPlayer {
     private val pendingGain = mutableMapOf<Int, Float>()
     private val pendingPriority = mutableMapOf<Int, Int>()
 
+    // Live looping streams by caller-chosen key - one per aiming axis. Held
+    // so a loop can be stopped when the gesture ends; SoundPool has no way
+    // to ask "what am I looping".
+    private val loopStreams = mutableMapOf<String, Int>()
+
     private fun poolOrCreate(): SoundPool {
         pool?.let { return it }
         val created = SoundPool.Builder()
@@ -154,6 +159,79 @@ object SoundPlayer {
         }
     }
 
+    /**
+     * Decodes these samples now, so the first time they are asked for they
+     * can actually play.
+     *
+     * Needed for the aiming loops specifically. `SoundPool.load` is
+     * asynchronous, and a one-shot can wait - [play] remembers the request
+     * and fires it on load - but a loop cannot: by the time it decoded, the
+     * gesture that wanted it would be over. Without this the first turret
+     * swing of every game is silent.
+     */
+    fun preload(filePaths: List<String>) {
+        if (!enabled) return
+        val soundPool = poolOrCreate()
+        synchronized(sampleIds) {
+            for (path in filePaths) {
+                if (sampleIds.containsKey(path)) continue
+                if (!File(path).exists()) continue
+                val sampleId = soundPool.load(path, 1)
+                if (sampleId != 0) sampleIds[path] = sampleId
+            }
+        }
+    }
+
+    /**
+     * Starts a looping sound under [key], replacing whatever that key was
+     * already playing. Keyed rather than returning a stream id because the
+     * callers are the aiming controls, and each axis has exactly one loop -
+     * upstream holds one `VirtualSoundSource` per axis for the same reason.
+     *
+     * Silently does nothing if the sample has not been decoded yet: a loop is
+     * a response to a gesture that is still happening, and starting it a
+     * beat late is worse than not starting it. The one-shot that accompanies
+     * it warms the cache anyway.
+     */
+    fun startLoop(key: String, filePath: String, gain: Float, priority: Int) {
+        if (!enabled) return
+        val soundPool = poolOrCreate()
+        synchronized(sampleIds) {
+            stopLoopLocked(key)
+            val sampleId = sampleIds[filePath]
+            if (sampleId == null) {
+                // Decode it for next time; nothing to start now.
+                val loading = soundPool.load(filePath, 1)
+                if (loading != 0) sampleIds[filePath] = loading
+                return
+            }
+            if (!loaded.contains(sampleId)) return
+            val volume = (gain * masterVolume).coerceIn(0f, 1f)
+            val streamPriority = priority + (gain.coerceIn(0f, 1f) * 99f).toInt()
+            val stream = soundPool.play(sampleId, volume, volume, streamPriority, -1, 1.0f)
+            if (stream != 0) loopStreams[key] = stream
+        }
+    }
+
+    fun stopLoop(key: String) {
+        synchronized(sampleIds) { stopLoopLocked(key) }
+    }
+
+    /**
+     * Stops every loop. Upstream does the same when a move ends
+     * (`TankKeyboardControlUtil::endPlayMove`) - a turret sound left running
+     * because a gesture was interrupted would never stop on its own.
+     */
+    fun stopAllLoops() {
+        synchronized(sampleIds) {
+            loopStreams.keys.toList().forEach { stopLoopLocked(it) }
+        }
+    }
+
+    private fun stopLoopLocked(key: String) {
+        loopStreams.remove(key)?.let { pool?.stop(it) }
+    }
+
     private fun playLoaded(soundPool: SoundPool, sampleId: Int, gain: Float, priority: Int) {
         val volume = (gain * masterVolume).coerceIn(0f, 1f)
         // Band-major, loudness-minor: the band separates eAction from eText
@@ -176,6 +254,7 @@ object SoundPlayer {
         synchronized(sampleIds) {
             pool?.release()
             pool = null
+            loopStreams.clear()
             sampleIds.clear()
             loaded.clear()
             pendingGain.clear()

@@ -3228,6 +3228,24 @@ static void testSoundMixing()
 		check(sawText, "an arriving chat line makes upstream's own notification sound");
 	}
 
+	// The aiming servo loops hold their own sound rather than pushing a
+	// one-shot through the queue, so they take their gain from
+	// gainForPosition instead. It has to be the same curve - a turret
+	// swinging across the map should fall away exactly as an explosion there
+	// would, and two curves would drift apart the first time one changed.
+	{
+		const float refDist = ScorchDroidAudio::kDefaultReferenceDistance;
+		const float loopGain = ScorchDroidAudio::gainForPosition(
+			listenerX + 150.0f, listenerY, listenerZ,
+			true, listenerX, listenerY, listenerZ);
+		const float expected = refDist / (refDist + 1.0f * (150.0f - refDist));
+		check(fabsf(loopGain - expected) < 0.001f,
+			"a held loop is attenuated by the same curve the one-shots use");
+		check(fabsf(ScorchDroidAudio::gainForPosition(
+				  listenerX + 150.0f, listenerY, listenerZ, false, 0, 0, 0) - 1.0f) < 0.001f,
+			"...and plays at full gain before there is a camera to measure from");
+	}
+
 	// Before anything has been drawn there is no camera to measure from.
 	// Everything plays rather than everything being silently dropped.
 	{

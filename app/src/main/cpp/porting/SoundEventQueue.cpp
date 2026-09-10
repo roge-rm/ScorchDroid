@@ -58,6 +58,23 @@ namespace ScorchDroidAudio
 		}
 	}
 
+	float gainForPosition(float x, float y, float z,
+		bool haveListener, float listenerX, float listenerY, float listenerZ)
+	{
+		if (!haveListener) return kDefaultGain;
+		const float dx = x - listenerX;
+		const float dy = y - listenerY;
+		const float dz = z - listenerZ;
+
+		QueuedSound sound;
+		sound.positioned        = true;
+		sound.gain              = kDefaultGain;
+		sound.referenceDistance = kDefaultReferenceDistance;
+		sound.rolloff           = kDefaultRolloff;
+		sound.distance          = sqrtf(dx * dx + dy * dy + dz * dz);
+		return attenuate(sound);
+	}
+
 	void pushSoundEvent(const std::string &soundFile, int priority)
 	{
 		QueuedSound sound;

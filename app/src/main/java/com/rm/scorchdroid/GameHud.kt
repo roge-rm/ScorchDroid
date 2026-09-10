@@ -303,6 +303,7 @@ fun GameHud(
     onCameraPresets: () -> Unit,
     onSimulationSpeed: () -> Unit,
     onAdmin: () -> Unit,
+    onAimGesture: (AimAxis, Boolean) -> Unit,
     onSendChat: (String) -> Unit,
 ) {
     // M6 parity: upstream's HUD_ITEMS toggle. Everything goes except one
@@ -557,6 +558,7 @@ fun GameHud(
                 orientation = SliderOrientation.Vertical,
                 onValueChange = onElevationChange,
                 modifier = Modifier.size(width = 56.dp, height = 160.dp),
+                onDragActive = { active -> onAimGesture(AimAxis.ELEVATION, active) },
             )
             NudgeButton("−") { onElevationChange((state.elevationDegrees - it).coerceIn(0f, 90f)) }
         }
@@ -580,6 +582,7 @@ fun GameHud(
                 orientation = SliderOrientation.Vertical,
                 onValueChange = onPowerChange,
                 modifier = Modifier.size(width = 56.dp, height = 160.dp),
+                onDragActive = { active -> onAimGesture(AimAxis.POWER, active) },
             )
             NudgeButton("−") { onPowerChange((state.powerFraction - it / 100f).coerceIn(0f, 1f)) }
         }
@@ -610,6 +613,7 @@ fun GameHud(
                     // is reachable in one continuous swipe instead of having to
                     // lift off and restart from the far side of the track.
                     wrapAround = true,
+                    onDragActive = { active -> onAimGesture(AimAxis.ANGLE, active) },
                 )
                 NudgeButton("+") { onAngleChange(wrapDegrees(state.angleDegrees + it)) }
             }
@@ -785,6 +789,10 @@ private fun AxisSlider(
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
     wrapAround: Boolean = false,
+    // Whether a drag is in progress, which is what the aiming sounds follow -
+    // upstream starts and stops them on the key going down and up, and a drag
+    // is the nearest thing this port has to a held key.
+    onDragActive: (Boolean) -> Unit = {},
 ) {
     val isVertical = orientation == SliderOrientation.Vertical
     val span = valueRange.endInclusive - valueRange.start
@@ -841,7 +849,14 @@ private fun AxisSlider(
                             // nudges from where the turret already points
                             // rather than jumping first.
                             anchorValue = currentValue
+                            onDragActive(true)
                         },
+                        // Both ends, not just the clean one: a drag cancelled
+                        // by another pointer or by the gesture being taken
+                        // over would otherwise leave the servo running with
+                        // nothing to stop it.
+                        onDragEnd = { onDragActive(false) },
+                        onDragCancel = { onDragActive(false) },
                     ) { change, _ ->
                         change.consume()
                         applyDrag(if (isVertical) change.position.y else change.position.x)
