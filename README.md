@@ -8,7 +8,7 @@ This port uses Scorched3D's ballistics, weapons, terrain deformation, economy, A
 
 It is in a playable state now with most of the graphics and gameplay implemented but will be iterated upon until it meets parity (or as close as we can get) with the original game.
 
-Cheers, enjoy! rm
+Cheers, enjoy! roge-rm
 
 <img src="docs/shot-menu.png" alt="The ScorchDroid main menu: the title over Single Player, Multiplayer, Settings and About" width="180" /> <img src="docs/shot-setup.png" alt="The New Game setup screen on its Players tab: Start and Reset to defaults under the header, tabs for Game, Players, Arms and World, sliders for the player count and teams, and a row of chips naming the bots the mod offers with Scorched3D's own description of the one selected" width="180" /> <img src="docs/shot-settings.png" alt="The Settings screen on its Player tab: name, tank model, a grid of tank colours and a grid of avatars, with tabs for Player, Audio, Display and Controls" width="180" /> <img src="docs/shot-gameplay.png" alt="ScorchDroid mid-round: a pine-covered island seen from above and behind the player's tank, the sea beyond the shoreline, with the angle and elevation sliders either side and the weapon and Fire buttons below" width="180" /> <img src="docs/shot-scores.png" alt="The score table for round 1 of 5, turn 1 of 15, listing the player and two bots with their avatars, tank colours, score, kills, wins and money, with the chat history below" width="180" />
 
@@ -121,7 +121,7 @@ mapHeight − y)`, subtracting rather than negating so the world stays in the sa
   [scorched3d.co.uk](https://www.scorched3d.co.uk/). This port builds on the maintained fork at
   [bberberov/scorched3d](https://github.com/bberberov/scorched3d).
 - The game's data files, models, textures and sounds are upstream's, bundled unmodified.
-- Ported to Android, with a from-scratch OpenGL ES 3 renderer and a new Compose UI, by rm.
+- Ported to Android, with a from-scratch OpenGL ES 3 renderer and a new Compose UI, by roge-rm.
 
 ## License
 

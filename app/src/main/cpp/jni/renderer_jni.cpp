@@ -96,6 +96,7 @@
 #include <weapons/AccessoryStore.hpp>
 #include <weapons/Accessory.hpp>
 #include <weapons/WeaponProjectile.hpp>
+#include <weapons/WeaponRoller.hpp>
 #include <target/Target.hpp>
 #include <tanket/TanketShotInfo.hpp>
 #include <map>
@@ -6174,8 +6175,17 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	std::vector<unsigned int> shotPlayerIds;
 	std::vector<FixedVector> shotVelocities;
 	std::vector<WeaponProjectile *> shotWeapons;
+	// Rollers - the balls a WeaponRoller drops to bounce down the landscape
+	// before going off. A different action from a shot (ShotBounce), which
+	// is why they were invisible: the collector only ever gathered shots.
+	std::vector<FixedVector> rollerPositions;
+	std::vector<FixedVector4> rollerRotations;
+	std::vector<WeaponRoller *> rollerWeapons;
+	std::vector<unsigned int> rollerPlayerIds;
 	ctx->getActionController().getShotAndExplosionPositions(
 		shotPositionsRaw, explosionPositionsRaw, &shotPlayerIds, &shotVelocities, &shotWeapons);
+	ctx->getActionController().getRollerPositions(
+		rollerPositions, rollerRotations, rollerWeapons, rollerPlayerIds);
 
 	bool haveMyTank = false;
 	bool myTankAlive = false;
@@ -7369,6 +7379,63 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			Mat4 model = Mat4::multiply(
 				Mat4::translate(wx, wy, wz),
 				Mat4::multiply(orientation, Mat4::scale(gpu->scale * projectileScale)));
+			drawMeshGroup(gpu->hull, vp, model);
+			drawMeshGroup(gpu->turret, vp, model);
+			drawMeshGroup(gpu->gun, vp, model);
+		}
+
+		// Rollers, in the same pass and for the same reasons.
+		//
+		// Upstream draws these in ShotBounce::draw: the weapon's own
+		// <rollermodel>, the orientation its physics has tumbled to, and a
+		// flat 0.08 scale times the weapon's, sitting on the ground by the
+		// model's own lowest point. All four are copied rather than
+		// approximated - a roller that is not resting on the terrain reads
+		// as floating, and one that does not tumble reads as sliding.
+		for (size_t i = 0; i < rollerPositions.size(); i++) {
+			WeaponRoller *roller = (i < rollerWeapons.size()) ? rollerWeapons[i] : nullptr;
+			if (!roller) continue;
+
+			Model *rollerModel = loadModelSafely(roller->getRollerModelID());
+			GpuModel *gpu = uploadModel(rollerModel);
+			FixedVector &p = rollerPositions[i];
+			const float wx = p[0].asFloat();
+			const float wz = worldZFromEngineY(p[1].asFloat());
+			const float scale = 0.08f * roller->getScale(*ctx).asFloat();
+			// Upstream's lift, which uses a flat 0.08 rather than the
+			// scaled one - copied as written.
+			const float lift = rollerModel
+				? -rollerModel->getMin()[2].asFloat() * 0.08f : 0.0f;
+			const float wy = p[2].asFloat() + lift;
+			if (wy < cullBelowY) continue;
+
+			if (!gpu) {
+				if (primary) {
+					unmodelledShots.push_back(wx);
+					unmodelledShots.push_back(wy);
+					unmodelledShots.push_back(wz);
+				}
+                continue;
+			}
+
+			// The physics quaternion is in landscape axes, and the model has
+			// already been remapped to world ones on upload - so the
+			// rotation has to be taken into the same basis rather than
+			// applied as it stands, or the tumble happens about the wrong
+			// axes. The remap (x, y, z) -> (x, z, -y) is exactly
+			// rotateX(-90), so that is R * Q * R-inverse.
+			float quat[16];
+			rollerRotations[i].getOpenGLRotationMatrix(quat);
+			Mat4 spin;
+			memcpy(spin.m, quat, sizeof(quat));
+			const Mat4 toWorld = Mat4::rotateX(-(float) M_PI / 2.0f);
+			const Mat4 toEngine = Mat4::rotateX((float) M_PI / 2.0f);
+			const Mat4 orientation =
+				Mat4::multiply(toWorld, Mat4::multiply(spin, toEngine));
+
+			const Mat4 model = Mat4::multiply(
+				Mat4::translate(wx, wy, wz),
+				Mat4::multiply(orientation, Mat4::scale(gpu->scale * scale)));
 			drawMeshGroup(gpu->hull, vp, model);
 			drawMeshGroup(gpu->turret, vp, model);
 			drawMeshGroup(gpu->gun, vp, model);
