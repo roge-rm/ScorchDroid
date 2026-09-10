@@ -273,6 +273,7 @@ class MainActivity : AppCompatActivity() {
                 onScores = { showScores() },
                 onCameraPresets = { showCameraPresets() },
                 onSimulationSpeed = { showSimulationSpeed() },
+                onAdmin = { showAdminMenu() },
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
                 )
             }
@@ -506,7 +507,9 @@ class MainActivity : AppCompatActivity() {
                 return@launch
             }
 
-            // Connected, so there is now a game to draw.
+            // Connected, so there is now a game to draw. A joined client is
+            // never the host, so the admin button stays away.
+            hudState.isHost = false
             applySettingsToHud()
             attachGameSurface()
             appScreen = AppScreen.GAME
@@ -596,6 +599,132 @@ class MainActivity : AppCompatActivity() {
      * destroyed, which is what makes the next game's context - and so the
      * renderer's whole cache - genuinely fresh.
      */
+
+    /**
+     * The host's admin controls - upstream's AdminDialog, which lived in
+     * src/client and so was never ported with the rest of it.
+     *
+     * Nothing here is new engine work: ServerAdminCommon has run in this
+     * build all along (see engine_jni.cpp's adminCommand), there was simply
+     * no way to reach it. The commands and the split below are upstream's
+     * own - its dialog offers exactly kick, ban, mute, unmute, poor and slap
+     * against a chosen player - plus the whole-game ones ServerAdminCommon
+     * exposes and upstream drives from its console instead.
+     *
+     * Two levels rather than one flat list: most of these need a player, and
+     * a single list of "kick Bob / kick Alice / ban Bob / ban Alice" grows
+     * with the square of the room.
+     */
+    private fun showAdminMenu() {
+        val gameActions = listOf(
+            "New game" to AdminCommand.NEW_GAME,
+            "Kill all tanks" to AdminCommand.KILL_ALL,
+            "Add a bot" to AdminCommand.ADD_BOT,
+        )
+        val playerRow = "Player actions..."
+
+        hudState.dialog = HudDialog.ListChoice(
+            title = "Admin",
+            items = gameActions.map { it.first } + playerRow,
+            onSelect = { index ->
+                hudState.dialog = HudDialog.None
+                if (index < gameActions.size) {
+                    runAdminCommand(gameActions[index].second, 0, gameActions[index].first)
+                } else {
+                    showAdminPlayerPicker()
+                }
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+    }
+
+    private fun showAdminPlayerPicker() {
+        val players = parsePlayerList(NativeBridge.getPlayerList())
+        if (players.isEmpty()) {
+            Toast.makeText(this, "Nobody in the game yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        hudState.dialog = HudDialog.ListChoice(
+            title = "Which player?",
+            items = players.map { player ->
+                // Which of these is you matters: several commands are
+                // perfectly willing to kick or kill the host.
+                val tags = listOfNotNull(
+                    if (player.isMe) "you" else null,
+                    if (player.isBot) "bot" else null,
+                    if (!player.alive) "dead" else null,
+                )
+                if (tags.isEmpty()) player.name else "${player.name} (${tags.joinToString(", ")})"
+            },
+            onSelect = { index ->
+                hudState.dialog = HudDialog.None
+                showAdminPlayerActions(players[index])
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+    }
+
+    private fun showAdminPlayerActions(player: PlayerEntry) {
+        // Slap is upstream's own 10 life, and Poor takes a player's money -
+        // both are its punishments short of removing someone.
+        val actions = listOf(
+            "Kick" to AdminCommand.KICK,
+            "Ban" to AdminCommand.BAN,
+            "Mute" to AdminCommand.MUTE,
+            "Unmute" to AdminCommand.UNMUTE,
+            "Slap (10 life)" to AdminCommand.SLAP,
+            "Take their money" to AdminCommand.POOR,
+            "Kill" to AdminCommand.KILL,
+        )
+
+        hudState.dialog = HudDialog.ListChoice(
+            title = player.name,
+            items = actions.map { it.first },
+            onSelect = { index ->
+                hudState.dialog = HudDialog.None
+                runAdminCommand(actions[index].second, player.playerId, actions[index].first, player.name)
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+    }
+
+    /**
+     * Runs the command and says what happened. The answer is worth showing:
+     * ServerAdminCommon refuses quietly - a command against a player who has
+     * already left just returns false - and these are actions where "did
+     * that work?" is a fair question.
+     */
+    private fun runAdminCommand(command: Int, playerId: Int, label: String, who: String? = null) {
+        val argument = when (command) {
+            // Upstream's ban takes a reason, which ends up in the ban list
+            // and in the message the banned player sees.
+            AdminCommand.BAN -> "Banned by the host"
+            // The bot the game was set up with, so one added mid-game plays
+            // like the ones already in it rather than at some other skill.
+            AdminCommand.ADD_BOT -> selectedBots.firstOrNull() ?: "Moron"
+            else -> ""
+        }
+
+        CoroutineScope(Dispatchers.Main).launch {
+            val accepted = withContext(Dispatchers.Default) {
+                NativeBridge.adminCommand(command, playerId, argument)
+            }
+            val subject = who?.let { "$label - $it" } ?: label
+            val message = when {
+                accepted -> subject
+                // The one refusal with a reason worth giving, because it is
+                // a setting rather than a mistake: bot balancing holds the
+                // game at a fixed player count and would auto-kick the bot
+                // straight back out. See the JNI side.
+                command == AdminCommand.ADD_BOT ->
+                    "Turn bot balancing off in game setup to add bots"
+                else -> "$subject failed"
+            }
+            Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /**
      * Asks for Wi-Fi Direct's discovery permission the first time the player
      * goes looking for a multiplayer game, and never again in this session -
@@ -663,6 +792,10 @@ class MainActivity : AppCompatActivity() {
             hudState.statusText = "Failed to start local game (see logcat)"
             return
         }
+        // This device owns the game state now, so the admin controls apply -
+        // asked of the engine rather than inferred from having taken the
+        // host path, since that is the same question adminCommand answers.
+        hudState.isHost = withContext(Dispatchers.Default) { NativeBridge.isGameHost() }
         updateHostingLabel()
         runTickLoop()
     }

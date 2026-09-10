@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.automirrored.filled.Chat
@@ -194,6 +195,11 @@ class GameHudState {
     // split upstream makes (TankKeyboardControlUtil refuses the fire key
     // for a position-select weapon; the click handler does the work).
     var positionSelectWeapon by mutableStateOf("")
+    // Whether this device is hosting, which is what decides if the admin
+    // button is there at all. A joined client has no authority over anyone
+    // else in the game, so it gets no button rather than a button that
+    // fails - see NativeBridge.isGameHost.
+    var isHost by mutableStateOf(false)
     // Development performance readout (frame rate / draw calls / targets).
     // Empty hides it. Deliberately plain text in the existing status
     // column rather than an overlay of its own - it is a temporary aid
@@ -259,6 +265,7 @@ class GameHudState {
         floatingLabels = emptyList()
         windLabel = ""
         positionSelectWeapon = ""
+        isHost = false
         perfLabel = ""
         dialog = HudDialog.None
         chatToasts = emptyList()
@@ -295,6 +302,7 @@ fun GameHud(
     onScores: () -> Unit,
     onCameraPresets: () -> Unit,
     onSimulationSpeed: () -> Unit,
+    onAdmin: () -> Unit,
     onSendChat: (String) -> Unit,
 ) {
     // M6 parity: upstream's HUD_ITEMS toggle. Everything goes except one
@@ -354,6 +362,13 @@ fun GameHud(
                 .windowInsetsPadding(WindowInsets.displayCutout)
                 .padding(12.dp),
         ) {
+            // Host only. Everything behind it acts on other people in the
+            // game - kicking, banning, muting - and a joined client has no
+            // authority to do any of it, so it gets no button rather than
+            // one that quietly does nothing.
+            if (state.isHost) {
+                HudIconButton(Icons.Filled.AdminPanelSettings, "Admin", onAdmin)
+            }
             HudIconButton(Icons.Filled.Search, "Find LAN games", onFindGames)
             // Outermost, in the corner: the camera toggle is the one control
             // here reached mid-aim, so it gets the position the thumb finds

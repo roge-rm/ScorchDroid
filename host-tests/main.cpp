@@ -43,6 +43,8 @@
 #include <server/ServerChannelManager.hpp>
 #include <server/ServerTimedMessage.hpp>
 #include <server/ServerConnectAuthHandler.hpp>
+#include <server/ServerAdminCommon.hpp>
+#include <server/ServerAdminSessions.hpp>
 #include <common/Clock.hpp>
 #include <landscapemap/LandscapeMaps.hpp>
 #include <landscapemap/GroundMaps.hpp>
@@ -2308,6 +2310,110 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 	return joined ? 0 : 1;
 }
 
+// The host's admin commands (upstream's AdminDialog, whose UI lived in
+// src/client and so was never ported).
+//
+// The point of this test is that none of this is new engine code:
+// ServerAdminCommon, ServerAdminSessions and ServerAdminHandler have been
+// compiled into this build all along, with nothing able to reach them. So
+// what needs proving is the path the app now takes - the local credentials
+// really do carry the permissions, and each command really does change the
+// game state it claims to.
+//
+// Runs immediately before testServerRestart, which tears the shared server
+// down anyway: these commands take money off players and kill tanks, and a
+// later test finding a poor dead tank would be a confusing way to learn
+// about it.
+static void testAdminCommands()
+{
+	printf("admin commands (the host's own authority over the game):\n");
+
+	ScorchedServer *server = ScorchedServer::instance();
+	ServerAdminSessions::Credential &credential =
+		server->getServerAdminSessions().getLocalUserCredentials();
+
+	// The device hosting the game is upstream's "local account", which is
+	// what its own web admin authenticates as (ServerWebHandler.cpp:673).
+	// Every command below is gated on one of these, so if this is wrong they
+	// all silently refuse.
+	check(credential.hasPermission(ServerAdminSessions::PERMISSION_KICKPLAYER) &&
+		  credential.hasPermission(ServerAdminSessions::PERMISSION_BANPLAYER) &&
+		  credential.hasPermission(ServerAdminSessions::PERMISSION_ADDPLAYER) &&
+		  credential.hasPermission(ServerAdminSessions::PERMISSION_ALTERGAME),
+		"the local account holds the permissions every admin command is gated on");
+
+	std::map< unsigned int, Tank * > &tanks = server->getTargetContainer().getTanks();
+	check(!tanks.empty(), "there are players to administer");
+	if (tanks.empty()) return;
+
+	Tank *target = tanks.begin()->second;
+	const unsigned int targetId = target->getPlayerId();
+
+	// A command naming nobody must fail rather than acting on someone else -
+	// the app reaches these with a player id read from a list that can be a
+	// round out of date.
+	check(!ServerAdminCommon::kickPlayer(credential, 0xFFFFFFFF),
+		"a command against a player who is not there is refused");
+
+	check(ServerAdminCommon::mutePlayer(credential, targetId, true) &&
+		  target->getState().getMuted(),
+		"mute silences the named player");
+	check(ServerAdminCommon::mutePlayer(credential, targetId, false) &&
+		  !target->getState().getMuted(),
+		"...and unmute gives them their voice back");
+
+	target->getScore().setMoney(5000);
+	check(ServerAdminCommon::poorPlayer(credential, targetId) &&
+		  target->getScore().getMoney() == 0,
+		"taking a player's money leaves them with none");
+
+	// Adding a bot. Checked as far as this test can honestly reach: that the
+	// command is accepted and really does queue a tank addition.
+	//
+	// Deliberately not asserting that the bot then appears. Three steps stand
+	// between the call and a player - addPlayer queues the name onto
+	// ServerConnectAuthHandler's aiAdditions_, whose processMessages() turns
+	// it into a TankAddSimAction, which the simulator has to reach an event
+	// time to invoke - and by the time this test runs, five earlier tests
+	// have killed, moved, shielded and impoverished the tanks in this shared
+	// server, whose state machine is free to add and remove bots of its own
+	// while the pump runs. Pinning the outcome here would be pinning those
+	// tests' leftovers, not this command.
+	//
+	// Two things worth knowing came out of trying anyway, both recorded
+	// because each one looks exactly like a broken feature:
+	//  - Simulator::simulate() advances its own clock from wall time, so a
+	//    tight pump with no sleep spins without ever reaching the queued
+	//    action's event time.
+	//  - ServerStateEnoughPlayers::ballanceBots() holds the game at exactly
+	//    RemoveBotsAtPlayers players, adding *and removing* bots to get
+	//    there, so a hand-added bot is auto-kicked straight back out. That is
+	//    why the app refuses this command outright while balancing is on
+	//    (engine_jni.cpp's kAdminAddBot) rather than reporting a success the
+	//    player then watches vanish.
+	{
+		const unsigned int outstandingBefore = TankAddSimAction::TankAddSimActionCount;
+		check(ServerAdminCommon::addPlayer(credential, "Moron"),
+			"the host can ask for another bot");
+		server->getServerConnectAuthHandler().processMessages();
+		check(TankAddSimAction::TankAddSimActionCount > outstandingBefore,
+			"...and the request becomes a real queued tank addition");
+		printf("    outstanding tank additions %u -> %u (balancing target %d)\n",
+			outstandingBefore, TankAddSimAction::TankAddSimActionCount,
+			server->getOptionsGame().getRemoveBotsAtPlayers());
+	}
+
+	// Kill last, for the reason in this function's own comment. Re-read the
+	// tank rather than trusting the pointer from the top: the pump above runs
+	// the real state machine, which is entitled to have removed it.
+	Tank *stillThere = server->getTargetContainer().getTankById(targetId);
+	if (stillThere && stillThere->getState().getState() == TankState::sNormal)
+	{
+		check(ServerAdminCommon::killPlayer(credential, targetId),
+			"the host can kill a player outright");
+	}
+}
+
 // M9 gate: can the engine stop and start again inside one process?
 //
 // The main menu turns "quit to menu, start something else" into the ordinary
@@ -3591,6 +3697,7 @@ int main(int argc, char **argv)
 	testTankMovement();
 	testRealTcpHostAndConnect();
 	testClientJoin();
+	testAdminCommands();
 	testServerRestart();
 	testGameSetup();
 	testPlayerProfile();

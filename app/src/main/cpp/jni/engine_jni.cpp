@@ -19,6 +19,8 @@ std::mutex g_engineMutex;
 #include <server/ServerTimedMessage.hpp>
 #include <server/ServerConnectAuthHandler.hpp>
 #include <server/ServerLoadLevel.hpp>
+#include <server/ServerAdminCommon.hpp>
+#include <server/ServerAdminSessions.hpp>
 #include <server/ServerHandlers.hpp>
 #include <server/ServerDestinations.hpp>
 #include <target/TargetContainer.hpp>
@@ -1693,6 +1695,126 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
         env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(row.c_str()));
     }
     return result;
+}
+
+
+// Admin: kick, ban, mute, slap and the rest, for the device hosting the game.
+//
+// The whole subsystem was already here and running - ComsAdminMessage,
+// ServerAdminHandler, ServerAdminCommon and ServerAdminSessions are all in
+// common/coms and server/server, both of which this build compiles. What was
+// missing was any way to reach it, because upstream's own admin UI lives in
+// src/client (dialogs/AdminDialog.cpp), which this port replaced. So this is
+// a JNI surface over a subsystem that already works, not a port of one.
+//
+// Calls ServerAdminCommon directly rather than sending ourselves a
+// ComsAdminMessage. The host *is* the server, in this process - the same
+// reasoning as fireWeapon and addHumanTank, which construct the real message
+// or sim action and hand it straight to the server rather than round-tripping
+// through a socket. The message form exists for a remote admin, which this
+// is not.
+//
+// Credentials are ServerAdminSessions' own local account, which is what
+// upstream gives the machine running the server (its web admin uses exactly
+// this - ServerWebHandler.cpp:673) and which holds every permission. No login
+// step: whoever is holding the device is already the person running the game.
+enum AdminCommand {
+    kAdminKick    = 0,
+    kAdminBan     = 1,
+    kAdminMute    = 2,
+    kAdminUnMute  = 3,
+    kAdminSlap    = 4,
+    kAdminPoor    = 5,
+    kAdminKill    = 6,
+    kAdminAddBot  = 7,
+    kAdminNewGame = 8,
+    kAdminKillAll = 9,
+};
+
+// Whether the admin controls should be offered at all: true only when this
+// device owns the game state. A joined client has no authority over anyone -
+// its ServerAdminCommon calls would run against a ScorchedServer that does
+// not exist in its process.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_isGameHost(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    return (g_mode == EngineMode::kHost && ScorchedServer::serverStarted())
+        ? JNI_TRUE : JNI_FALSE;
+}
+
+// Runs one admin command, answering whether the server accepted it - which is
+// worth surfacing, since ServerAdminCommon refuses a command against a player
+// who has already gone rather than failing loudly.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_adminCommand(
+    JNIEnv *env, jobject, jint command, jint playerId, jstring jReason) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    if (g_mode != EngineMode::kHost || !ScorchedServer::serverStarted()) return JNI_FALSE;
+
+    const char *reasonChars = jReason ? env->GetStringUTFChars(jReason, nullptr) : nullptr;
+    const std::string reason = reasonChars ? reasonChars : "";
+    if (reasonChars) env->ReleaseStringUTFChars(jReason, reasonChars);
+
+    ServerAdminSessions::Credential &credential =
+        ScorchedServer::instance()->getServerAdminSessions().getLocalUserCredentials();
+    const unsigned int target = (unsigned int) playerId;
+    bool accepted = false;
+
+    switch (command) {
+    case kAdminKick:
+        accepted = ServerAdminCommon::kickPlayer(credential, target);
+        break;
+    case kAdminBan:
+        accepted = ServerAdminCommon::banPlayer(credential, target, reason.c_str());
+        break;
+    case kAdminMute:
+        accepted = ServerAdminCommon::mutePlayer(credential, target, true);
+        break;
+    case kAdminUnMute:
+        accepted = ServerAdminCommon::mutePlayer(credential, target, false);
+        break;
+    case kAdminSlap:
+        // Upstream's own dialog sends 10 life (AdminDialog.cpp's slap
+        // button), so this is that number rather than one chosen here.
+        accepted = ServerAdminCommon::slapPlayer(credential, target, 10.0f);
+        break;
+    case kAdminPoor:
+        accepted = ServerAdminCommon::poorPlayer(credential, target);
+        break;
+    case kAdminKill:
+        accepted = ServerAdminCommon::killPlayer(credential, target);
+        break;
+    case kAdminAddBot:
+        // Refused outright while bot balancing is on, because it could not
+        // work: ServerStateEnoughPlayers::ballanceBots() holds the game at
+        // exactly RemoveBotsAtPlayers players, adding and removing bots to
+        // get there, so a bot added here is auto-kicked within a tick or
+        // two. Found by host-tests, which runs at upstream's default of 2 and
+        // saw the count never move. Better to say no than to report success
+        // for a player who then vanishes; the host can turn balancing off in
+        // the game setup screen, which is where that decision belongs.
+        if (ScorchedServer::instance()->getOptionsGame().getRemoveBotsAtPlayers() != 0) {
+            LOGI("adminCommand: add bot refused - bot balancing holds the game at %d players",
+                 ScorchedServer::instance()->getOptionsGame().getRemoveBotsAtPlayers());
+            accepted = false;
+            break;
+        }
+        // The bot type the game was set up with, so an added bot matches the
+        // ones already playing rather than being some other difficulty.
+        accepted = ServerAdminCommon::addPlayer(credential, reason.c_str());
+        break;
+    case kAdminNewGame:
+        accepted = ServerAdminCommon::newGame(credential);
+        break;
+    case kAdminKillAll:
+        accepted = ServerAdminCommon::killAll(credential);
+        break;
+    default:
+        break;
+    }
+
+    LOGI("adminCommand: command=%d player=%u accepted=%d", (int) command, target, (int) accepted);
+    return accepted ? JNI_TRUE : JNI_FALSE;
 }
 
 // M6 parity: the score / player list (upstream's SHOW_SCORE_DIALOG). Every
