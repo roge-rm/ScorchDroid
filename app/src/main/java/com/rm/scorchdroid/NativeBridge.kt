@@ -413,6 +413,40 @@ object NativeBridge {
 
     /** The current speed as "numerator|denominator". */
     external fun getSimulationSpeed(): String
+
+    /**
+     * Whether this device owns the game state, and so has authority over the
+     * people in it. False when joined as a client, where the admin commands
+     * would have no server in this process to act on.
+     */
+    external fun isGameHost(): Boolean
+
+    /**
+     * Runs one [AdminCommand] against [playerId] (ignored by the commands
+     * that act on the whole game), answering whether the server accepted it.
+     *
+     * [arg] is the ban reason for [AdminCommand.BAN] and the bot type for
+     * [AdminCommand.ADD_BOT]; unused otherwise.
+     */
+    external fun adminCommand(command: Int, playerId: Int, arg: String): Boolean
+}
+
+/**
+ * Mirrors engine_jni.cpp's AdminCommand. These reach ServerAdminCommon, the
+ * same code upstream's own admin dialog drives through ComsAdminMessage - see
+ * the JNI side for why the host calls it directly instead.
+ */
+object AdminCommand {
+    const val KICK = 0
+    const val BAN = 1
+    const val MUTE = 2
+    const val UNMUTE = 3
+    const val SLAP = 4
+    const val POOR = 5
+    const val KILL = 6
+    const val ADD_BOT = 7
+    const val NEW_GAME = 8
+    const val KILL_ALL = 9
 }
 
 /**
