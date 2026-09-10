@@ -1699,6 +1699,32 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
 
 
 
+
+// Whether "my tank" owns an Auto Defense accessory.
+//
+// A real, buyable accessory (accessories.xml, armslevel 7, 3000) whose own
+// description says what it is for: "Allows the tank to activate shields and
+// parachutes before the round begins." Without it, defences can only be
+// raised during your turn.
+//
+// Upstream spends it in exactly one place. Finishing the shop stimulates
+// StimAutoDefense, and AutoDefenseDialog::windowInit then either shows a
+// shield/parachute chooser or goes straight through:
+//
+//     if (haveDefense()) displayCurrent(); else finished();
+//
+// so this is that condition, and nothing else. Until now this port sold the
+// accessory and gave it nothing to do.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_hasAutoDefense(JNIEnv *, jobject) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    Tank *tank = findMyTank();
+    if (!tank) return JNI_FALSE;
+    // getAutoDefense().haveDefense() is upstream's own accessor for this and
+    // asks the same question of the same list.
+    return tank->getAccessories().getAutoDefense().haveDefense() ? JNI_TRUE : JNI_FALSE;
+}
+
 // The aiming servo sounds - upstream's TankKeyboardControlUtil, which holds
 // four sound sources this port had no analogue for: a one-shot
 // movement.wav as the turret starts moving, plus looping turn.wav,
