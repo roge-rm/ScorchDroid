@@ -502,8 +502,20 @@ namespace
 		float age, life;
 	};
 
+	// A WeaponDeathAnimation's column (upstream's ExplosionLaserBeamRenderer)
+	// - five nested rings of light rising out of the ground where a tank
+	// died, turning as they go.
+	struct DeathBeam {
+		float x, y, z;      // render space, at the ground
+		float r, g, b;
+		float radius;       // the outermost ring
+		float angle;        // degrees, accumulating
+		float age, life;
+	};
+
 	std::vector<Particle> particles;
 	std::vector<Beam> beams;
+	std::vector<DeathBeam> deathBeams;
 	std::vector<MushroomEmitter> mushroomEmitters;
 	// V1: the sprite array (see ParticleTextures.h), one 128-square layer
 	// per texture, and the CPU copy it is rebuilt from after a context loss.
@@ -4496,6 +4508,50 @@ namespace
 				}
 				break;
 			}
+			case ScorchDroidEffects::eDeathBeam: {
+				if (deathBeams.size() < 4) {
+					DeathBeam column = {};
+					column.x = x; column.z = z;
+					// Grows out of the ground rather than out of wherever the
+					// tank's centre was, which is what upstream's draw does
+					// by pinning its own z to 0.
+					column.y = sampledGroundHeight(x, z);
+					column.r = event.r; column.g = event.g; column.b = event.b;
+					column.radius = std::max(event.size, 1.0f);
+					// size_ is both the radius and the lifetime upstream -
+					// its simulate removes the effect once time_ passes it.
+					column.life = column.radius;
+					deathBeams.push_back(column);
+				}
+
+				// The burst that goes up with it. Upstream emits 800
+				// particles between two points either side of the death,
+				// yellow at birth and blue at the end, thrown *upwards* - its
+				// gravity here is +z, not down - and swelling from half a
+				// unit to ten as they go.
+				const float ground = sampledGroundHeight(x, z);
+				// Upstream's own 800, trimmed to the effects-detail budget the
+				// rest of this port's particles respect.
+				const size_t budget = (size_t) g_maxParticles.load();
+				for (int n = 0; n < 800 && particles.size() < budget; n++) {
+					Particle spark = {};
+					spark.x = x + (randomUnit() * 8.0f - 4.0f);
+					spark.z = z + (randomUnit() * 8.0f - 4.0f);
+					spark.y = ground;
+					spark.vx = randomSigned() * 1.5f;
+					spark.vz = randomSigned() * 1.5f;
+					spark.vy = 4.0f + randomUnit() * 9.0f;
+					spark.r = 0.9f; spark.g = 0.9f; spark.b = 0.1f;
+					spark.worldSize = 0.5f;
+					spark.growth = 9.0f;          // 0.5 to ten units, as upstream sizes it
+					spark.gravityScale = -0.4f;   // upstream throws these up, not down
+                    spark.drag = 0.98f;
+					spark.life = 0.9f + randomUnit() * 4.0f;
+					spark.age = 0.0f;
+					particles.push_back(spark);
+				}
+				break;
+			}
 			case ScorchDroidEffects::eLaser:
 			case ScorchDroidEffects::eLightning: {
 				if (beams.size() >= kMaxBeams) break;
@@ -4517,6 +4573,22 @@ namespace
 
 	void updateEffects(ScorchedContext &ctx, float deltaSeconds)
 	{
+		// The death columns turn as they rise. Upstream adds three degrees a
+		// simulate call, which is however fast its frames happen to run;
+		// this is that at sixty of them, expressed per second so it turns at
+		// the same rate whatever this device manages.
+		{
+			size_t live = 0;
+			for (size_t i = 0; i < deathBeams.size(); i++) {
+				deathBeams[i].age += deltaSeconds;
+				if (deathBeams[i].age >= deathBeams[i].life) continue;
+				deathBeams[i].angle += 180.0f * deltaSeconds;
+				if (deathBeams[i].angle > 360.0f) deathBeams[i].angle -= 360.0f;
+				deathBeams[live++] = deathBeams[i];
+			}
+			deathBeams.resize(live);
+		}
+
 		const float kGravity = 9.0f;  // not the sim's gravity: this is smoke, not ballistics
 
 		// X1: the wind, as upstream's ParticleEngine::simulate applies it
@@ -4805,6 +4877,60 @@ namespace
 				data.push_back(r); data.push_back(g); data.push_back(b);
 				data.push_back(beam.x2); data.push_back(beam.y2); data.push_back(beam.z2);
 				data.push_back(r); data.push_back(g); data.push_back(b);
+			}
+
+			// The death columns, in the same line buffer as the beams.
+			//
+			// Upstream's own numbers: five rings at radius
+			// (size/(layers+1))*(j+1), the whole thing scaled by time*0.05,
+			// rising to min(time^3, 100), each layer turned further than the
+			// last, in its own blue at 0.4 alpha.
+			//
+			// One deliberate departure. Upstream builds its ring points as
+			// Vector(angleInDegrees, radius) and uses them as coordinates
+			// without ever converting polar to cartesian - so what it
+			// actually draws is a flat sheet stretching along x, not the
+			// column the arithmetic plainly intends (the same values are
+			// handed to glNormal3fv, where they mean even less). This draws
+			// the intended rings. Copying the missing conversion would
+			// reproduce a bug rather than an effect.
+			for (size_t i = 0; i < deathBeams.size(); i++) {
+				const DeathBeam &column = deathBeams[i];
+				const float t = column.age;
+				const float spread = t * 0.05f;
+				float height = t * t * t;
+				if (height > 100.0f) height = 100.0f;
+				const float fade = (1.0f - t / column.life) * 0.4f;
+				if (fade <= 0.0f || height <= 0.0f) continue;
+				const float r = column.r * fade, g = column.g * fade, b = column.b * fade;
+
+				const int layers = 5, sides = 8;
+				for (int layer = 0; layer < layers; layer++) {
+					const float radius =
+						(column.radius / (float) (layers + 1)) * (float) (layer + 1) * spread;
+					// Each layer turned further round than the one inside it,
+					// which is what upstream's repeated glRotatef does.
+					const float turn = (column.angle * (float) (layer + 1)) * 3.14159265f / 180.0f;
+					float prevX = 0.0f, prevZ = 0.0f;
+					for (int side = 0; side <= sides; side++) {
+						const float a = turn + (6.2831853f * (float) side) / (float) sides;
+						const float px = column.x + cosf(a) * radius;
+						const float pz = column.z + sinf(a) * radius;
+						// The upright of the cage.
+						data.push_back(px); data.push_back(column.y); data.push_back(pz);
+						data.push_back(r); data.push_back(g); data.push_back(b);
+						data.push_back(px); data.push_back(column.y + height); data.push_back(pz);
+						data.push_back(r); data.push_back(g); data.push_back(b);
+						// ...and the hoop round the top, closing the ring.
+						if (side > 0) {
+							data.push_back(prevX); data.push_back(column.y + height); data.push_back(prevZ);
+							data.push_back(r); data.push_back(g); data.push_back(b);
+							data.push_back(px); data.push_back(column.y + height); data.push_back(pz);
+							data.push_back(r); data.push_back(g); data.push_back(b);
+						}
+						prevX = px; prevZ = pz;
+					}
+				}
 			}
 
 			if (!data.empty()) {

@@ -33,6 +33,10 @@ namespace ScorchDroidEffects
 		eNapalm,         // one burning patch; size is the flame radius
 		eLaser,          // beam from position to endPosition
 		eLightning,      // one arc segment, position to endPosition
+		// A WeaponAnimation's own effect - upstream's only one is
+		// ExplosionLaserBeamRenderer, the blue column a tank can go up in
+		// when it dies. size is the column's radius.
+		eDeathBeam,
 		eShieldHit,      // flash on a shield sphere; size is the shield radius
 		eSkyFlash,       // whole-sky flash (a nuke); position is unused
 		eTeleport,       // a tank arriving or leaving; size is its radius
