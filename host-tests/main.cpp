@@ -316,6 +316,74 @@ namespace
 			"human tank is still present after further simulation (not re-destroyed)");
 	}
 
+	// The order weapons are listed in.
+	//
+	// Upstream's default AccessorySortKey is SortNothing, and that is not
+	// "unordered" - AccessoryStore::getAllAccessories sorts only when the
+	// key is non-zero, so it hands back the order accessories.xml declares.
+	// That order is deliberately grouped, which is the whole point: Baby
+	// Roller, Roller and Heavy Roller sit together, and a player can see at
+	// a glance what a weapon is a bigger version of.
+	//
+	// This port asked for SortName, which scattered every family across the
+	// alphabet. Reported from a real game.
+	void testWeaponListOrder()
+	{
+		printf("weapon list order (upstream's grouping, not the alphabet):\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+		const char *family[] = { "Baby Roller", "Roller", "Heavy Roller" };
+
+		// Where each of the three lands in the list the shop is built from.
+		int declared[3] = { -1, -1, -1 };
+		{
+			std::list< Accessory * > accessories =
+				server->getAccessoryStore().getAllAccessories(AccessoryStore::SortNothing);
+			int index = 0;
+			for (std::list< Accessory * >::iterator itor = accessories.begin();
+				itor != accessories.end(); ++itor, ++index)
+			{
+				for (int f = 0; f < 3; f++)
+				{
+					if (0 == strcmp((*itor)->getName(), family[f])) declared[f] = index;
+				}
+			}
+		}
+
+		check(declared[0] >= 0 && declared[1] >= 0 && declared[2] >= 0,
+			"the three rollers are all in the shop list");
+		if (declared[0] < 0 || declared[1] < 0 || declared[2] < 0) return;
+
+		printf("    Baby Roller %d, Roller %d, Heavy Roller %d\n",
+			declared[0], declared[1], declared[2]);
+		check(declared[0] < declared[1] && declared[1] < declared[2],
+			"...in the order accessories.xml declares them");
+		check(declared[1] == declared[0] + 1 && declared[2] == declared[1] + 1,
+			"...and next to each other, which is the grouping worth keeping");
+
+		// And the proof that the key matters rather than the data happening
+		// to be alphabetical anyway: by name, Baby Roller sorts away from
+		// the other two entirely.
+		{
+			std::list< Accessory * > byName =
+				server->getAccessoryStore().getAllAccessories(AccessoryStore::SortName);
+			int nameIndex[3] = { -1, -1, -1 };
+			int index = 0;
+			for (std::list< Accessory * >::iterator itor = byName.begin();
+				itor != byName.end(); ++itor, ++index)
+			{
+				for (int f = 0; f < 3; f++)
+				{
+					if (0 == strcmp((*itor)->getName(), family[f])) nameIndex[f] = index;
+				}
+			}
+			printf("    sorted by name they would be %d, %d, %d\n",
+				nameIndex[0], nameIndex[1], nameIndex[2]);
+			check(nameIndex[1] != nameIndex[0] + 1 || nameIndex[2] != nameIndex[1] + 1,
+				"...where sorting by name splits the family up");
+		}
+	}
+
 	// The game's own messages - kills, joins, round notices - reaching the
 	// chat log.
 	//
@@ -3815,6 +3883,7 @@ int main(int argc, char **argv)
 	testHumanTankHasNoAI();
 	testEconomyBuyAndSelect();
 	testNonWeaponCannotBeFired();
+	testWeaponListOrder();
 	testGameMessagesReachTheChatLog();
 	testDefenseAccessories();
 	testNonShotMoves();
