@@ -33,7 +33,7 @@ simulation speed control (`getSimulator().setFast`, already wired at
 
 ## Gaps found
 
-### Audio — the aiming servo sounds
+### Audio — the aiming servo sounds — DONE 2026-09-10
 
 `TankKeyboardControlUtil` holds four sound sources this port has no analogue
 for: `startSound_` (`movement.wav`, one-shot) plus looping `rotateSound_`
@@ -48,7 +48,7 @@ support in the sound path, which is one-shot today.
 This is the one gap the audio parity pass missed — it was found here, not
 there, because the sounds live in `tankgraph/` rather than `sound/`.
 
-### Admin — a whole subsystem, server side already built
+### Admin — a whole subsystem, server side already built — DONE 2026-09-10
 
 `ComsAdminMessage` carries login, kick, slap, poor, ban, flag, mute, permanent
 mute, kill-all, admin talk, broadcast message, show-banned and sync check.
@@ -69,12 +69,19 @@ port handles the message.
 Depends on the minimap, which is already on the deferred list — the plan view
 *is* the minimap, so the two are one piece of work.
 
-### Auto-defense selection
+### Auto-defense selection — DONE 2026-09-10
 
-`TanketAutoDefense` is engine-side and compiled, and auto-defense accessories
-already appear in this port's shop (`engine_jni.cpp:602`). Upstream adds a
-dialog for choosing *which* shield, parachute or battery is used
-automatically. The buying works; the choosing does not.
+Corrected on implementing it: nothing is *automatic*, despite the name -
+`TanketAutoDefense::newMatch()` and `changed()` are both empty upstream. "Auto
+Defense" is a buyable accessory (armslevel 7, cost 3000) whose description is
+the whole feature: "Allows the tank to activate shields and parachutes before
+the round begins." Upstream spends it once, when the shop closes:
+`AutoDefenseDialog::windowInit` runs `if (haveDefense()) displayCurrent(); else
+finished();`.
+
+Wired to "Done buying" for that reason, and deliberately *not* to a long press
+on the Defences button - that button is reachable at any time, so hanging it
+there would give every player the accessory's benefit for free.
 
 ### Tooltips
 
@@ -91,6 +98,11 @@ work; one feature, not two.
   deferred decision, not an oversight.
 - **`console/`.** The desktop developer console, same category as the excluded
   web admin server.
+
+## Remaining
+
+Plan drawing (`ComsLinesMessage`), which is one job with the deferred minimap,
+and tooltip settings, which is one job with the deferred tank tooltip.
 
 ## The structural finding
 
