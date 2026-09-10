@@ -282,6 +282,19 @@ data class ChatToast(val line: ChatLine, val shownAtMillis: Long)
 /** How long each message stays on screen before it fades out. */
 const val CHAT_TOAST_MILLIS = 5_000L
 
+/**
+ * How many messages may be on screen at once. The oldest goes as soon as
+ * the limit is passed, without waiting out [CHAT_TOAST_MILLIS].
+ *
+ * A timer alone was enough while these were only what players typed. It
+ * stopped being enough when the game's own announcements joined them: the
+ * start of a match, and any weapon that kills several tanks at once, produce
+ * a burst faster than five seconds can drain, and the stack grew until it
+ * covered the screen. A message pushed off early is no loss - the score
+ * dialog keeps the full history.
+ */
+const val MAX_CHAT_TOASTS = 20
+
 @Composable
 fun GameHud(
     state: GameHudState,

@@ -1160,8 +1160,17 @@ class MainActivity : AppCompatActivity() {
                     lastChatLineId = fresh.last().id
                     // Each gets its own arrival stamp here, which is what
                     // lets the HUD expire them independently.
+                    //
+                    // Trimmed to the newest MAX_CHAT_TOASTS, which drops the
+                    // oldest the moment the limit is passed rather than
+                    // waiting out its timer. takeLast rather than a check on
+                    // the existing stack, because one poll can carry a whole
+                    // burst on its own - a Death's Head announces every tank
+                    // it killed at once.
                     val now = System.currentTimeMillis()
-                    hudState.chatToasts = hudState.chatToasts + fresh.map { ChatToast(it, now) }
+                    hudState.chatToasts =
+                        (hudState.chatToasts + fresh.map { ChatToast(it, now) })
+                            .takeLast(MAX_CHAT_TOASTS)
                 }
             }
             kotlinx.coroutines.delay(100)
