@@ -59,6 +59,8 @@
 #include <InstanceBuffer.hpp>
 #include <TreeGeometry.hpp>
 #include <weapons/WeaponMoveTank.hpp>
+#include <weapons/WeaponRoller.hpp>
+#include <3dsparse/ModelStore.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <image/ImageFactory.hpp>
 #include <3dsparse/ModelStore.hpp>
@@ -314,6 +316,106 @@ namespace
 		server->getSimulator().simulate();
 		check(server->getTargetContainer().getTankById(tankId) != nullptr,
 			"human tank is still present after further simulation (not re-destroyed)");
+	}
+
+	// Rollers reaching the renderer.
+	//
+	// Reported: a Roller's balls show in Scorched3D and not on the phone.
+	// They are ShotBounce actions, and the collector this port added only
+	// ever gathered ShotProjectile - so nothing knew they existed. This
+	// checks the half that can be checked without a screen: that firing a
+	// real WeaponRoller puts real rollers where the renderer looks for them.
+	void testRollersAreCollected()
+	{
+		printf("rollers reach the renderer's collector:\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+		ScorchedContext &context = server->getContext();
+
+		Accessory *babyRoller =
+			server->getAccessoryStore().findByPrimaryAccessoryName("Baby Roller");
+		check(babyRoller != nullptr, "Baby Roller is a real accessory");
+		if (!babyRoller) return;
+
+		// The rollers are not the weapon itself - Baby Roller is a
+		// WeaponProjectile whose collisionaction is the WeaponRoller, which
+		// is what drops them when the shell lands.
+		WeaponRoller *roller = (WeaponRoller *)
+			server->getAccessoryStore().findAccessoryPartByAccessoryId(
+				babyRoller->getAccessoryId(), "WeaponRoller");
+		check(roller != nullptr, "...whose collision action is a WeaponRoller");
+		if (!roller) return;
+
+		Tank *tank = nullptr;
+		std::map< unsigned int, Tank * > &tanks = server->getTargetContainer().getTanks();
+		if (!tanks.empty()) tank = tanks.begin()->second;
+		check(tank != nullptr, "found a tank to fire it");
+		if (!tank) return;
+
+		// Drain anything already in flight so the count below is ours.
+		{
+			std::vector< FixedVector > p; std::vector< FixedVector4 > r;
+			std::vector< WeaponRoller * > w; std::vector< unsigned int > ids;
+			context.getActionController().getRollerPositions(p, r, w, ids);
+		}
+
+		FixedVector position = tank->getLife().getTargetPosition();
+		position[2] += fixed(10);
+		FixedVector velocity;
+		WeaponFireContext fireContext(tank->getPlayerId(), 0, 0, velocity, false, false);
+		roller->fireWeapon(context, fireContext, position, velocity);
+
+		// addAction only queues onto newActions_; ActionController::simulate
+		// is what moves an action into the list the collector walks. The app
+		// simulates continuously so this is invisible there, but a test that
+		// fires and looks in the same breath sees nothing.
+		for (int tick = 0; tick < 20; tick++)
+		{
+			server->getSimulator().simulate();
+			usleep(20 * 1000);
+		}
+
+		std::vector< FixedVector > positions;
+		std::vector< FixedVector4 > rotations;
+		std::vector< WeaponRoller * > weapons;
+		std::vector< unsigned int > playerIds;
+		context.getActionController().getRollerPositions(
+			positions, rotations, weapons, playerIds);
+
+		printf("    %zu rollers collected\n", positions.size());
+		check(!positions.empty(), "a fired WeaponRoller puts rollers where the renderer looks");
+		if (positions.empty()) return;
+
+		check(weapons[0] != nullptr, "...each carrying the weapon that dropped it");
+		check(weapons[0]->getRollerModelID().modelValid(),
+			"...whose <rollermodel> is a model the renderer can ask for");
+		check(playerIds[0] == tank->getPlayerId(), "...and the tank that fired it");
+
+		// The size the renderer will draw it at, which is the half that was
+		// actually wrong: upstream's 0.08 is compensation for its raw mesh,
+		// and this port's uploadModel has already normalised anything over
+		// three units down to 2.2. Applying both drew the ball at about two
+		// per cent of its size, which is why it was reported invisible even
+		// though every roller above was being collected correctly.
+		Model *model = ModelStore::instance()->loadModel(weapons[0]->getRollerModelID());
+		check(model != nullptr, "...and a model that loads");
+		if (model)
+		{
+			FixedVector size = model->getMax() - model->getMin();
+			const float raw = size.Magnitude().asFloat();
+			const float upstreamDrawn = raw * 0.08f;
+			printf("    roller mesh %.1f units raw, upstream draws it at %.2f\n",
+				raw, upstreamDrawn);
+			check(raw > 3.0f,
+				"...big enough that uploadModel normalises it, so its own 2.2 applies");
+			// And the two do *not* coincide, which is the point: normalising
+			// alone would draw the ball at half the size upstream does, so
+			// the renderer divides the normalisation back out rather than
+			// just dropping upstream's 0.08. This assertion exists because
+			// the first attempt assumed they matched.
+			check(fabsf(upstreamDrawn - 2.2f) > 0.5f,
+				"...and upstream's raw*0.08 is not the same size, so it cannot just be dropped");
+		}
 	}
 
 	// The order weapons are listed in.
@@ -3897,6 +3999,9 @@ int main(int argc, char **argv)
 	testTankMovement();
 	testRealTcpHostAndConnect();
 	testClientJoin();
+	// After the landscape exists: WeaponRoller::fireWeapon samples the
+	// ground height, and an empty height map is a segfault, not a zero.
+	testRollersAreCollected();
 	testAdminCommands();
 	testServerRestart();
 	testGameSetup();

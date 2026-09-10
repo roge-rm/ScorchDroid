@@ -7527,22 +7527,36 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			FixedVector &p = rollerPositions[i];
 			const float wx = p[0].asFloat();
 			const float wz = worldZFromEngineY(p[1].asFloat());
-			const float scale = 0.08f * roller->getScale(*ctx).asFloat();
-			// Upstream's lift, which uses a flat 0.08 rather than the
-			// scaled one - copied as written.
-			const float lift = rollerModel
-				? -rollerModel->getMin()[2].asFloat() * 0.08f : 0.0f;
-			const float wy = p[2].asFloat() + lift;
-			if (wy < cullBelowY) continue;
 
 			if (!gpu) {
 				if (primary) {
 					unmodelledShots.push_back(wx);
-					unmodelledShots.push_back(wy);
+					unmodelledShots.push_back(p[2].asFloat());
 					unmodelledShots.push_back(wz);
 				}
-                continue;
+				continue;
 			}
+
+			// Upstream scales the *raw* mesh by 0.08, and uploadModel has
+			// already normalised anything over three units down to 2.2 (see
+			// gpu.scale). Applying both drew the ball at about two per cent
+			// of its size, which is why it was invisible.
+			//
+			// So the normalisation is divided back out and upstream's factor
+			// applied to what it was written for, leaving gpu->scale * scale
+			// equal to 0.08 * the weapon's own scale exactly. Not the same as
+			// simply dropping the 0.08: the roller mesh measures 54 units, so
+			// upstream draws it at 4.3 and the normalisation alone would give
+			// 2.2 - half the size. Measured rather than assumed; the first
+			// attempt at this assumed they coincided and they do not.
+			const float scale =
+				(0.08f * roller->getScale(*ctx).asFloat()) / gpu->scale;
+			// Upstream's own lift, on the same raw mesh and with the same
+			// flat 0.08 it uses there - it sits the ball on the ground by its
+			// own lowest point rather than burying half of it.
+			const float lift = -rollerModel->getMin()[2].asFloat() * 0.08f;
+			const float wy = p[2].asFloat() + lift;
+			if (wy < cullBelowY) continue;
 
 			// The physics quaternion is in landscape axes, and the model has
 			// already been remapped to world ones on upload - so the
