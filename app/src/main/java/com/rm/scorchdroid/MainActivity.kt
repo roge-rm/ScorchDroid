@@ -269,7 +269,7 @@ class MainActivity : AppCompatActivity() {
                 onUndo = { revertToLastAim() },
                 onQuitToMenu = { confirmQuitToMenu() },
                 onSkip = { submitMoveAsync(MoveType.SKIP) },
-                onDoneBuying = { submitMoveAsync(MoveType.FINISHED_BUY) },
+                onDoneBuying = { finishBuying() },
                 onScores = { showScores() },
                 onCameraPresets = { showCameraPresets() },
                 onSimulationSpeed = { showSimulationSpeed() },
@@ -601,6 +601,91 @@ class MainActivity : AppCompatActivity() {
      * renderer's whole cache - genuinely fresh.
      */
 
+
+
+    /**
+     * Finishing the shop, which is also where Auto Defense is spent.
+     *
+     * Upstream puts one step between the shop and the round: finishing the
+     * shop stimulates StimAutoDefense, and AutoDefenseDialog::windowInit then
+     * either shows a shield/parachute chooser or passes straight through -
+     *
+     *     if (haveDefense()) displayCurrent(); else finished();
+     *
+     * - and its OK applies the choices and sends eFinishedBuy. So this is
+     * that step, in that place. Hooking it to the Defences button instead
+     * would have handed every player the accessory's benefit for free, since
+     * that button is reachable whenever you like; the whole of what 3000
+     * buys is this window before the round.
+     */
+    private fun finishBuying() {
+        CoroutineScope(Dispatchers.Main).launch {
+            val owned = withContext(Dispatchers.Default) { NativeBridge.hasAutoDefense() }
+            if (!owned) {
+                submitMoveAsync(MoveType.FINISHED_BUY)
+                return@launch
+            }
+            showAutoDefense()
+        }
+    }
+
+    /**
+     * The pre-round defence chooser. Upstream offers a shield (or "Shields
+     * Off") and parachutes on/off; this offers the shields and parachutes
+     * actually owned, each raised by the same useDefense path the mid-round
+     * Defences menu uses, so there is one way defences go up rather than two.
+     *
+     * Leaving it without choosing anything still starts the round - the
+     * round is not optional, and upstream's cancel does the same.
+     */
+    private fun showAutoDefense() {
+        CoroutineScope(Dispatchers.Main).launch {
+            val defences = withContext(Dispatchers.Default) {
+                parseWeaponShop(NativeBridge.getWeaponShop()).filter {
+                    it.isOwned && it.activationChange != null &&
+                        (it.type == AccessoryType.SHIELD || it.type == AccessoryType.PARACHUTE)
+                }
+            }
+
+            if (defences.isEmpty()) {
+                // Owning Auto Defense but no shields or parachutes to raise
+                // with it. Nothing to choose, so do not stop for it.
+                submitMoveAsync(MoveType.FINISHED_BUY)
+                return@launch
+            }
+
+            val startRound = "Start the round"
+            hudState.dialog = HudDialog.ListChoice(
+                title = "Before the round",
+                items = defences.map { "${it.name} [${it.type}] x${it.ownedLabel}" } + startRound,
+                cancelLabel = "Start the round",
+                onSelect = { index ->
+                    if (index >= defences.size) {
+                        hudState.dialog = HudDialog.None
+                        submitMoveAsync(MoveType.FINISHED_BUY)
+                        return@ListChoice
+                    }
+                    val item = defences[index]
+                    val change = item.activationChange
+                    CoroutineScope(Dispatchers.Main).launch {
+                        if (change != null) {
+                            withContext(Dispatchers.Default) {
+                                NativeBridge.useDefense(item.accessoryId, change)
+                            }
+                        }
+                        // Straight back to the list: upstream's dialog lets a
+                        // player set a shield *and* parachutes before going
+                        // on, so one choice must not end the step.
+                        showAutoDefense()
+                    }
+                },
+                onCancel = {
+                    hudState.dialog = HudDialog.None
+                    submitMoveAsync(MoveType.FINISHED_BUY)
+                },
+            )
+        }
+    }
 
     /**
      * The turret servo sounds, following a drag on one of the aiming

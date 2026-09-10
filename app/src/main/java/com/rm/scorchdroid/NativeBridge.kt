@@ -427,6 +427,13 @@ object NativeBridge {
      */
     external fun getAimSounds(): String
 
+    /**
+     * Whether this tank owns an Auto Defense accessory, which is what buys
+     * the chance to raise shields and parachutes before the round begins -
+     * see engine_jni.cpp.
+     */
+    external fun hasAutoDefense(): Boolean
+
     external fun isGameHost(): Boolean
 
     /**
