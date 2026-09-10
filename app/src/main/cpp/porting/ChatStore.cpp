@@ -1,5 +1,7 @@
 #include "ChatStore.h"
+#include "SoundEventQueue.h"
 
+#include <common/Defines.hpp>
 #include <deque>
 #include <mutex>
 
@@ -17,6 +19,19 @@ namespace ScorchDroidChat
 		// the log dialog scrolls back, and upstream's own server-side
 		// rolling buffer is 25. A hundred short strings is nothing.
 		const size_t kMaxLines = 100;
+
+		// Upstream's own notification sound, and upstream's own choice of
+		// when: GLWChannelView::channelText plays its window's <textsound>
+		// for every line on a channel that window shows. Both of the chat
+		// windows in windows.xml name the same file and between them cover
+		// every channel - combat in one, announce/info/general/team/whisper
+		// in the other - so in practice every line makes this sound.
+		//
+		// Raised here rather than at either polling site because this is
+		// where the two roles meet: a hosted game finds its lines in
+		// ServerChannelManager's log, a joined one gets them as
+		// ComsChannelTextMessage, and both end up calling push().
+		const char *kChatSoundFile = "data/wav/misc/text.wav";
 	}
 
 	void push(const Line &line)
@@ -27,6 +42,13 @@ namespace ScorchDroidChat
 		lines.push_back(stored);
 		while (lines.size() > kMaxLines) lines.pop_front();
 		storeVersion++;
+
+		// eText, as upstream raises it - the same band as the turn
+		// countdown, and well below eAction, so a round's explosions take
+		// the channels ahead of a chat notification rather than the other
+		// way round.
+		ScorchDroidAudio::pushSoundEvent(
+			S3D::getModFile(kChatSoundFile), ScorchDroidAudio::kPriorityText);
 	}
 
 	std::vector<Line> snapshot()

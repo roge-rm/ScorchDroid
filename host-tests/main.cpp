@@ -3051,6 +3051,77 @@ static void testSoundMixing()
 		check(tooFar.empty(), "an explosion far over the horizon is dropped, not played silently");
 	}
 
+	// Priority beats distance, which is the half of upstream's comparison
+	// that only matters once something other than eAction exists. The turn
+	// countdown and the chat notification are eText, and both would be lost
+	// under a busy round if the channel budget went purely on distance.
+	{
+		ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+		for (int i = 0; i < ScorchDroidAudio::kDefaultSoundChannels; i++)
+		{
+			// Right on top of the listener, so distance alone would win.
+			ScorchDroidAudio::pushSoundEventAt("data/wav/explosions/explosion.wav",
+				listenerX, listenerY, listenerZ);
+		}
+		ScorchDroidAudio::pushSoundEvent("data/wav/misc/beep.wav",
+			ScorchDroidAudio::kPriorityText);
+		std::vector< ScorchDroidAudio::SelectedSound > mix =
+			ScorchDroidAudio::drainSoundEvents(true, listenerX, listenerY, listenerZ);
+
+		bool beeped = false, exploded = false;
+		for (size_t i = 0; i < mix.size(); i++)
+		{
+			if (mix[i].file.find("beep") != std::string::npos) beeped = true;
+			if (mix[i].file.find("explosion") != std::string::npos) exploded = true;
+		}
+		check(!beeped, "a full round of explosions takes the channels ahead of a beep");
+		check(exploded, "...and it is the explosions that get them");
+	}
+	{
+		// The other way round: eAction outranks eText, so a single beep
+		// among explosions loses - but a beep with room to spare plays.
+		ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+		ScorchDroidAudio::pushSoundEventAt("data/wav/explosions/explosion.wav",
+			listenerX, listenerY, listenerZ);
+		ScorchDroidAudio::pushSoundEvent("data/wav/misc/beep.wav",
+			ScorchDroidAudio::kPriorityText);
+		std::vector< ScorchDroidAudio::SelectedSound > mix =
+			ScorchDroidAudio::drainSoundEvents(true, listenerX, listenerY, listenerZ);
+		check(mix.size() == 2, "a quiet moment plays both the explosion and the beep");
+		if (mix.size() == 2)
+		{
+			check(mix[0].file.find("explosion") != std::string::npos,
+				"...with the explosion ordered first, as upstream's priority says");
+			// The band has to survive the trip to the player, not just the
+			// sort: SoundPool evicts by it, and beep.wav holds a channel for
+			// five seconds (0.07s of beep, then silence).
+			check(mix[0].priority == ScorchDroidAudio::kPriorityAction &&
+				  mix[1].priority == ScorchDroidAudio::kPriorityText,
+				"...and each carries its own priority through to the player");
+		}
+	}
+
+	// The chat notification, which upstream plays from GLWChannelView for
+	// every line on a channel its windows show - and which this port raises
+	// from ChatStore::push, the one place a hosted game's polled lines and a
+	// joined game's ComsChannelTextMessages meet.
+	{
+		ScorchDroidAudio::drainSoundEvents(false, 0, 0, 0);
+		ScorchDroidChat::Line line;
+		line.channel = "general";
+		line.who = "someone";
+		line.text = "hello";
+		ScorchDroidChat::push(line);
+		std::vector< ScorchDroidAudio::SelectedSound > mix =
+			ScorchDroidAudio::drainSoundEvents(true, listenerX, listenerY, listenerZ);
+		bool sawText = false;
+		for (size_t i = 0; i < mix.size(); i++)
+		{
+			if (mix[i].file.find("text.wav") != std::string::npos) sawText = true;
+		}
+		check(sawText, "an arriving chat line makes upstream's own notification sound");
+	}
+
 	// Before anything has been drawn there is no camera to measure from.
 	// Everything plays rather than everything being silently dropped.
 	{
