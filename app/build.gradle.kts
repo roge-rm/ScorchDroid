@@ -55,8 +55,8 @@ android {
                 )
             }.standardOutput.asText.get().trim() + "\"",
         )
-        versionCode = 12
-        versionName = "0.7.3"
+        versionCode = 13
+        versionName = "0.8.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
