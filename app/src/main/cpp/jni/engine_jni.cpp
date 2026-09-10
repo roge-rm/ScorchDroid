@@ -570,8 +570,17 @@ Java_com_rm_scorchdroid_NativeBridge_getWeaponShop(JNIEnv *env, jobject /* this 
         Tank *tank = findMyTank();
         if (ctx && tank) {
             Accessory *current = tank->getAccessories().getWeapons().getCurrent();
+            // SortNothing is upstream's own default (OptionsDisplay's
+            // AccessorySortKey is 0, and AccessoryStore::getAllAccessories
+            // sorts only when the key is non-zero), and it is not the
+            // absence of an order - it is the order accessories.xml
+            // declares them in, which is deliberately grouped: Baby Roller,
+            // Roller, Heavy Roller together, then the missiles, then the
+            // nukes. Sorting by name scattered each family across the
+            // alphabet and lost the one arrangement that told a player what
+            // a weapon was a bigger version of.
             std::list<Accessory *> accessories =
-                    ctx->getAccessoryStore().getAllAccessories(AccessoryStore::SortName);
+                    ctx->getAccessoryStore().getAllAccessories(AccessoryStore::SortNothing);
             for (Accessory *accessory: accessories) {
                 // Upstream's own test, rather than a hand-rolled subset of
                 // it: TanketAccessories::accessoryAllowed is what its buy
