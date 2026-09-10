@@ -25,9 +25,12 @@ Cheers, enjoy! roge-rm
 - Weapon effects driven by the simulation's own events, drawn with Scorched3D's own particle
   textures and animations — explosions, napalm, lasers, lightning, shield hits, sky flashes,
   teleports, smoke that streams downwind, mushroom clouds, thrown debris, arena wall flashes,
-  floating damage numbers and speech bubbles.
-- Scorched3D's own sound and music: its effects raised from the simulation's own events, and its
-  three loops keyed to the state of the game by its own `music.xml`.
+  floating damage numbers and speech bubbles. Rollers bounce and tumble down the landscape, and a
+  tank can go up in Scorched3D's own rising column of light.
+- Scorched3D's own sound and music: its effects raised from the simulation's own events, mixed the
+  way it mixes them — eight channels handed to the nearest and most important sounds, the rest
+  dropped, everything falling away with distance — plus the turn countdown, the servo as the turret
+  swings, and its three music loops keyed to the state of the game by its own `music.xml`.
 - Touch controls: drag to orbit, pinch to zoom, tap to aim, plus angle/elevation/power sliders and
   a Fire button that don't depend on screen-to-world mapping.
 - Seven camera views including a shot camera that follows the projectile.
@@ -35,7 +38,10 @@ Cheers, enjoy! roge-rm
   automatic game discovery. Wi-Fi Direct needs no router, hotspot or internet
   at all.
 - In-game chat and a live score table, with each player's avatar, their tank colour and — in a team
-  game — the team totals.
+  game — the team totals. The game's own announcements — who killed whom with what, who joined —
+  arrive in the same place.
+- Admin controls for whoever is hosting: kick, ban, mute, slap, take a player's money, kill, start
+  a new game or clear the map.
 - The full shop: weapons and defensive accessories, with purchases acknowledged immediately.
 - A main menu — single player, multiplayer, and an About screen carrying the GPL notice and the
   exact upstream commit the build came from. Games can be left and started again without
