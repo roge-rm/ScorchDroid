@@ -314,6 +314,62 @@ namespace
 			"human tank is still present after further simulation (not re-destroyed)");
 	}
 
+	// Why selectWeapon and fireWeapon check the accessory type.
+	//
+	// Reported as a crash: buying Auto Defense made it the current weapon,
+	// and pressing Fire took the game down. The cause is upstream's own
+	// TanketWeapon::setWeapon, which asks only whether the tank can *use*
+	// the accessory - it never asks whether the thing is a weapon, because
+	// upstream's weapon-select UI offers it nothing else. This port's shop
+	// did offer it something else.
+	//
+	// Nothing here is a bug in upstream and nothing here is fixed in the
+	// engine; the guards live in engine_jni.cpp. This test pins the premise
+	// so the guards are not later read as redundant: Auto Defense is a real
+	// buyable accessory, it is not a weapon, and setWeapon takes it anyway.
+	void testNonWeaponCannotBeFired()
+	{
+		printf("non-weapons cannot be selected as the weapon:\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+		Accessory *autoDefense =
+			server->getAccessoryStore().findByPrimaryAccessoryName("Auto Defense");
+		check(autoDefense != nullptr, "Auto Defense is a real accessory a player can buy");
+		if (!autoDefense) return;
+
+		check(autoDefense->getType() != AccessoryPart::AccessoryWeapon,
+			"...and it is not a weapon, so nothing may fire it");
+
+		Accessory *realWeapon =
+			server->getAccessoryStore().findByPrimaryAccessoryName("Baby Missile");
+		check(realWeapon != nullptr && realWeapon->getType() == AccessoryPart::AccessoryWeapon,
+			"...where an actual weapon reports itself as one");
+
+		// The engine's own door, left open. If this ever starts returning
+		// false, upstream has taken up the check itself and engine_jni's
+		// guards become belt and braces rather than the only thing standing
+		// between a shop tap and a dead process.
+		Tank *tank = nullptr;
+		std::map< unsigned int, Tank * > &tanks = server->getTargetContainer().getTanks();
+		for (std::map< unsigned int, Tank * >::iterator itor = tanks.begin();
+			itor != tanks.end(); ++itor)
+		{
+			if (itor->second->getDestinationId() != 0) { tank = itor->second; break; }
+		}
+		check(tank != nullptr, "found the human tank to try it on");
+		if (!tank) return;
+
+		Accessory *before = tank->getAccessories().getWeapons().getCurrent();
+		tank->getAccessories().add(autoDefense, 1, true);
+		const bool accepted = tank->getAccessories().getWeapons().setWeapon(autoDefense);
+		printf("    setWeapon(\"Auto Defense\") returned %s\n", accepted ? "true" : "false");
+		check(accepted,
+			"upstream's setWeapon accepts a non-weapon, which is why the port checks the type");
+
+		// Put it back, since every later test shares this tank.
+		if (before) tank->getAccessories().getWeapons().setWeapon(before);
+	}
+
 	// M4: regression check for engine_jni.cpp's economy JNI surface
 	// (getMyMoney/getWeaponShop/buyAccessory/selectWeapon) - reuses the
 	// human tank from testHumanTankHasNoAI (must run first). Exercises the
@@ -3703,6 +3759,7 @@ int main(int argc, char **argv)
 	testRealAccessoryDataLoads();
 	testHumanTankHasNoAI();
 	testEconomyBuyAndSelect();
+	testNonWeaponCannotBeFired();
 	testDefenseAccessories();
 	testNonShotMoves();
 	testTerrainDeformation();
