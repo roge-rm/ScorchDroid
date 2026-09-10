@@ -12,6 +12,7 @@ namespace ScorchDroidAudio
 		struct QueuedSound
 		{
 			std::string file;
+			int         priority;
 			bool        positioned;
 			float       x, y, z;
 			float       gain;
@@ -57,10 +58,11 @@ namespace ScorchDroidAudio
 		}
 	}
 
-	void pushSoundEvent(const std::string &soundFile)
+	void pushSoundEvent(const std::string &soundFile, int priority)
 	{
 		QueuedSound sound;
 		sound.file              = soundFile;
+		sound.priority          = priority;
 		sound.positioned        = false;
 		sound.x = sound.y = sound.z = 0.0f;
 		sound.gain              = kDefaultGain;
@@ -81,6 +83,7 @@ namespace ScorchDroidAudio
 	{
 		QueuedSound sound;
 		sound.file              = soundFile;
+		sound.priority          = kPriorityAction;
 		sound.positioned        = true;
 		sound.x                 = x;
 		sound.y                 = y;
@@ -115,14 +118,16 @@ namespace ScorchDroidAudio
 			sound.distance = sqrtf(dx * dx + dy * dy + dz * dz);
 		}
 
-		// Upstream's own ordering, reduced to what actually varies here. Its
-		// comparison is priority first, then distance - and every sound
-		// raised from src/common carries the same priority (eAction), so
-		// what decides a channel is being nearer. A positionless sound is
-		// upstream's relative case, which sits at the listener and so sorts
-		// first.
+		// Upstream's own ordering (Sound.cpp's lt_virt, read the other way
+		// up since it iterates its sort in reverse): priority decides, and
+		// distance breaks the tie. So the beep that says your turn is
+		// running out is not lost under a burst of explosions, and among
+		// sounds of equal standing the nearest wins. A positionless sound
+		// is upstream's relative case - it sits at the listener, so it
+		// sorts first among its own priority.
 		std::stable_sort(drained.begin(), drained.end(),
 			[](const QueuedSound &a, const QueuedSound &b) {
+				if (a.priority != b.priority) return a.priority > b.priority;
 				return a.distance < b.distance;
 			});
 
@@ -139,8 +144,9 @@ namespace ScorchDroidAudio
 			// sound someone can hear could have had.
 			if (gain < 0.01f) continue;
 			SelectedSound sound;
-			sound.file = drained[i].file;
-			sound.gain = gain;
+			sound.file     = drained[i].file;
+			sound.gain     = gain;
+			sound.priority = drained[i].priority;
 			selected.push_back(sound);
 		}
 		return selected;

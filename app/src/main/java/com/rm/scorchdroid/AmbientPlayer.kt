@@ -49,7 +49,10 @@ class AmbientPlayer(private val dataRoot: String) {
 
     /** 0..1, multiplied by each sound's own gain. */
     @Volatile
-    var volume: Float = 0.7f
+    // Upstream's AmbientSoundVolume default - 64 of 0-128. Overwritten by
+    // GameSettings.applyAll from the player's own slider; this is only what
+    // holds before that runs.
+    var volume: Float = 0.5f
         set(value) {
             field = value.coerceIn(0f, 1f)
             synchronized(loops) {

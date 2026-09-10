@@ -24,10 +24,14 @@
 // where this port used to start an unbounded player per event, at full gain,
 // which is painful rather than loud.
 //
-// Every sound raised from src/common uses one priority, eAction - checked,
-// all nine call sites - so upstream's comparison reduces to the distance
-// tie-break, i.e. the nearest sounds win the channels. That is what
-// drainSoundEvents implements.
+// Sounds carry upstream's own priority (VirtualSoundPriority), and the
+// comparison is priority first, then distance - so a burst of explosions
+// cannot drown out the beep telling you your turn is running out, and among
+// equals the nearest wins. That is what drainSoundEvents implements.
+//
+// Every sound raised from src/common is eAction; the two that are not come
+// from src/client, where the countdown and the chat notification both use
+// eText.
 namespace ScorchDroidAudio
 {
 	// How many sounds may play at once. Upstream's own default, from
@@ -44,9 +48,16 @@ namespace ScorchDroidAudio
 	const float kDefaultReferenceDistance = 75.0f;
 	const float kDefaultRolloff           = 1.0f;
 
+	// Upstream's VirtualSoundPriority, the two values this port raises.
+	// Higher wins a channel; the rest of upstream's bands (environment,
+	// missile, music, rotation) belong to client subsystems this port
+	// either does not have or drives another way.
+	const int kPriorityAction = 10000;
+	const int kPriorityText   = 100;
+
 	// A sound with no position - upstream's setRelative() case, which plays
 	// at full gain wherever the listener is.
-	void pushSoundEvent(const std::string &soundFile);
+	void pushSoundEvent(const std::string &soundFile, int priority = kPriorityAction);
 
 	// A sound at a point in the landscape, with upstream's default
 	// attenuation. Coordinates are engine-space (x, y, z=height), exactly
@@ -63,6 +74,16 @@ namespace ScorchDroidAudio
 	{
 		std::string file;
 		float       gain;
+		// Carried through to the player, not just used for the sort here.
+		// A channel is held for as long as the sample lasts, and upstream's
+		// own beep.wav is a 5-second file with 0.07s of audible beep at the
+		// front and silence after it - so six countdown beeps can sit on
+		// six channels saying nothing. Upstream is no different, and the
+		// reason it does not matter there is exactly this priority: eText
+		// yields to any eAction, so a round's explosions evict the silence.
+		// Flatten that to gain alone and a point-blank explosion ranks
+		// level with a beep.
+		int         priority;
 	};
 
 	// Drains the queue and answers with the sounds that win a channel,

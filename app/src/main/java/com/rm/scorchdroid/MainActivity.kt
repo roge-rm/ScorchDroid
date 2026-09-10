@@ -732,15 +732,18 @@ class MainActivity : AppCompatActivity() {
                 // SoundEventQueue.h) - played via Android's own media
                 // stack, not vendored OpenAL/OGG (see the porting plan).
                 //
-                // "path|gain", where the gain is upstream's own
+                // "path|gain|priority", where the gain is upstream's own
                 // inverse-distance attenuation against the live listener and
                 // the batch has already been cut to the channel budget - so
                 // this loop plays what won a channel, it does not decide.
                 for (event in NativeBridge.pollSoundEvents()) {
-                    val separator = event.lastIndexOf('|')
-                    if (separator <= 0) continue
-                    val gain = event.substring(separator + 1).toFloatOrNull() ?: 1.0f
-                    SoundPlayer.play(event.substring(0, separator), gain)
+                    val parts = event.split('|')
+                    if (parts.size != 3) continue
+                    SoundPlayer.play(
+                        parts[0],
+                        parts[1].toFloatOrNull() ?: 1.0f,
+                        parts[2].toIntOrNull() ?: SoundPlayer.PRIORITY_ACTION,
+                    )
                 }
             }
             // M5: a plain-language "what's happening / can I fire" label

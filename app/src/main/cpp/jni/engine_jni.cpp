@@ -841,6 +841,66 @@ static int g_lastServerState = -1;
 static unsigned int g_lastMoveId = 0;
 static fixed g_phaseElapsed(0);
 
+// How many whole seconds the countdown last showed, so a beep can be raised
+// on the change rather than every tick. -1 means no countdown is running -
+// which is also the state after a reset, so the first observation of a new
+// move is recorded silently instead of beeping the moment a turn starts.
+static int g_lastCountdownSecond = -1;
+
+// M13 parity: upstream beeps through the last few seconds of your move.
+// ShotCountDown::simulateTime plays data/wav/misc/beep.wav on each whole
+// second once the move timer is at or under six, and data/wav/misc/beep2.wav
+// when it runs out - at eText priority, so a busy round's explosions take
+// the channels ahead of it, which is upstream's ordering and not a
+// compromise here.
+//
+// Never wired before now because it lives in src/client, and every sound
+// hook patch only ever swept src/common. It needs no patch at all: the
+// countdown this port shows is computed right here, so the beeps come off
+// the same number the HUD displays.
+//
+// Upstream shows the move timer only for the local player's own tank
+// (TankStartMoveSimAction's destinationId check), so the same is true here -
+// no beeping through someone else's turn.
+static void countdownBeeps(ScorchedServer *server, Tank *myTank)
+{
+    int duration = 0;
+    switch (server->getServerState().getState()) {
+    case ServerState::ServerBuyingState:
+        duration = server->getOptionsGame().getBuyingTime();
+        break;
+    case ServerState::ServerPlayingState:
+        duration = server->getOptionsGame().getShotTime();
+        break;
+    default:
+        break;
+    }
+
+    // A duration of 0 is upstream's "no limit", not "already expired" - and
+    // a tank that cannot move is not being timed.
+    const bool counting = duration > 0 && myTank != nullptr &&
+        myTank->getState().getState() == TankState::sNormal;
+    if (!counting) {
+        g_lastCountdownSecond = -1;
+        return;
+    }
+
+    int remaining = duration - g_phaseElapsed.asInt();
+    if (remaining < 0) remaining = 0;
+
+    const int previous = g_lastCountdownSecond;
+    g_lastCountdownSecond = remaining;
+    if (previous < 0 || remaining >= previous) return;  // New move, or no change.
+
+    if (remaining == 0) {
+        ScorchDroidAudio::pushSoundEvent(
+            S3D::getModFile("data/wav/misc/beep2.wav"), ScorchDroidAudio::kPriorityText);
+    } else if (remaining <= 6) {
+        ScorchDroidAudio::pushSoundEvent(
+            S3D::getModFile("data/wav/misc/beep.wav"), ScorchDroidAudio::kPriorityText);
+    }
+}
+
 static void trackPhaseTime(ScorchedServer *server, fixed frameTime)
 {
     const int state = (int) server->getServerState().getState();
@@ -857,9 +917,12 @@ static void trackPhaseTime(ScorchedServer *server, fixed frameTime)
         g_lastServerState = state;
         g_lastMoveId = moveId;
         g_phaseElapsed = 0;
+        g_lastCountdownSecond = -1;
     } else {
         g_phaseElapsed += frameTime;
     }
+
+    countdownBeeps(server, tank);
 }
 
 // M6 tap-to-aim (upstream's AUTO_AIM, "Aim at point"). Given a landscape
@@ -1581,8 +1644,8 @@ Java_com_rm_scorchdroid_NativeBridge_getGameStateDebugString(JNIEnv *env, jobjec
 // the files bundled in data/ (see the porting plan's note on the
 // audio-approach revisit).
 //
-// Each row is "path|gain", the same pipe-delimited convention getWeaponShop
-// and getScores use. The gain is not a preference - it is upstream's own
+// Each row is "path|gain|priority", the same pipe-delimited convention
+// getWeaponShop and getScores use. The gain is not a preference - it is upstream's own
 // inverse-distance attenuation, computed against the live listener, and the
 // batch has already been cut to the channel budget with the nearest sounds
 // winning. That arbitration is what stops a weapon with dozens of
@@ -1626,7 +1689,7 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
     jobjectArray result = env->NewObjectArray((jsize) events.size(), env->FindClass("java/lang/String"), nullptr);
     for (size_t i = 0; i < events.size(); i++) {
         const std::string row = events[i].file +
-            S3D::formatStringBuffer("|%.4f", events[i].gain);
+            S3D::formatStringBuffer("|%.4f|%d", events[i].gain, events[i].priority);
         env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(row.c_str()));
     }
     return result;
@@ -1756,6 +1819,7 @@ Java_com_rm_scorchdroid_NativeBridge_stopGame(JNIEnv *env, jobject /* this */) {
     g_lastServerState = -1;
     g_lastMoveId = 0;
     g_phaseElapsed = fixed(0);
+    g_lastCountdownSecond = -1;
     g_lastChatMessageId = 0;
 
     ScorchDroidChat::clear();

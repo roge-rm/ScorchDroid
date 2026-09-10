@@ -39,6 +39,9 @@ object SoundPlayer {
      */
     private const val CHANNELS = 8
 
+    /** Upstream's `VirtualSoundPriority::eAction` - see SoundEventQueue.h. */
+    const val PRIORITY_ACTION = 10000
+
     private val attributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_GAME)
         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -52,6 +55,15 @@ object SoundPlayer {
     @Volatile
     var enabled: Boolean = true
 
+    /**
+     * Upstream's "SoundVolume" - a master multiplier over each sound's own
+     * gain. Kept apart from that gain because they mean different things:
+     * gain is upstream's distance attenuation, computed per sound, and this
+     * is what the player asked for.
+     */
+    @Volatile
+    var masterVolume: Float = 1.0f
+
     private var pool: SoundPool? = null
 
     // Every sample decoded so far, by absolute path. Upstream caches the same
@@ -64,6 +76,7 @@ object SoundPlayer {
     // gain it was asked for at. Loading is asynchronous and a first shot would
     // otherwise be silent - the sound the player most wants to hear.
     private val pendingGain = mutableMapOf<Int, Float>()
+    private val pendingPriority = mutableMapOf<Int, Int>()
 
     private fun poolOrCreate(): SoundPool {
         pool?.let { return it }
@@ -80,11 +93,13 @@ object SoundPlayer {
                     Log.e(TAG, "Failed to decode sample $sampleId (status $status)")
                     sampleIds.values.remove(sampleId)
                     pendingGain.remove(sampleId)
+                    pendingPriority.remove(sampleId)
                     return@synchronized
                 }
                 loaded.add(sampleId)
+                val priority = pendingPriority.remove(sampleId) ?: PRIORITY_ACTION
                 pendingGain.remove(sampleId)?.let { gain ->
-                    playLoaded(soundPool, sampleId, gain)
+                    playLoaded(soundPool, sampleId, gain, priority)
                 }
             }
         }
@@ -94,14 +109,21 @@ object SoundPlayer {
 
     /**
      * Plays [filePath] at [gain], which is upstream's own inverse-distance
-     * attenuation as computed against the live listener - not a preference.
+     * attenuation as computed against the live listener - not a preference -
+     * and at [priority], which is upstream's `VirtualSoundPriority`.
      *
-     * The stream priority is derived from that gain, so when the pool is full
-     * `SoundPool` evicts the quietest (which is to say the most distant)
-     * stream. That is the same rule upstream's own sort applies, reached
-     * through the mixer's own mechanism instead of a second one here.
+     * Both matter to `SoundPool`, which evicts the lowest-priority stream
+     * when the pool is full. Band first, then loudness within the band, so
+     * the eviction order is upstream's: any explosion outranks a countdown
+     * beep, and among explosions the most distant goes first.
+     *
+     * Getting this wrong is not academic. Upstream's `beep.wav` is a
+     * five-second file carrying 0.07 seconds of beep and 4.9 seconds of
+     * silence, so six countdown beeps can hold six of the eight channels
+     * saying nothing at all. What makes that harmless upstream is precisely
+     * that they are eText and yield to anything else.
      */
-    fun play(filePath: String, gain: Float = 1.0f) {
+    fun play(filePath: String, gain: Float = 1.0f, priority: Int = PRIORITY_ACTION) {
         if (!enabled) return
         val file = File(filePath)
         if (!file.exists()) return
@@ -111,11 +133,12 @@ object SoundPlayer {
             val existing = sampleIds[filePath]
             if (existing != null) {
                 if (loaded.contains(existing)) {
-                    playLoaded(soundPool, existing, gain)
+                    playLoaded(soundPool, existing, gain, priority)
                 } else {
                     // Still decoding. Keep the loudest request, since that is
                     // the one that would have been audible.
                     pendingGain[existing] = maxOf(pendingGain[existing] ?: 0f, gain)
+                    pendingPriority[existing] = maxOf(pendingPriority[existing] ?: 0, priority)
                 }
                 return
             }
@@ -127,13 +150,20 @@ object SoundPlayer {
             }
             sampleIds[filePath] = sampleId
             pendingGain[sampleId] = gain
+            pendingPriority[sampleId] = priority
         }
     }
 
-    private fun playLoaded(soundPool: SoundPool, sampleId: Int, gain: Float) {
-        val volume = gain.coerceIn(0f, 1f)
-        val priority = (volume * 100f).toInt()
-        soundPool.play(sampleId, volume, volume, priority, 0, 1.0f)
+    private fun playLoaded(soundPool: SoundPool, sampleId: Int, gain: Float, priority: Int) {
+        val volume = (gain * masterVolume).coerceIn(0f, 1f)
+        // Band-major, loudness-minor: the band separates eAction from eText
+        // outright, and the gain orders sounds within a band by how near they
+        // are. 99 rather than 100 so a band can never reach into the next.
+        //
+        // Ranked on the gain, not the volume: turning the master down should
+        // not reorder which sounds matter.
+        val streamPriority = priority + (gain.coerceIn(0f, 1f) * 99f).toInt()
+        soundPool.play(sampleId, volume, volume, streamPriority, 0, 1.0f)
     }
 
     /**
@@ -149,6 +179,7 @@ object SoundPlayer {
             sampleIds.clear()
             loaded.clear()
             pendingGain.clear()
+            pendingPriority.clear()
         }
     }
 }

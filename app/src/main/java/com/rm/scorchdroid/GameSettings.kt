@@ -96,6 +96,39 @@ class GameSettings(context: Context) {
         prefs.edit().putBoolean(KEY_SOUND, value).apply()
     }
 
+    /**
+     * Effects volume, upstream's "SoundVolume". Its range is 0-128 and its
+     * default 128, so full is both upstream's default and what this port
+     * played at before the slider existed - nothing gets quieter by adding
+     * it.
+     *
+     * This is a master multiplier over the per-sound gain, which is
+     * upstream's distance attenuation rather than a preference - see
+     * SoundEventQueue.h.
+     */
+    var effectsVolume by mutableFloatStateOf(prefs.getFloat(KEY_SOUND_VOLUME, 1.0f))
+        private set
+
+    fun updateEffectsVolume(value: Float) {
+        effectsVolume = value.coerceIn(0f, 1f)
+        SoundPlayer.masterVolume = effectsVolume
+        prefs.edit().putFloat(KEY_SOUND_VOLUME, effectsVolume).apply()
+    }
+
+    /**
+     * Ambient volume, upstream's "AmbientSoundVolume" - 64 of 0-128, so half,
+     * which is the one volume upstream deliberately does not run at full.
+     * The landscape's atmosphere is a bed under the game, not part of it.
+     */
+    var ambientVolume by mutableFloatStateOf(prefs.getFloat(KEY_AMBIENT_VOLUME, 0.5f))
+        private set
+
+    fun updateAmbientVolume(value: Float) {
+        ambientVolume = value.coerceIn(0f, 1f)
+        ambient?.volume = ambientVolume
+        prefs.edit().putFloat(KEY_AMBIENT_VOLUME, ambientVolume).apply()
+    }
+
     /** M15: upstream's music, keyed to game state by its music.xml. */
     var musicEnabled by mutableStateOf(prefs.getBoolean(KEY_MUSIC, true))
         private set
@@ -346,8 +379,9 @@ class GameSettings(context: Context) {
         NativeBridge.setPlayerName(playerName)
         applyIdentity()
         SoundPlayer.enabled = soundEnabled
+        SoundPlayer.masterVolume = effectsVolume
         music?.let { it.volume = musicVolume; it.enabled = musicEnabled }
-        ambient?.enabled = ambientEnabled
+        ambient?.let { it.enabled = ambientEnabled; it.volume = ambientVolume }
         NativeBridge.setRenderOptions(showTrees, showFog)
         NativeBridge.setSightStyle(if (originalSight) 1 else 0)
         NativeBridge.setTerrainDetail(terrainDetail)
@@ -378,6 +412,8 @@ class GameSettings(context: Context) {
         const val KEY_FOG = "graphics.fog"
         const val KEY_SIGHT = "graphics.originalSight"
         const val KEY_DETAIL = "graphics.terrainDetail"
+        const val KEY_SOUND_VOLUME = "audio.effectsVolume"
+        const val KEY_AMBIENT_VOLUME = "audio.ambientVolume"
         const val KEY_WATER_DETAIL = "graphics.waterDetail"
         // A new key, not the old boolean one: this started as an on/off
         // switch, and reading an existing Boolean with getInt throws

@@ -173,11 +173,23 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             "Explosions, weapon fire and impacts",
                             settings.soundEnabled,
                         ) { settings.updateSoundEnabled(it) }
+                        SliderRow(
+                            "Effects volume",
+                            "${(settings.effectsVolume * 100).roundToInt()}%",
+                            settings.effectsVolume,
+                            0f..1f,
+                        ) { settings.updateEffectsVolume(it) }
                         SwitchRow(
                             "Ambient sound",
                             "The landscape's own atmosphere - waves, rain, birds in the trees",
                             settings.ambientEnabled,
                         ) { settings.updateAmbientEnabled(it) }
+                        SliderRow(
+                            "Ambient volume",
+                            "${(settings.ambientVolume * 100).roundToInt()}%",
+                            settings.ambientVolume,
+                            0f..1f,
+                        ) { settings.updateAmbientVolume(it) }
                         SwitchRow(
                             "Music",
                             "Scorched3D's own loops, changing with the state of the game",
