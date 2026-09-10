@@ -1,0 +1,73 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: the WeaponAnimation hook
+
+The last visual in src/common raised through a client-only path, found by
+the src/client parity review (docs/client-parity-review.md).
+
+WeaponAnimation builds a MetaActionRenderer by name and adds it as a
+SpriteAction. Both the class registry and SpriteAction itself are
+#ifndef S3D_SERVER, so this whole weapon did nothing in this build - and
+it is not dead content: WeaponDeathAnimation in accessories.xml uses it,
+as one weighted branch of what happens when a tank dies.
+
+Upstream ships exactly one such renderer, ExplosionLaserBeamRenderer, so
+the hook raises that effect by name rather than rebuilding a class
+registry for a single entry.
+
+No game logic changes.
+
+diff --git a/src/common/weapons/WeaponAnimation.cpp b/src/common/weapons/WeaponAnimation.cpp
+index 3e5abb3a..f2463c70 100644
+--- a/src/common/weapons/WeaponAnimation.cpp
++++ b/src/common/weapons/WeaponAnimation.cpp
+@@ -24,6 +24,11 @@
+ #include <common/Defines.hpp>
+ #ifndef S3D_SERVER
+ #include <sprites/MetaActionRenderer.hpp>
++#else
++	// Android build: raised as events - see EffectEventQueue.h and
++	// SoundEventQueue.h.
++	#include <EffectEventQueue.h>
++	#include <SoundEventQueue.h>
+ #endif
+ 
+ REGISTER_ACCESSORY_SOURCE(WeaponAnimation);
+@@ -80,5 +85,38 @@ void WeaponAnimation::fireWeapon(ScorchedContext &context,
+ 						  rendererName_.c_str()));
+ 		}
+ 	}
++#else
++	// Android build: upstream ships exactly one such renderer, so this
++	// raises that effect by name rather than rebuilding a class registry
++	// for a single entry. A mod naming a renderer that does not exist gets
++	// the same nothing upstream gives it, minus the dialog box.
++	//
++	// No !getServerMode() guard - this port runs these on the server
++	// context alone, and the guard would only switch the effect off (see
++	// patches/scorched3d/README.md).
++	if (rendererName_ == "ExplosionLaserBeamRenderer")
++	{
++		ScorchDroidEffects::EffectEvent beam;
++		beam.type = ScorchDroidEffects::eDeathBeam;
++		beam.x = position[0].asFloat();
++		beam.y = position[1].asFloat();
++		beam.z = position[2].asFloat();
++		// ExplosionLaserBeamRenderer's own size_, which sets both the
++		// column's radius and how long it lasts.
++		beam.size = 12.0f;
++		// Its own glColor4f, so the column is the blue upstream draws.
++		beam.r = 0.0f; beam.g = 0.6f; beam.b = 0.9f;
++		beam.texture = "particle";
++		ScorchDroidEffects::push(beam);
++
++		// The same sound its init() plays, from the same field, at the same
++		// priority and the same position.
++		if (!data_.empty() && data_ != "none")
++		{
++			Vector soundPosition = position.asVector();
++			ScorchDroidAudio::pushSoundEventAt(S3D::getModFile(data_.c_str()),
++				soundPosition[0], soundPosition[1], soundPosition[2]);
++		}
++	}
+ #endif // #ifndef S3D_SERVER
+ }
