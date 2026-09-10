@@ -2,18 +2,20 @@ diff --git a/src/common/engine/ActionController.cpp b/src/common/engine/ActionCo
 index 92dfd898..b88c0c01 100644
 --- a/src/common/engine/ActionController.cpp
 +++ b/src/common/engine/ActionController.cpp
-@@ -23,6 +23,10 @@
+@@ -23,6 +23,12 @@
  #include <engine/Simulator.hpp>
  #include <common/Logger.hpp>
  #include <common/OptionsScorched.hpp>
 +#include <actions/ShotProjectile.hpp>
++#include <actions/ShotBounce.hpp>
 +#include <weapons/Accessory.hpp>
 +#include <weapons/WeaponProjectile.hpp>
++#include <weapons/WeaponRoller.hpp>
 +#include <actions/Explosion.hpp>
  #include <list>
  
  ActionController::ActionController() :
-@@ -195,6 +199,52 @@ void ActionController::draw()
+@@ -195,6 +201,75 @@ void ActionController::draw()
  	}
  }
  
@@ -63,6 +65,29 @@ index 92dfd898..b88c0c01 100644
 +	}
 +}
 +
++void ActionController::getRollerPositions(
++	std::vector<FixedVector> &positions,
++	std::vector<FixedVector4> &rotations,
++	std::vector<WeaponRoller *> &weapons,
++	std::vector<unsigned int> &playerIds)
++{
++	for (int i = 0; i < actions_.actionCount; i++)
++	{
++		Action *action = actions_.actions[i];
++		if (action->getActionType() != "ShotBounce") continue;
++
++		ShotBounce *roller = (ShotBounce *) action;
++		positions.push_back(roller->getPhysics().getPosition());
++		// Its own tumble, which is what upstream draws it with - see
++		// ShotBounce::draw's getRotationQuat.
++		rotations.push_back(roller->getPhysics().getRotationQuat());
++		// Carries the <rollermodel> and the scale, both of which the
++		// renderer needs and neither of which is on the action.
++		weapons.push_back(roller->getWeapon());
++		playerIds.push_back(roller->getPlayerId());
++	}
++}
++
  void ActionController::simulate(fixed frameTime, fixed time)
  {
  	// Ensure any new actions are added
@@ -70,7 +95,7 @@ diff --git a/src/common/engine/ActionController.hpp b/src/common/engine/ActionCo
 index 1b05466b..bce9c7ef 100644
 --- a/src/common/engine/ActionController.hpp
 +++ b/src/common/engine/ActionController.hpp
-@@ -22,11 +22,15 @@
+@@ -22,11 +22,17 @@
  #define __INCLUDE_ActionController_hpp_INCLUDE__
  
  #include <map>
@@ -78,15 +103,17 @@ index 1b05466b..bce9c7ef 100644
  #include <string.h>
  #include <actions/Action.hpp>
 +#include <common/FixedVector.hpp>
++#include <common/FixedVector4.hpp>
  
  class ScorchedContext;
  
 +class WeaponProjectile;
++class WeaponRoller;
 +
  class ActionController
  {
  public:
-@@ -51,6 +55,30 @@ public:
+@@ -51,6 +57,45 @@ public:
  	void simulate( fixed frameTime, fixed time );
  	void draw();
  
@@ -113,6 +140,21 @@ index 1b05466b..bce9c7ef 100644
 +		std::vector<unsigned int> *shotPlayerIds = nullptr,
 +		std::vector<FixedVector> *shotVelocities = nullptr,
 +		std::vector< WeaponProjectile* >* shotWeapons = nullptr );
++
++	// The same, for rollers - the balls a WeaponRoller drops to bounce and
++	// roll down the landscape before they go off. They are a different
++	// action from a shot (ShotBounce, not ShotProjectile) and so were
++	// invisible in this port, which only ever collected shots.
++	//
++	// Rotation comes out as the physics quaternion rather than a velocity:
++	// a roller tumbles, and upstream draws it with the orientation its own
++	// physics has arrived at (ShotBounce::draw), not pointed along its
++	// path. The weapon carries the model and scale.
++	void getRollerPositions(
++		std::vector< FixedVector >&  positions,
++		std::vector< FixedVector4 >& rotations,
++		std::vector< WeaponRoller* >& weapons,
++		std::vector< unsigned int >& playerIds );
 +
  protected:
  	class ActionList
