@@ -764,6 +764,19 @@ Java_com_rm_scorchdroid_NativeBridge_selectWeapon(JNIEnv *env, jobject /* this *
     Accessory *accessory = ctx->getAccessoryStore().findByAccessoryId((unsigned int) accessoryId);
     if (!accessory) return JNI_FALSE;
 
+    // Only a weapon may become the weapon. TanketWeapon::setWeapon checks
+    // that the tank can *use* the accessory and nothing more, because
+    // upstream's own weapon-select UI only ever offers it weapons - so
+    // selecting, say, Auto Defense set it as the current weapon quite
+    // happily, and firing then read its AccessoryPart as if it were a
+    // Weapon and took the process out. Guarded here rather than only at the
+    // call site: nothing reachable from the UI should be able to leave the
+    // tank holding something it cannot fire.
+    if (accessory->getType() != AccessoryPart::AccessoryWeapon) {
+        LOGI("selectWeapon: refusing \"%s\" - not a weapon", accessory->getName());
+        return JNI_FALSE;
+    }
+
     return tank->getAccessories().getWeapons().setWeapon(accessory) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -1465,6 +1478,14 @@ Java_com_rm_scorchdroid_NativeBridge_fireWeapon(JNIEnv *env, jobject /* this */,
 
     Accessory *weapon = tank->getAccessories().getWeapons().getCurrent();
     if (!weapon) return JNI_FALSE;
+    // Belt and braces with selectWeapon's own guard above. The engine reads
+    // this accessory's action as a Weapon on the way to firing it, so a
+    // non-weapon here is not a refused shot, it is a crash - and the tank's
+    // current weapon is set from more than one place.
+    if (weapon->getType() != AccessoryPart::AccessoryWeapon) {
+        LOGI("fireWeapon: \"%s\" is not a weapon, refusing to fire it", weapon->getName());
+        return JNI_FALSE;
+    }
 
     unsigned int moveId = tank->getShotInfo().getMoveId();
     // "power" here is the touch layer's 0..1 fraction (drag distance, or a

@@ -7338,12 +7338,22 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// up axis, then a pitch about X, like upstream's MissileMesh::draw.
 			// Velocity is an engine-space (x, y, height) direction.
 			//
-			// Re-derived for the corrected landscape-to-world map rather than
-			// carried over: the mesh's forward axis is world -Z after the
-			// upload's remap, so rotateY(a) * rotateX(b) sends it to
-			// (-cos b * sin a, sin b, -cos b * cos a). Matching that to the
-			// world velocity (vx, vz, -vy) gives b = asin(vz) and
-			// a = atan2(-vx, vy).
+			// A projectile model rests pointing *up*, not forward. That is the
+			// whole of what was wrong here: this used the tank convention,
+			// where the mesh faces along landscape +y, and a missile visibly
+			// flew at ninety degrees to its own path.
+			//
+			// Upstream is unambiguous about it. MissileMesh::draw takes
+			// angYZ = acos(dir[2]) - zero rotation when the shot is going
+			// straight up - so the nose is along landscape +z at rest, which
+			// the upload's (x, y, z) -> (x, z, -y) remap turns into world +Y.
+			//
+			// rotateY(a) * rotateX(b) sends (0, 1, 0) to
+			// (sin b * sin a, cos b, sin b * cos a). Matching that to the
+			// world velocity (vx, vz, -vy) gives b = acos(vz) and
+			// a = atan2(vx, -vy) - the same pair of angles upstream computes,
+			// its own angXY being pi - atan2(vx, vy) about a landscape axis
+			// that runs the other way to ours.
 			Mat4 orientation = Mat4::identity();
 			if (i < shotVelocities.size()) {
 				FixedVector &vel = shotVelocities[i];
@@ -7351,8 +7361,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 				float len = sqrtf(vx * vx + vy * vy + vz * vz);
 				if (len > 0.0001f) {
 					vx /= len; vy /= len; vz /= len;
-					float angXY = atan2f(-vx, vy);
-					float angYZ = asinf(std::min(1.0f, std::max(-1.0f, vz)));
+					float angXY = atan2f(vx, -vy);
+					float angYZ = acosf(std::min(1.0f, std::max(-1.0f, vz)));
 					orientation = Mat4::multiply(Mat4::rotateY(angXY), Mat4::rotateX(angYZ));
 				}
 			}

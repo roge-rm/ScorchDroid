@@ -1746,15 +1746,35 @@ class MainActivity : AppCompatActivity() {
                 onSelect = { weapon ->
                     CoroutineScope(Dispatchers.Main).launch {
                         if (weapon.isOwned) {
-                            withContext(Dispatchers.Default) {
-                                val change = weapon.activationChange
-                                if (weapon.isWeapon || change == null) {
-                                    NativeBridge.selectWeapon(weapon.accessoryId)
-                                } else {
-                                    NativeBridge.useDefense(weapon.accessoryId, change)
+                            val change = weapon.activationChange
+                            when {
+                                // Tapping an owned weapon picks it to fire.
+                                weapon.isWeapon -> {
+                                    withContext(Dispatchers.Default) {
+                                        NativeBridge.selectWeapon(weapon.accessoryId)
+                                    }
+                                    hudState.dialog = HudDialog.None
                                 }
+                                // A shield, parachute or battery goes up.
+                                change != null -> {
+                                    withContext(Dispatchers.Default) {
+                                        NativeBridge.useDefense(weapon.accessoryId, change)
+                                    }
+                                    hudState.dialog = HudDialog.None
+                                }
+                                // Owned, but neither fired nor raised - Auto
+                                // Defense is the one. This used to fall into
+                                // selectWeapon, which set it as the current
+                                // weapon and took the game down on the next
+                                // Fire; the engine refuses that now, but there
+                                // is still nothing useful to do here, so say
+                                // what the thing is for instead of going quiet.
+                                else -> Toast.makeText(
+                                    this@MainActivity,
+                                    "${weapon.name} is not fired - it works on its own",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
                             }
-                            hudState.dialog = HudDialog.None
                         } else {
                             // The server only accepts a buy during the
                             // Buying phase (see ServerBuyAccessoryHandler.cpp) -
