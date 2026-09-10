@@ -419,6 +419,14 @@ object NativeBridge {
      * people in it. False when joined as a client, where the admin commands
      * would have no server in this process to act on.
      */
+    /**
+     * The aiming servo sounds, as
+     * "movement|turn|elevate|power|gain|priority" - resolved through the
+     * mod, and with the live attenuation from the camera to your own tank.
+     * See engine_jni.cpp; parsed by [AimSounds.parse].
+     */
+    external fun getAimSounds(): String
+
     external fun isGameHost(): Boolean
 
     /**
@@ -436,6 +444,34 @@ object NativeBridge {
  * same code upstream's own admin dialog drives through ComsAdminMessage - see
  * the JNI side for why the host calls it directly instead.
  */
+/** Parsed form of [NativeBridge.getAimSounds]. */
+data class AimSounds(
+    val movement: String,
+    val turn: String,
+    val elevate: String,
+    val power: String,
+    val gain: Float,
+    val priority: Int,
+) {
+    companion object {
+        fun parse(row: String): AimSounds? {
+            val parts = row.split('|')
+            if (parts.size != 6) return null
+            return AimSounds(
+                movement = parts[0],
+                turn = parts[1],
+                elevate = parts[2],
+                power = parts[3],
+                gain = parts[4].toFloatOrNull() ?: 1.0f,
+                priority = parts[5].toIntOrNull() ?: 500,
+            )
+        }
+    }
+}
+
+/** Which aiming control is being dragged - see GameHud's onAimGesture. */
+enum class AimAxis { ANGLE, ELEVATION, POWER }
+
 object AdminCommand {
     const val KICK = 0
     const val BAN = 1

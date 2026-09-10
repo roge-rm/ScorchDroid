@@ -52,8 +52,11 @@ namespace ScorchDroidAudio
 	// Higher wins a channel; the rest of upstream's bands (environment,
 	// missile, music, rotation) belong to client subsystems this port
 	// either does not have or drives another way.
-	const int kPriorityAction = 10000;
-	const int kPriorityText   = 100;
+	const int kPriorityAction   = 10000;
+	// The aiming servo loops. Above the countdown and chat, below the
+	// action - so the turret is heard over a beep and lost under a shell.
+	const int kPriorityRotation = 500;
+	const int kPriorityText     = 100;
 
 	// A sound with no position - upstream's setRelative() case, which plays
 	// at full gain wherever the listener is.
@@ -85,6 +88,14 @@ namespace ScorchDroidAudio
 		// level with a beep.
 		int         priority;
 	};
+
+	// The gain a sound at this point would play at, for callers that hold a
+	// sound themselves rather than pushing it through the queue - the aiming
+	// loops, which start and stop with a gesture rather than being one-shot
+	// events. Same curve, so a looping turret servo is attenuated exactly as
+	// an explosion at the same spot would be.
+	float gainForPosition(float x, float y, float z,
+		bool haveListener, float listenerX, float listenerY, float listenerZ);
 
 	// Drains the queue and answers with the sounds that win a channel,
 	// nearest first, each with its attenuated gain.

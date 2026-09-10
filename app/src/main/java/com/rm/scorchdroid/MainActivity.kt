@@ -274,6 +274,7 @@ class MainActivity : AppCompatActivity() {
                 onCameraPresets = { showCameraPresets() },
                 onSimulationSpeed = { showSimulationSpeed() },
                 onAdmin = { showAdminMenu() },
+                onAimGesture = { axis, active -> playAimSound(axis, active) },
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
                 )
             }
@@ -600,6 +601,40 @@ class MainActivity : AppCompatActivity() {
      * renderer's whole cache - genuinely fresh.
      */
 
+
+    /**
+     * The turret servo sounds, following a drag on one of the aiming
+     * controls - upstream's TankKeyboardControlUtil, which starts a one-shot
+     * movement.wav plus a looping turn/elevate/power source as a key goes
+     * down and stops the loop as it comes up.
+     *
+     * A drag stands in for the held key, which is the one deliberate
+     * difference: there is no key here to hold. Power gets no movement.wav,
+     * matching upstream - winding up the power is not the turret moving.
+     *
+     * Paths and gain come from the engine on every start rather than being
+     * cached: the paths go through the mod, and the gain is the live distance
+     * from the camera to your own tank, which changes as the camera does.
+     */
+    private fun playAimSound(axis: AimAxis, active: Boolean) {
+        val key = "aim-$axis"
+        if (!active) {
+            SoundPlayer.stopLoop(key)
+            return
+        }
+
+        val sounds = AimSounds.parse(NativeBridge.getAimSounds()) ?: return
+        val loop = when (axis) {
+            AimAxis.ANGLE -> sounds.turn
+            AimAxis.ELEVATION -> sounds.elevate
+            AimAxis.POWER -> sounds.power
+        }
+        if (axis != AimAxis.POWER) {
+            SoundPlayer.play(sounds.movement, sounds.gain, sounds.priority)
+        }
+        SoundPlayer.startLoop(key, loop, sounds.gain, sounds.priority)
+    }
+
     /**
      * The host's admin controls - upstream's AdminDialog, which lived in
      * src/client and so was never ported with the rest of it.
@@ -770,6 +805,7 @@ class MainActivity : AppCompatActivity() {
         // well as stopped, so the next game reloads rather than assuming the
         // same landscape came back.
         ambient?.stop()
+        SoundPlayer.stopAllLoops()
         SoundPlayer.release()
         lastLandscapeTex = ""
         if (::gameSurface.isInitialized) {
@@ -858,6 +894,17 @@ class MainActivity : AppCompatActivity() {
     // ClientContext::tick(). Rendering happens separately, driven by
     // GLSurfaceView's own thread (GameRenderer).
     private suspend fun CoroutineScope.runTickLoop() {
+        // Decode the aiming servo samples before anyone can drag a slider -
+        // see SoundPlayer.preload for why a loop cannot wait for a decode the
+        // way a one-shot can. Both roles come through here, once per game.
+        withContext(Dispatchers.Default) {
+            AimSounds.parse(NativeBridge.getAimSounds())?.let { sounds ->
+                SoundPlayer.preload(
+                    listOf(sounds.movement, sounds.turn, sounds.elevate, sounds.power)
+                )
+            }
+        }
+
         while (isActive) {
             withContext(Dispatchers.Default) {
                 NativeBridge.tickEngine()

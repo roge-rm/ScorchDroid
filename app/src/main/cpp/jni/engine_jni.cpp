@@ -1698,6 +1698,51 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
 }
 
 
+
+// The aiming servo sounds - upstream's TankKeyboardControlUtil, which holds
+// four sound sources this port had no analogue for: a one-shot
+// movement.wav as the turret starts moving, plus looping turn.wav,
+// elevate.wav and power.wav while it keeps moving. All at eRotation
+// priority, positioned at the tank.
+//
+// Upstream starts and stops them as a key is held; the port's aiming is
+// sliders, so a drag start and end stand in for the key down and up. That is
+// the one deliberate difference - there is no held key here to map.
+//
+// Returns everything the Kotlin side needs to start a loop, in one call:
+//   "movementPath|turnPath|elevatePath|powerPath|gain|priority"
+// The paths go through S3D::getModFile so a mod's own movement sounds are
+// used, which Kotlin building the path itself would miss. The gain is the
+// same inverse-distance attenuation every other sound gets, measured from
+// the live camera to your own tank - so swinging the turret is quiet when
+// the camera is off across the map, exactly as upstream's positioned source
+// would be.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getAimSounds(JNIEnv *env, jobject) {
+    float listenerX = 0.0f, listenerY = 0.0f, listenerZ = 0.0f;
+    const bool haveListener = renderListenerEnginePosition(listenerX, listenerY, listenerZ);
+
+    float gain = ScorchDroidAudio::kDefaultGain;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        Tank *tank = findMyTank();
+        if (tank && haveListener) {
+            Vector position = tank->getLife().getTargetPosition().asVector();
+            gain = ScorchDroidAudio::gainForPosition(
+                position[0], position[1], position[2],
+                haveListener, listenerX, listenerY, listenerZ);
+        }
+    }
+
+    const std::string row =
+        S3D::getModFile("data/wav/movement/movement.wav") + "|" +
+        S3D::getModFile("data/wav/movement/turn.wav") + "|" +
+        S3D::getModFile("data/wav/movement/elevate.wav") + "|" +
+        S3D::getModFile("data/wav/movement/power.wav") + "|" +
+        S3D::formatStringBuffer("%.4f|%d", gain, ScorchDroidAudio::kPriorityRotation);
+    return env->NewStringUTF(row.c_str());
+}
+
 // Admin: kick, ban, mute, slap and the rest, for the device hosting the game.
 //
 // The whole subsystem was already here and running - ComsAdminMessage,
