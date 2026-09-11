@@ -45,6 +45,13 @@ import kotlin.coroutines.resume
  * (negotiating a group at connect time) leaves which device ends up owning it
  * to a bidding process, and a host that turns out not to be the owner has no
  * address to publish.
+ *
+ * The price of that, and it is not obvious: a device that owns a group cannot
+ * join anyone else's. `connect()` from inside a group sends an *invitation*
+ * instead of joining, so two phones that have each hosted will sit inviting
+ * each other until both time out. Groups also outlive the game that made them
+ * and the process that asked for one. [connectToOwner] therefore leaves this
+ * device's own group before it does anything else.
  */
 object WifiDirectTransport {
     private const val TAG = "WifiDirectTransport"
@@ -72,6 +79,16 @@ object WifiDirectTransport {
 
     // How often a scan re-issues its service query while the dialog is up.
     private const val RESCAN_INTERVAL_MS = 5_000L
+
+    // How long to wait for this device's own group to go away before giving
+    // up on joining someone else's, and how often to look.
+    private const val GROUP_TEARDOWN_TIMEOUT_MS = 6_000L
+    private const val GROUP_TEARDOWN_POLL_MS = 500L
+
+    // Kept apart from [mainHandler]: connecting cancels its own pending work
+    // with removeCallbacksAndMessages(null), which would otherwise take a
+    // running scan's retries down with it.
+    private val connectHandler = Handler(Looper.getMainLooper())
 
     /**
      * The permissions Wi-Fi Direct needs at runtime, which changed shape in
@@ -484,36 +501,71 @@ object WifiDirectTransport {
     }
 
     /**
+     * The outcome of [connectToOwner]: the group owner's address, or why
+     * there isn't one. The reason is carried rather than logged because the
+     * player is the one who has to act on most of these - accept a prompt on
+     * the other phone, leave a group, turn something on.
+     */
+    data class ConnectResult(val address: String?, val error: String?)
+
+    /**
      * Joins [deviceAddress]'s group and answers with the group owner's IP -
      * the address the existing `NativeBridge.startJoinGame` path then dials,
      * exactly as if it had come from NSD.
      *
+     * **Leaves this device's own group first**, which is the whole reason
+     * the first working discovery still could not connect. `connect()` does
+     * not mean the same thing to a device that is already in a group:
+     * platform documentation for it is explicit that "if the current device
+     * is part of an existing p2p group or has created a p2p group with
+     * createGroup, an invitation to join the group is sent to the peer
+     * device". Two devices that have each hosted - and a device that hosted
+     * once and still owns the group, which outlives the game and even the
+     * process - therefore do not join each other at all: each sends the
+     * other an invitation, neither is joining anything, and both sides time
+     * out saying no group could be formed.
+     *
      * Suspends because group formation genuinely takes seconds and shows the
      * peer a system invitation prompt; the caller needs to be able to show
-     * that as its own state and to cancel it. Answers null on timeout or
-     * failure rather than throwing, since every caller's response to "no
-     * group" is the same.
+     * that as its own state and to cancel it.
      */
-    @SuppressLint("MissingPermission")  // Guarded by hasPermissions below.
+    @SuppressLint("MissingPermission")  // Guarded by unavailableReason below.
     suspend fun connectToOwner(
         context: Context,
         deviceAddress: String,
         timeoutMs: Long = 30_000,
-    ): String? {
-        if (!isSupported(context) || !hasPermissions(context) || !ensureChannel(context)) return null
-        val mgr = manager ?: return null
-        val ch = channel ?: return null
+    ): ConnectResult {
+        val unavailable = unavailableReason(context)
+        if (unavailable != null) return ConnectResult(null, unavailable)
+        if (!ensureChannel(context)) {
+            return ConnectResult(null, "the Wi-Fi Direct service did not start")
+        }
+        val mgr = manager ?: return ConnectResult(null, "no Wi-Fi Direct service")
+        val ch = channel ?: return ConnectResult(null, "no Wi-Fi Direct channel")
+
+        // A scan still running makes group formation flaky on several stacks,
+        // and we have no use for one now.
+        stopDiscovery()
+        // Hosting is over the moment this device decides to join someone
+        // else's game, and the group has to go with it - see above.
+        stopAdvertising(context)
+        if (!leaveAnyGroup(context, mgr, ch)) {
+            return ConnectResult(
+                null,
+                "this device is still in a Wi-Fi Direct group of its own - turn Wi-Fi " +
+                    "off and on again, or disconnect it under Settings, Wi-Fi, Wi-Fi Direct"
+            )
+        }
 
         return suspendCancellableCoroutine { continuation ->
-            val mainHandler = Handler(Looper.getMainLooper())
             var settled = false
 
-            fun finish(address: String?) {
+            fun finish(result: ConnectResult) {
                 if (settled) return
                 settled = true
                 unregisterConnectReceiver(context)
-                mainHandler.removeCallbacksAndMessages(null)
-                if (continuation.isActive) continuation.resume(address)
+                connectHandler.removeCallbacksAndMessages(null)
+                if (continuation.isActive) continuation.resume(result)
             }
 
             val receiver = object : BroadcastReceiver() {
@@ -522,8 +574,28 @@ object WifiDirectTransport {
                     // Ask rather than reading the intent's extra: the extra is
                     // only populated on some versions, the request never isn't.
                     mgr.requestConnectionInfo(ch) { info ->
+                        Log.i(
+                            TAG,
+                            "connection changed: formed=${info?.groupFormed} " +
+                                "owner=${info?.isGroupOwner} address=${info?.groupOwnerAddress?.hostAddress}"
+                        )
                         if (info != null && info.groupFormed) {
-                            finish(info.groupOwnerAddress?.hostAddress)
+                            // Being the owner here means the negotiation went
+                            // the wrong way: the host is the one with the
+                            // game listening, and its address is not this
+                            // one. Worth naming, because it is a different
+                            // fault from no group at all.
+                            if (info.isGroupOwner) {
+                                finish(
+                                    ConnectResult(
+                                        null,
+                                        "the group formed with this device as owner, so the " +
+                                            "other device is not the one hosting"
+                                    )
+                                )
+                            } else {
+                                finish(ConnectResult(info.groupOwnerAddress?.hostAddress, null))
+                            }
                         }
                     }
                 }
@@ -543,17 +615,84 @@ object WifiDirectTransport {
                 // own one - a tie here leaves nobody at a known address.
                 groupOwnerIntent = 0
             }
-            mgr.connect(ch, config, actionListener("connect") { requested, _ ->
-                if (!requested) finish(null)
+            mgr.connect(ch, config, actionListener("connect") { requested, reason ->
+                if (!requested) finish(ConnectResult(null, connectFailure(reason)))
             })
 
-            mainHandler.postDelayed({
+            connectHandler.postDelayed({
                 Log.e(TAG, "Wi-Fi Direct group did not form within ${timeoutMs}ms")
-                finish(null)
+                finish(
+                    ConnectResult(
+                        null,
+                        "the other device never answered - it may be showing an invitation " +
+                            "prompt that needs accepting"
+                    )
+                )
             }, timeoutMs)
 
-            continuation.invokeOnCancellation { finish(null) }
+            continuation.invokeOnCancellation { finish(ConnectResult(null, null)) }
         }
+    }
+
+    /**
+     * Leaves whatever group this device is in, and waits for it to actually
+     * be gone rather than for the request to be accepted - `connect()` called
+     * while the old group is still tearing down behaves as though it were
+     * still a member. Answers false if the group outlives the wait.
+     *
+     * A no-op, and immediate, for the common case of a device that is in no
+     * group. The case that matters is a group left over from a game this
+     * device hosted earlier: it survives the game ending and the process
+     * dying, so it is not enough to track hosting in a flag.
+     */
+    @SuppressLint("MissingPermission")  // Only called from guarded paths.
+    private suspend fun leaveAnyGroup(
+        context: Context,
+        mgr: WifiP2pManager,
+        ch: WifiP2pManager.Channel,
+    ): Boolean = suspendCancellableCoroutine { continuation ->
+        var settled = false
+        var waited = 0L
+
+        fun settle(left: Boolean) {
+            if (settled) return
+            settled = true
+            if (continuation.isActive) continuation.resume(left)
+        }
+
+        fun poll() {
+            if (unavailableReason(context) != null) return settle(false)
+            mgr.requestGroupInfo(ch) { group ->
+                if (group == null) return@requestGroupInfo settle(true)
+                if (waited == 0L) {
+                    Log.i(TAG, "leaving own group ${group.networkName} before connecting")
+                    mgr.removeGroup(ch, actionListener("removeGroup"))
+                }
+                if (waited >= GROUP_TEARDOWN_TIMEOUT_MS) {
+                    Log.e(TAG, "still in group ${group.networkName} after ${waited}ms")
+                    return@requestGroupInfo settle(false)
+                }
+                waited += GROUP_TEARDOWN_POLL_MS
+                connectHandler.postDelayed({ poll() }, GROUP_TEARDOWN_POLL_MS)
+            }
+        }
+        poll()
+
+        // The poll only continues from inside requestGroupInfo's callback, so
+        // a channel that has quietly died would leave the caller suspended
+        // for good. Nothing else in this file can strand a coroutine.
+        connectHandler.postDelayed({
+            if (!settled) Log.e(TAG, "requestGroupInfo never answered")
+            settle(false)
+        }, GROUP_TEARDOWN_TIMEOUT_MS + 1_000L)
+    }
+
+    /** The framework's connect() refusals, as something a player can read. */
+    private fun connectFailure(reason: Int): String = when (reason) {
+        WifiP2pManager.P2P_UNSUPPORTED -> "this device does not support Wi-Fi Direct"
+        WifiP2pManager.BUSY -> "the Wi-Fi Direct service is busy - try again in a moment"
+        WifiP2pManager.NO_SERVICE_REQUESTS -> "there was no service request outstanding"
+        else -> "the connection request was refused (reason $reason)"
     }
 
     private fun unregisterConnectReceiver(context: Context) {

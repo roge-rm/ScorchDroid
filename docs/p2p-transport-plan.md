@@ -129,6 +129,29 @@ than another blind run:
   a fixed network name and passphrase too, so it is not a free change and is
   not made on spec.
 
+### Second device test, 2026-09-11: they see each other, no group forms
+
+The discovery fixes worked - both phones now list the other - and both then
+failed with "couldn't form a Wi-Fi Direct group".
+
+The cause is in the platform documentation for `connect()`: *"if the current
+device is part of an existing p2p group or has created a p2p group with
+createGroup, an invitation to join the group is sent to the peer device"*. A
+device that owns a group does not join anyone else's. Both phones had hosted,
+so both owned one, and each `connect()` merely invited the other; neither was
+joining, and both timed out. Groups outlive the game that created them and the
+process that asked for one, so a flag tracking whether this app is hosting is
+not enough to know.
+
+`connectToOwner` now stops scanning, stops advertising, and **waits for its own
+group to actually be gone** - polling `requestGroupInfo` rather than trusting
+`removeGroup`'s callback, because a `connect()` issued while the old group is
+still tearing down behaves as though it were still a member. It also reports
+why it failed instead of only that it did: the framework's refusal reason, a
+group that formed with the wrong device as owner, and the timeout now saying
+that the other phone may be showing an invitation prompt - which lands on the
+device the player is not looking at.
+
 **Still to verify, and it cannot be done on an emulator:** two physical devices
 with Wi-Fi *disconnected from any router*, so that it is the no-infrastructure
 path being tested and not the existing LAN one. Confirm the group-owner address
