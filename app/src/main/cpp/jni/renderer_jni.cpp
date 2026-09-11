@@ -3378,7 +3378,16 @@ namespace
 	void buildWaterGrid(int detail)
 	{
 		const float cell = (detail >= 2) ? 2.0f : (detail == 1 ? 4.0f : 8.0f);
-		waterInnerLod = (detail >= 2) ? 0.0f : (detail == 1 ? 1.0f : 2.0f);
+		// Level 0 at every detail. A coarse grid would rather have a sea
+		// smoothed to what it can carry, which is what a higher mip is for -
+		// but the height tile has no mip chain at all (see its creation, and
+		// the white sea that got it taken away), and textureLod at a level a
+		// texture does not have is undefined, not clamped. The vertex shader
+		// reads *positions* from this, so on a driver that returns something
+		// other than level 0 the sea does not merely look wrong, it flies
+		// apart. The outer ring was already moved back to level 0 for this
+		// reason; the inner grid was left behind.
+		waterInnerLod = 0.0f;
 		const float outerCell = 16.0f;
 
 		// The inner rectangle: the map and 64 units around it, on the
@@ -8140,7 +8149,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glUniform1f(waterWaveLodLoc, waterInnerLod);
 			frameDrawCalls++;
 			glDrawElements(GL_TRIANGLES, waterInnerIndexCount, GL_UNSIGNED_INT, (void *) 0);
-			// Level 0 for the ring as well - see the height texture's
+			// The ring reads the same level - see the height texture's
 			// creation for why its mip chain is gone.
 			glUniform1f(waterWaveLodLoc, 0.0f);
 			frameDrawCalls++;
