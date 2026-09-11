@@ -262,6 +262,7 @@ fun MultiplayerScreen(
     onHost: () -> Unit,
     onHostBluetooth: () -> Unit,
     onJoin: () -> Unit,
+    onJoinBluetooth: () -> Unit,
     onBack: () -> Unit,
     bluetoothEnabled: Boolean = true,
 ) {
@@ -279,7 +280,17 @@ fun MultiplayerScreen(
             onClick = onHostBluetooth,
             enabled = bluetoothEnabled,
         )
-        MenuButton("Join Game", "Find a game nearby", onClick = onJoin)
+        MenuButton("Join Game", "Find a game on the network", onClick = onJoin)
+        // Its own search, not a row in the other one. A Bluetooth scan
+        // cannot be narrowed to devices running the game, so it turns up
+        // every speaker, headset and car in range - which buried the two
+        // phones it was there for.
+        MenuButton(
+            "Join over Bluetooth",
+            "Pick the device hosting the game",
+            onClick = onJoinBluetooth,
+            enabled = bluetoothEnabled,
+        )
         Spacer(Modifier.height(12.dp))
         TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
     }

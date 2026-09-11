@@ -73,8 +73,23 @@ class MainActivity : AppCompatActivity() {
     private val bluetoothPermissionLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
     ) { granted ->
-        if (granted.values.all { it }) startBluetoothHostFlow()
+        val next = afterBluetoothReady
+        afterBluetoothReady = null
+        if (granted.values.all { it }) {
+            next?.invoke()
+        } else {
+            // Refused, which is a choice and not a fault - but a silent
+            // return to the menu would read as the button being broken.
+            showMenuMessage(
+                "Bluetooth play needs the nearby-devices permission. You can turn it " +
+                    "back on in Android's Settings under Apps, ScorchDroid, Permissions."
+            )
+        }
     }
+
+    // What to do once Bluetooth is usable, held across the system prompt that
+    // makes it so. Never more than one: these are menu taps.
+    private var afterBluetoothReady: (() -> Unit)? = null
 
     // M10: the game-setup screen's state. The options come from the engine
     // (upstream's own entries, ranges and descriptions) rather than being
@@ -213,6 +228,7 @@ class MainActivity : AppCompatActivity() {
                     onHost = { openSetup("Host Game") },
                     onHostBluetooth = { startBluetoothHostFlow() },
                     onJoin = { startJoinFlow() },
+                    onJoinBluetooth = { requireBluetooth { startJoinFlow(overBluetooth = true) } },
                     onBack = { appScreen = AppScreen.MENU },
                     bluetoothEnabled = BluetoothTransport.isSupported(applicationContext),
                 )
@@ -499,12 +515,16 @@ class MainActivity : AppCompatActivity() {
      * startGame() - put the discovery dialog on top of the aiming sliders and
      * Fire button of a game that did not exist yet.
      */
-    private fun startJoinFlow() {
+    private fun startJoinFlow(overBluetooth: Boolean = false) {
         if (gameJob != null) return
         appScreen = AppScreen.JOINING
-        hudState.statusText = "Looking for a game..."
+        hudState.statusText = if (overBluetooth) {
+            "Looking for a device to join..."
+        } else {
+            "Looking for a game..."
+        }
         gameJob = CoroutineScope(Dispatchers.Main).launch {
-            val target = pickJoinTarget()
+            val target = pickJoinTarget(overBluetooth)
             if (target == null) {
                 gameJob = null
                 appScreen = AppScreen.MULTIPLAYER
@@ -927,32 +947,47 @@ class MainActivity : AppCompatActivity() {
      * Already-paired devices can find the game without this, which is why a
      * refused dialog is a warning rather than a failure.
      */
-    private fun startBluetoothHostFlow() {
+    /**
+     * Runs [action] once Bluetooth is actually usable, asking for whatever is
+     * missing first: the permissions, then the radio itself through Android's
+     * own "turn Bluetooth on?" prompt. Both answers come back through
+     * [onActivityResult] or the permission launcher, which is why the action
+     * is held rather than passed down.
+     *
+     * Hosting and joining both need this and neither should be reciting it,
+     * which is also how the two came to disagree about whether to ask at all.
+     */
+    private fun requireBluetooth(action: () -> Unit) {
         if (!BluetoothTransport.isSupported(applicationContext)) {
-            showMenuMessage("This device has no Bluetooth, so it can't host over it.")
+            showMenuMessage("This device has no Bluetooth.")
             return
         }
         if (!BluetoothTransport.hasPermissions(applicationContext)) {
+            afterBluetoothReady = { requireBluetooth(action) }
             bluetoothPermissionLauncher.launch(BluetoothTransport.requiredPermissions())
             return
         }
         // Switched off is the one fixable case, so it is offered as a fix
-        // rather than reported as a fault: this is the system's own prompt,
-        // and answering it lands back in onActivityResult below.
+        // rather than reported as a fault.
         if (BluetoothTransport.isOff(applicationContext)) {
+            afterBluetoothReady = action
             try {
                 startActivityForResult(BluetoothTransport.enableIntent(), REQUEST_ENABLE_BLUETOOTH)
             } catch (e: android.content.ActivityNotFoundException) {
-                showMenuMessage("Bluetooth needs to be switched on to host over it.")
+                afterBluetoothReady = null
+                showMenuMessage("Bluetooth needs to be switched on first.")
             }
             return
         }
         val reason = BluetoothTransport.unavailableReason(applicationContext)
         if (reason != null) {
-            showMenuMessage("Can't host over Bluetooth: $reason.")
+            showMenuMessage("Can't use Bluetooth: $reason.")
             return
         }
+        action()
+    }
 
+    private fun startBluetoothHostFlow() = requireBluetooth {
         try {
             startActivityForResult(BluetoothTransport.discoverableIntent(), REQUEST_DISCOVERABLE)
         } catch (e: android.content.ActivityNotFoundException) {
@@ -976,17 +1011,18 @@ class MainActivity : AppCompatActivity() {
         super.onActivityResult(requestCode, resultCode, data)
 
         if (requestCode == REQUEST_ENABLE_BLUETOOTH) {
+            val next = afterBluetoothReady
+            afterBluetoothReady = null
             if (BluetoothTransport.isOff(applicationContext)) {
                 // Refused, or it did not come up. Either way, saying so is
                 // the whole point - this silently did nothing before.
                 showMenuMessage(
-                    "Bluetooth needs to be switched on to host over it. " +
-                        "Turn it on and try again."
+                    "Bluetooth needs to be switched on. Turn it on and try again."
                 )
             } else {
-                // Straight on to the visibility prompt, which is what the
-                // player was heading for before the radio got in the way.
-                startBluetoothHostFlow()
+                // Straight on to whatever the player was heading for before
+                // the radio got in the way.
+                next?.invoke()
             }
             return
         }
@@ -1147,9 +1183,10 @@ class MainActivity : AppCompatActivity() {
     // seconds-long negotiation the caller has to be able to narrate and
     // cancel - see startJoinFlow.
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private suspend fun pickJoinTarget(): LanDiscovery.FoundGame? =
+    private suspend fun pickJoinTarget(overBluetooth: Boolean = false): LanDiscovery.FoundGame? =
         kotlinx.coroutines.suspendCancellableCoroutine { cont ->
             showFindGames(
+                overBluetooth = overBluetooth,
                 onSelected = { game -> if (cont.isActive) cont.resume(game) {} },
                 onCancelled = { if (cont.isActive) cont.resume(null) {} },
             )
@@ -2226,6 +2263,7 @@ class MainActivity : AppCompatActivity() {
     // handler) keep working as a no-op-on-selection browse dialog without
     // having to pass callbacks it doesn't care about.
     private fun showFindGames(
+        overBluetooth: Boolean = false,
         onSelected: (LanDiscovery.FoundGame) -> Unit = {},
         onCancelled: () -> Unit = {},
     ) {
@@ -2243,21 +2281,33 @@ class MainActivity : AppCompatActivity() {
         // told it. Silently searching one radio while appearing to search
         // both is how two devices sitting next to each other can each report
         // finding nothing with nothing wrong with either of them.
+        //
+        // Bluetooth is a search of its own rather than a third row of this
+        // one. It cannot be narrowed to devices running the game - asking
+        // each one costs an SDP lookup that is slow and often answers
+        // nothing - so it lists every speaker, headset and car in range, and
+        // burying two phones in that was worse than having one more button.
         val hostingHere = WifiDirectTransport.isAdvertising()
         val wifiDirectProblem = when {
+            overBluetooth -> null  // Not part of this search at all.
             hostingHere -> "this device is hosting"
             else -> WifiDirectTransport.unavailableReason(applicationContext)
         }
-        val wifiDirect = wifiDirectProblem == null
-        // Bluetooth joins the same list. It reaches a third set of people
-        // again - two phones with no Wi-Fi on at all - and to a player these
-        // are one feature, differing only in which radio carried it.
+        val wifiDirect = !overBluetooth && wifiDirectProblem == null
         val bluetoothProblem = when {
+            !overBluetooth -> null
             hostOverBluetooth -> "this device is hosting"
             else -> BluetoothTransport.unavailableReason(applicationContext)
         }
-        val bluetooth = bluetoothProblem == null
-        var scansRunning = 1 + (if (wifiDirect) 1 else 0) + (if (bluetooth) 1 else 0)
+        val bluetooth = overBluetooth && bluetoothProblem == null
+        val network = !overBluetooth
+        var scansRunning =
+            (if (network) 1 else 0) + (if (wifiDirect) 1 else 0) + (if (bluetooth) 1 else 0)
+        // A search with nothing to search still has to report itself
+        // finished - see the scanFinished() call at the end - rather than
+        // sitting on "Searching..." for as long as the player will stare
+        // at it.
+        if (scansRunning == 0) scansRunning = 1
         // Devices the radio can see that answered no service query - see
         // WifiDirectTransport.startDiscovery. Listed after the real results,
         // and joinable anyway: service discovery over Wi-Fi Direct is the
@@ -2265,29 +2315,36 @@ class MainActivity : AppCompatActivity() {
         // phone's name should be able to try it.
         val peersWithoutGames = mutableListOf<LanDiscovery.FoundGame>()
 
-        fun manualEntryLabel() = "Enter address manually..."
+        // Nothing to type in a Bluetooth search: an address there is a MAC
+        // nobody knows by heart, and there is no port at all.
+        fun manualEntryLabel() = if (overBluetooth) null else "Enter address manually..."
         fun helpLabel() = "How do I connect?"
 
         fun stopScans() {
-            LanDiscovery.stopDiscovery()
+            if (network) LanDiscovery.stopDiscovery()
             if (wifiDirect) WifiDirectTransport.stopDiscovery()
             if (bluetooth) BluetoothTransport.stopDiscovery(applicationContext)
         }
 
         val listDialog = HudDialog.ListChoice(
-            title = if (wifiDirect) "Searching for games..." else "Searching for LAN games...",
-            items = listOf(manualEntryLabel(), helpLabel()),
+            title = when {
+                overBluetooth -> "Searching for Bluetooth devices..."
+                wifiDirect -> "Searching for games..."
+                else -> "Searching for LAN games..."
+            },
+            items = listOf(manualEntryLabel(), helpLabel()).filterNotNull(),
             cancelLabel = "Cancel",
             onSelect = { index ->
                 resolved = true
                 stopScans()
                 hudState.dialog = HudDialog.None
                 val rows = found.size + peersWithoutGames.size
+                val manualRow = if (overBluetooth) -1 else rows
                 when (index) {
                     in found.indices -> onSelected(found[index])
                     in found.size until rows -> onSelected(peersWithoutGames[index - found.size])
-                    rows -> promptManualAddress(onSelected, onCancelled)
-                    else -> showConnectionHelp { showFindGames(onSelected, onCancelled) }
+                    manualRow -> promptManualAddress(onSelected, onCancelled)
+                    else -> showConnectionHelp { showFindGames(overBluetooth, onSelected, onCancelled) }
                 }
             },
             onCancel = {
@@ -2307,13 +2364,12 @@ class MainActivity : AppCompatActivity() {
                     game.p2pDeviceAddress != null -> "${game.name} - Wi-Fi Direct"
                     // Said plainly, because it is what decides whether the
                     // next tap shows a pairing prompt on both devices.
-                    game.bluetoothAddress != null && game.bluetoothPaired ->
-                        "${game.name} - Bluetooth, paired"
-                    game.bluetoothAddress != null -> "${game.name} - Bluetooth, not paired yet"
+                    game.bluetoothAddress != null && game.bluetoothPaired -> "${game.name} - paired"
+                    game.bluetoothAddress != null -> "${game.name} - not paired yet"
                     else -> "${game.name} - ${game.host}:${game.port}"
                 }
             } + peersWithoutGames.map { "${it.name} - nearby, no game seen (try anyway)" } +
-                manualEntryLabel() + helpLabel()
+                listOfNotNull(manualEntryLabel(), helpLabel())
         }
 
         fun add(game: LanDiscovery.FoundGame) {
@@ -2361,7 +2417,9 @@ class MainActivity : AppCompatActivity() {
                 bluetoothProblem?.let { "Bluetooth ($it)" },
             )
             val outcome = when {
-                found.isNotEmpty() -> "Found ${found.size} device(s)"
+                found.isNotEmpty() && overBluetooth -> "${found.size} device(s) nearby"
+                found.isNotEmpty() -> "Found ${found.size} game(s)"
+                overBluetooth -> "No Bluetooth devices found"
                 peersWithoutGames.isNotEmpty() ->
                     "No games found - ${peersWithoutGames.size} nearby device(s) advertised none"
                 else -> "No games found"
@@ -2373,12 +2431,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        LanDiscovery.startDiscovery(
-            applicationContext,
-            durationMs = 4000,
-            onFound = { add(it) },
-            onFinished = { scanFinished() },
-        )
+        if (network) {
+            LanDiscovery.startDiscovery(
+                applicationContext,
+                durationMs = 4000,
+                onFound = { add(it) },
+                onFinished = { scanFinished() },
+            )
+        }
 
         if (bluetooth) {
             // Paired devices come back immediately; the scan itself is the
@@ -2408,6 +2468,10 @@ class MainActivity : AppCompatActivity() {
                 onFinished = { scanFinished() },
             )
         }
+
+        // Every radio this search wanted is unavailable, so no scan will ever
+        // report in. Saying why is the whole of what is left to do.
+        if (!network && !wifiDirect && !bluetooth) scanFinished()
     }
 
     /**
@@ -2432,9 +2496,11 @@ class MainActivity : AppCompatActivity() {
                 "turn it back on in Android's Settings under Apps, ScorchDroid, " +
                 "Permissions.\n\n" +
                 "Bluetooth - no Wi-Fi at all. The host picks \"Host over " +
-                "Bluetooth\" and allows the visibility prompt; the other device " +
-                "finds it in this list. Pairing the two first makes it quicker " +
-                "and more reliable.\n\n" +
+                "Bluetooth\" and allows the visibility prompt; the other picks " +
+                "\"Join over Bluetooth\", which is its own search because a " +
+                "Bluetooth scan finds every nearby speaker and headset too. " +
+                "Pairing the two phones first makes it quicker and more " +
+                "reliable.\n\n" +
                 "Hotspot - turn on the host's hotspot from Quick Settings and " +
                 "connect the other device to it. Then Host and Join as usual.\n\n" +
                 "By address - some guest and office networks block the way games " +
