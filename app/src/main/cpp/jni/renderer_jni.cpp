@@ -2162,6 +2162,41 @@ namespace
 			 w, h, verts1D, verts1D, terrainMinHeight, terrainMaxHeight);
 	}
 
+	// What this GPU actually is, and the two things about it that decide
+	// whether the scene comes out looking like the scene.
+	//
+	// Logged because a device that renders differently is the one case
+	// where none of the rest of this file can be reasoned about without
+	// knowing what it is running on - a phone that renders the sea in
+	// colour bands is the report that prompted this, and there was no way
+	// to tell from here whether its driver had highp at all.
+	void logGpuCapabilities()
+	{
+		LOGI("GPU: %s / %s", (const char *) glGetString(GL_VENDOR),
+			 (const char *) glGetString(GL_RENDERER));
+		LOGI("GL: %s, GLSL %s", (const char *) glGetString(GL_VERSION),
+			 (const char *) glGetString(GL_SHADING_LANGUAGE_VERSION));
+
+		// ES3 requires highp in fragment shaders, and drivers have been
+		// known to say otherwise. `precision` of 0 means it is not really
+		// there: every `precision highp float` in this file is then
+		// mediump, and a term like the water's exp() fog or its pow(x,-8)
+		// Fresnel quantises into visible steps.
+		GLint range[2] = { 0, 0 };
+		GLint precision = 0;
+		glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_HIGH_FLOAT, range, &precision);
+		LOGI("Fragment highp float: range 2^+-%d..%d, %d bits of mantissa%s",
+			 range[0], range[1], precision,
+			 precision == 0 ? " (NOT SUPPORTED - expect banding)" : "");
+		glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER, GL_MEDIUM_FLOAT, range, &precision);
+		LOGI("Fragment mediump float: %d bits of mantissa", precision);
+
+		const char *ext = (const char *) glGetString(GL_EXTENSIONS);
+		LOGI("Float texture filtering: %s",
+			 (ext && strstr(ext, "GL_OES_texture_float_linear")) ? "full float linear" :
+			 "half-float only (ES3 core, which is all the sea's RGB16F tile needs)");
+	}
+
 	// G6: anisotropic filtering, where the device has it (essentially every
 	// GLES3 one). Upstream draws its main map with plain linear filtering
 	// and no mipmaps, which on a phone screen at oblique angles shimmers;
@@ -5687,6 +5722,7 @@ bool renderListenerEnginePosition(float &x, float &y, float &z) {
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
+	logGpuCapabilities();
 	terrainProgram = linkProgram(kTerrainVertexShader, kTerrainFragmentShader);
 	terrainMvpLoc = glGetUniformLocation(terrainProgram, "uMVP");
 	terrainShadowMatrixLoc = glGetUniformLocation(terrainProgram, "uShadowMatrix");
