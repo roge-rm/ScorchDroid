@@ -7,8 +7,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.LocationManager
+import android.net.wifi.WifiManager
 import android.net.wifi.WpsInfo
 import android.net.wifi.p2p.WifiP2pConfig
+import android.net.wifi.p2p.WifiP2pDevice
 import android.net.wifi.p2p.WifiP2pManager
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceInfo
 import android.net.wifi.p2p.nsd.WifiP2pDnsSdServiceRequest
@@ -17,6 +20,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -61,6 +65,13 @@ object WifiDirectTransport {
     private var advertising = false
     private var connectReceiver: BroadcastReceiver? = null
     private var discoveryTimeout: Runnable? = null
+    private var peersReceiver: BroadcastReceiver? = null
+    private var rescan: Runnable? = null
+    private var appContextForReceiver: Context? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    // How often a scan re-issues its service query while the dialog is up.
+    private const val RESCAN_INTERVAL_MS = 5_000L
 
     /**
      * The permissions Wi-Fi Direct needs at runtime, which changed shape in
@@ -81,6 +92,56 @@ object WifiDirectTransport {
         requiredPermissions().all {
             ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
         }
+
+    /**
+     * Why Wi-Fi Direct cannot be used right now, phrased for a player to act
+     * on, or null if it can.
+     *
+     * Every entry point here used to fail silently on all four of these, and
+     * they are not distinguishable from the outside: a refused permission, a
+     * switched-off radio and simply nobody being there all looked identical -
+     * an empty "Find Games" list. That is what made the first two-device test
+     * uninformative, so the reason is now something callers can put on
+     * screen. None of these is a fault in the radio; each is a different
+     * thing for the player to go and change.
+     */
+    fun unavailableReason(context: Context): String? {
+        if (!isSupported(context)) return "this device has no Wi-Fi Direct"
+        if (!hasPermissions(context)) {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                "the nearby devices permission was refused"
+            } else {
+                "the location permission was refused - Android ${Build.VERSION.RELEASE} " +
+                    "treats finding nearby devices as a location feature"
+            }
+        }
+        // Wi-Fi P2P rides the Wi-Fi radio: the point of it is not needing a
+        // *network*, but the radio itself still has to be on.
+        if (!isWifiEnabled(context)) {
+            return "Wi-Fi is switched off - turn it on, it does not need to join a network"
+        }
+        // Below API 33 the permission is not enough on its own: with the
+        // master location toggle off, discovery succeeds and then reports
+        // nothing, forever. From 33 NEARBY_WIFI_DEVICES covers it and the
+        // toggle is irrelevant, which is why this is version-gated rather
+        // than asked of everyone.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU && !isLocationEnabled(context)) {
+            return "Location is switched off in system settings, which Android " +
+                "${Build.VERSION.RELEASE} needs before it will look for nearby devices"
+        }
+        return null
+    }
+
+    private fun isWifiEnabled(context: Context): Boolean {
+        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        return wifi?.isWifiEnabled ?: false
+    }
+
+    private fun isLocationEnabled(context: Context): Boolean {
+        val lm = context.applicationContext.getSystemService(Context.LOCATION_SERVICE)
+            as? LocationManager ?: return false
+        return LocationManagerCompat.isLocationEnabled(lm)
+    }
 
     /**
      * Whether this device can do Wi-Fi Direct at all. Declared
@@ -132,14 +193,17 @@ object WifiDirectTransport {
      * assumed success would show the player a "ready to play" state for a
      * group that never came up.
      */
-    @SuppressLint("MissingPermission")  // Guarded by hasPermissions below.
-    fun advertise(context: Context, port: Int, onResult: (Boolean) -> Unit = {}) {
-        if (!isSupported(context) || !hasPermissions(context) || !ensureChannel(context)) {
-            onResult(false)
+    @SuppressLint("MissingPermission")  // Guarded by unavailableReason below.
+    fun advertise(context: Context, port: Int, onResult: (Boolean, String?) -> Unit = { _, _ -> }) {
+        val reason = unavailableReason(context)
+        if (reason != null) {
+            Log.w(TAG, "not advertising: $reason")
+            onResult(false, reason)
             return
         }
-        val mgr = manager ?: return onResult(false)
-        val ch = channel ?: return onResult(false)
+        if (!ensureChannel(context)) return onResult(false, "the Wi-Fi Direct service did not start")
+        val mgr = manager ?: return onResult(false, "no Wi-Fi Direct service")
+        val ch = channel ?: return onResult(false, "no Wi-Fi Direct channel")
 
         val record = mapOf(
             TXT_PORT to port.toString(),
@@ -153,7 +217,7 @@ object WifiDirectTransport {
         // service record on the old one, and peers then see the game twice.
         mgr.clearLocalServices(ch, actionListener("clearLocalServices") { _, _ ->
             mgr.addLocalService(ch, serviceInfo, actionListener("addLocalService") { added, _ ->
-                if (!added) return@actionListener onResult(false)
+                if (!added) return@actionListener onResult(false, "the game could not be advertised")
                 // A group the host owns outright, rather than one negotiated
                 // at connect time - see this object's header for why.
                 mgr.createGroup(ch, actionListener("createGroup") { created, reason ->
@@ -164,7 +228,15 @@ object WifiDirectTransport {
                     // would sit waiting for peers that can never arrive.
                     val up = created || reason == WifiP2pManager.BUSY
                     advertising = up
-                    onResult(up)
+                    // A host that has a group is also the one device that
+                    // other phones have to be able to *see*, so say what the
+                    // group actually came up as - band and owner - rather
+                    // than only that it exists. A group owner sitting on a
+                    // 5GHz channel is findable in theory and frequently not
+                    // in practice, and until this line existed there was no
+                    // way to tell that had happened.
+                    if (up) logGroupInfo(context)
+                    onResult(up, if (up) null else "the Wi-Fi Direct group would not form")
                 })
             })
         })
@@ -193,23 +265,33 @@ object WifiDirectTransport {
      * Results arrive as [LanDiscovery.FoundGame] with a `p2pDeviceAddress`
      * and no usable host: there is no IP until a group has been formed, which
      * is what [connectToOwner] does when the player picks one.
+     *
+     * [onPeerSeen] reports a device the radio can see but which answered no
+     * service query. That is a different failure from finding nothing at all
+     * - the phones are in range of each other and it is DNS-SD over P2P that
+     * is not working - and telling them apart is most of the diagnosis when
+     * this does not work on a given pair of handsets.
      */
-    @SuppressLint("MissingPermission")  // Guarded by hasPermissions below.
+    @SuppressLint("MissingPermission")  // Guarded by unavailableReason below.
     fun startDiscovery(
         context: Context,
         durationMs: Long,
         onFound: (LanDiscovery.FoundGame) -> Unit,
+        onPeerSeen: (name: String, deviceAddress: String) -> Unit = { _, _ -> },
         onFinished: () -> Unit,
     ) {
-        if (!isSupported(context) || !hasPermissions(context) || !ensureChannel(context)) {
+        val reason = unavailableReason(context)
+        if (reason != null) {
+            Log.w(TAG, "not scanning: $reason")
             onFinished()
             return
         }
+        if (!ensureChannel(context)) return onFinished()
         val mgr = manager ?: return onFinished()
         val ch = channel ?: return onFinished()
         stopDiscovery()
 
-        val mainHandler = Handler(Looper.getMainLooper())
+        val appContext = context.applicationContext
         // The two listeners fire separately for the same service - the TXT
         // record carries the port, the service response carries the readable
         // name - so hold the ports until the matching response arrives.
@@ -231,31 +313,82 @@ object WifiDirectTransport {
             }
         }
 
+        // Every DNS-SD answer is logged before it is filtered. A response
+        // for the wrong service type still proves the mechanism works on
+        // this pair of devices, which is worth knowing when ours is the one
+        // that never arrives.
         mgr.setDnsSdResponseListeners(
             ch,
-            { instanceName, _, device ->
+            { instanceName, registrationType, device ->
+                Log.i(TAG, "service: $instanceName $registrationType from ${device.deviceAddress}")
+                if (!registrationType.contains(SERVICE_TYPE, ignoreCase = true)) return@setDnsSdResponseListeners
                 namesByDevice[device.deviceAddress] =
                     device.deviceName.ifEmpty { instanceName }
                 emit(device.deviceAddress)
             },
-            { _, record, device ->
+            { fullDomain, record, device ->
+                Log.i(TAG, "txt: $fullDomain $record from ${device.deviceAddress}")
+                if (!fullDomain.contains(SERVICE_TYPE, ignoreCase = true)) return@setDnsSdResponseListeners
                 record[TXT_PORT]?.toIntOrNull()?.let { portsByDevice[device.deviceAddress] = it }
                 record[TXT_NAME]?.let { namesByDevice.putIfAbsent(device.deviceAddress, it) }
                 emit(device.deviceAddress)
             },
         )
 
-        val request = WifiP2pDnsSdServiceRequest.newInstance(SERVICE_TYPE)
+        // Watch plain peer discovery alongside the service query, and report
+        // what it sees. See [onPeerSeen]: this is the one signal that
+        // separates "the other phone is not there" from "the other phone is
+        // there and the service query is going unanswered".
+        val peers = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context, intent: Intent) {
+                if (intent.action != WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION) return
+                if (unavailableReason(appContext) != null) return
+                mgr.requestPeers(ch) { list ->
+                    list.deviceList.forEach { device ->
+                        Log.i(TAG, "peer: ${device.deviceName} ${device.deviceAddress} " +
+                            "status=${peerStatus(device)}")
+                        val name = device.deviceName.ifEmpty { device.deviceAddress }
+                        onPeerSeen(name, device.deviceAddress)
+                    }
+                }
+            }
+        }
+        peersReceiver = peers
+        appContextForReceiver = appContext
+        ContextCompat.registerReceiver(
+            appContext,
+            peers,
+            IntentFilter(WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+
+        // Unfiltered, where this used to ask for `SERVICE_TYPE`. A typed
+        // request has the supplicant do the matching, and on several stacks
+        // a typed request is answered with nothing at all while an untyped
+        // one returns the very same service - so ask for everything and
+        // match in the listeners above, which costs one string compare.
+        val request = WifiP2pDnsSdServiceRequest.newInstance()
         serviceRequest = request
         mgr.addServiceRequest(ch, request, actionListener("addServiceRequest") { added, _ ->
             if (!added) {
                 mainHandler.post { onFinished() }
                 return@actionListener
             }
-            mgr.discoverServices(ch, actionListener("discoverServices") { started, _ ->
-                if (!started) mainHandler.post { onFinished() }
-            })
+            scan(mgr, ch)
         })
+
+        // A service query is a single round of probes: a peer whose radio was
+        // elsewhere for that round is simply missed, and nothing retries. So
+        // re-issue for as long as the dialog is up rather than concluding
+        // from one attempt that nobody is there.
+        rescan = object : Runnable {
+            override fun run() {
+                if (serviceRequest == null) return
+                scan(mgr, ch)
+                mainHandler.postDelayed(this, RESCAN_INTERVAL_MS)
+            }
+        }
+        mainHandler.postDelayed(rescan!!, RESCAN_INTERVAL_MS)
 
         discoveryTimeout = Runnable {
             discoveryTimeout = null
@@ -265,17 +398,89 @@ object WifiDirectTransport {
         mainHandler.postDelayed(discoveryTimeout!!, durationMs)
     }
 
+    /**
+     * One round of looking. Peer discovery is started as well as the service
+     * query, and deliberately not instead of it: a device that is not running
+     * peer discovery does not answer other devices' probes either, so this is
+     * also what makes *this* phone findable while it is searching.
+     */
+    @SuppressLint("MissingPermission")  // Only called from guarded paths.
+    private fun scan(mgr: WifiP2pManager, ch: WifiP2pManager.Channel) {
+        mgr.discoverPeers(ch, actionListener("discoverPeers"))
+        mgr.discoverServices(ch, actionListener("discoverServices"))
+    }
+
+    private fun peerStatus(device: WifiP2pDevice): String = when (device.status) {
+        WifiP2pDevice.CONNECTED -> "connected"
+        WifiP2pDevice.INVITED -> "invited"
+        WifiP2pDevice.FAILED -> "failed"
+        WifiP2pDevice.AVAILABLE -> "available"
+        WifiP2pDevice.UNAVAILABLE -> "unavailable"
+        else -> "unknown(${device.status})"
+    }
+
+    /**
+     * Logs what the group this device owns actually came up as. Only ever a
+     * diagnostic: a group on a 5GHz channel is findable in theory and often
+     * is not in practice, and without this there is no way to know that is
+     * what happened.
+     */
+    @SuppressLint("MissingPermission")  // Only called once a group has formed.
+    private fun logGroupInfo(context: Context) {
+        val mgr = manager ?: return
+        val ch = channel ?: return
+        if (unavailableReason(context) != null) return
+        mgr.requestGroupInfo(ch) { group ->
+            if (group == null) {
+                Log.w(TAG, "group formed but requestGroupInfo returned nothing")
+                return@requestGroupInfo
+            }
+            val frequency = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                group.frequency
+            } else {
+                0
+            }
+            Log.i(
+                TAG,
+                "group up: ssid=${group.networkName} owner=${group.isGroupOwner} " +
+                    "frequency=${frequency}MHz interface=${group.`interface`} " +
+                    "clients=${group.clientList.size}"
+            )
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun stopDiscovery() {
-        // Drop the pending timeout as well as the scan itself. Without this a
-        // scan the player cancelled still reports finishing, seconds later,
-        // to a dialog that has already been dismissed.
-        discoveryTimeout?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        // Drop the pending timeout and the retry as well as the scan itself.
+        // Without this a scan the player cancelled still reports finishing,
+        // seconds later, to a dialog that has already been dismissed.
+        discoveryTimeout?.let { mainHandler.removeCallbacks(it) }
         discoveryTimeout = null
+        rescan?.let { mainHandler.removeCallbacks(it) }
+        rescan = null
+        peersReceiver?.let { receiver ->
+            peersReceiver = null
+            appContextForReceiver?.let { ctx ->
+                try {
+                    ctx.unregisterReceiver(receiver)
+                } catch (e: IllegalArgumentException) {
+                    // Already gone - nothing to undo.
+                }
+            }
+        }
         val mgr = manager ?: return
         val ch = channel ?: return
         serviceRequest?.let { mgr.removeServiceRequest(ch, it, actionListener("removeServiceRequest")) }
         serviceRequest = null
+        // Leave the radio alone once nobody is looking: peer discovery left
+        // running is a steady drain and keeps the Wi-Fi chip scanning.
+        if (!advertising) {
+            try {
+                mgr.stopPeerDiscovery(ch, actionListener("stopPeerDiscovery"))
+            } catch (e: SecurityException) {
+                // Permission revoked mid-scan; the scan is over either way.
+            }
+        }
     }
 
     /**

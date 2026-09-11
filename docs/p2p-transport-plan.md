@@ -61,7 +61,7 @@ takes a second or two and wants a progress indicator.
 The soak is opt-in via `SCORCHDROID_NET_SOAK_SECONDS` so the normal suite does
 not get slower to carry a measurement.
 
-## Phase 1 — Wi-Fi Direct (built, not yet device-tested)
+## Phase 1 — Wi-Fi Direct (built; first device test failed)
 
 `app/src/main/java/com/rm/scorchdroid/WifiDirectTransport.kt`, a sibling of
 `LanDiscovery.kt`: a rendezvous mechanism with no JNI, because Wi-Fi P2P has
@@ -84,6 +84,51 @@ until a group forms — so picking one negotiates the group first, under its own
 status line, since that takes seconds and puts an invitation prompt on the
 host's screen.
 
+### First device test, 2026-09-11: neither device found the other
+
+An Android 15 phone and an Android 11 phone. Both appeared to be hosting over
+Wi-Fi Direct; neither turned up in the other's search. No location permission
+prompt was seen on either device.
+
+The test could not say why, and that is the first thing this uncovered: **every
+way this can fail was silent**. A refused permission, a device without the
+hardware, Wi-Fi switched off, the location master toggle off on API ≤ 32, and
+simply nobody being there all produced the same empty list — `advertise` and
+`startDiscovery` both returned early with no reason anyone could see. Worse,
+`showFindGames` skipped the Wi-Fi Direct scan entirely on a device that was
+hosting, changing only the dialog title, so a phone searching from its own
+hosted game looked like a phone searching and finding nothing.
+
+Fixed together, since the next two-device session should be diagnostic rather
+than another blind run:
+
+- `unavailableReason()` gives one sentence for each of the five states, and the
+  hosting label and the "No games found" title both carry it. There is now no
+  path on which Wi-Fi Direct quietly does not happen.
+- **The service request is no longer typed.** It asked for `_scorchdroid._tcp`
+  and had the supplicant match it; several stacks answer a typed request with
+  nothing while answering an untyped one with the very same service. It now
+  asks for everything and matches in the listener, which costs one string
+  compare. This is the likeliest single cause of the failure.
+- **`discoverPeers()` runs alongside `discoverServices()`.** It never did. A
+  device that is not running peer discovery does not answer other devices'
+  probes either, so this is also what makes a searching phone findable.
+- **The query is re-issued every 5s** for a 20s window, up from one attempt
+  over 8s. A service query is a single round of probes; a peer whose radio was
+  elsewhere for that round was simply missed and nothing retried.
+- Devices seen by peer discovery that answered no service query are listed as
+  "nearby, no game seen (try anyway)" and can be joined on the default port.
+  That separates "the other phone is not there" from "the other phone is there
+  and DNS-SD over P2P is not working" — which is most of the diagnosis — and it
+  is a usable fallback, since service discovery is the flakiest part of this
+  path.
+- Group formation logs its SSID, owner flag and **operating frequency**. A
+  group owner on a 5GHz channel is findable in theory and often not in
+  practice. If the logs show that, the lever is `setGroupOperatingBand(
+  GROUP_OWNER_BAND_2GHZ)` — which, per `WifiP2pConfig.Builder.build()`, forces
+  a fixed network name and passphrase too, so it is not a free change and is
+  not made on spec.
+
 **Still to verify, and it cannot be done on an emulator:** two physical devices
 with Wi-Fi *disconnected from any router*, so that it is the no-infrastructure
 path being tested and not the existing LAN one. Confirm the group-owner address
@@ -91,6 +136,12 @@ in logcat and play a full round. Known risk to watch for: some devices route
 poorly with Wi-Fi and P2P up together — if connecting to the group owner fails
 while normal Wi-Fi is associated, bind the socket to the P2P network with
 `ConnectivityManager.bindProcessToNetwork()`.
+
+If the next session still finds nothing with peers visible on both sides, the
+autonomous group owner itself is the suspect — the official DNS-SD sample never
+calls `createGroup`, and advertise-then-negotiate is a one-line change, since
+the joining side already asks for `groupOwnerIntent = 0` and reads the owner
+address out of its own connection info.
 
 ## Phase 2 — hotspot play (done)
 
