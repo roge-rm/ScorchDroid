@@ -202,6 +202,7 @@ target_compile_definitions(scorched_common PUBLIC HAVE_SNPRINTF)
 add_library(${CMAKE_PROJECT_NAME} SHARED
     jni/engine_jni.cpp
     jni/renderer_jni.cpp
+    jni/JniTransport.cpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE

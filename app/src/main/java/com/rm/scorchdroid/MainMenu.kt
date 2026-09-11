@@ -260,13 +260,25 @@ fun QuickGameScreen(
 @Composable
 fun MultiplayerScreen(
     onHost: () -> Unit,
+    onHostBluetooth: () -> Unit,
     onJoin: () -> Unit,
     onBack: () -> Unit,
+    bluetoothEnabled: Boolean = true,
 ) {
     MenuBackdrop {
         Title("Multiplayer")
         Spacer(Modifier.height(36.dp))
         MenuButton("Host Game", "Over Wi-Fi, a hotspot, or Wi-Fi Direct", onClick = onHost)
+        // Its own button rather than an option inside hosting, because it is
+        // genuinely a different game: the engine has one network interface,
+        // so a Bluetooth game is not also a Wi-Fi one and the choice cannot
+        // be made after the fact.
+        MenuButton(
+            "Host over Bluetooth",
+            "No Wi-Fi at all - for two devices side by side",
+            onClick = onHostBluetooth,
+            enabled = bluetoothEnabled,
+        )
         MenuButton("Join Game", "Find a game nearby", onClick = onJoin)
         Spacer(Modifier.height(12.dp))
         TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }

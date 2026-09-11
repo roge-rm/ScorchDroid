@@ -30,12 +30,20 @@ object LanDiscovery {
      * been formed with it, so the address only exists after the player has
      * chosen to join. An NSD result is the other way round - a real host and
      * no device address.
+     *
+     * [bluetoothAddress] is the third case (see [BluetoothTransport]) and
+     * has no IP address at any point, before or after connecting: that whole
+     * game runs over RFCOMM. [bluetoothPaired] separates a device this phone
+     * already knows from one a scan turned up, which is the difference
+     * between connecting straight away and a pairing prompt.
      */
     data class FoundGame(
         val name: String,
         val host: String,
         val port: Int,
         val p2pDeviceAddress: String? = null,
+        val bluetoothAddress: String? = null,
+        val bluetoothPaired: Boolean = false,
     )
 
     private var nsdManager: NsdManager? = null
