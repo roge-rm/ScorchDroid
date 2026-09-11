@@ -12,11 +12,13 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -127,7 +129,23 @@ object BluetoothTransport {
             }
         }
         if (adapter()?.isEnabled != true) return "Bluetooth is switched off"
+        // Below API 31 this is the same trap Wi-Fi Direct has: the permission
+        // is not enough, and with the master location toggle off a scan
+        // starts, succeeds, and reports nothing, forever. Already-paired
+        // devices still list, so the failure looks like "only pairing works"
+        // rather than like a switch being off. From 31 the dedicated
+        // BLUETOOTH_SCAN permission covers it and the toggle is irrelevant.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && !isLocationEnabled(context)) {
+            return "Location is switched off in system settings, which Android " +
+                "${Build.VERSION.RELEASE} needs before it will find unpaired devices"
+        }
         return null
+    }
+
+    private fun isLocationEnabled(context: Context): Boolean {
+        val lm = context.applicationContext.getSystemService(Context.LOCATION_SERVICE)
+            as? LocationManager ?: return false
+        return LocationManagerCompat.isLocationEnabled(lm)
     }
 
     /** The device's own Bluetooth name, for the host to show as its label. */
