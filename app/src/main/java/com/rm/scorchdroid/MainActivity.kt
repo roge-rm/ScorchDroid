@@ -483,17 +483,25 @@ class MainActivity : AppCompatActivity() {
             // "connecting to :27270", a player would reasonably think the
             // game had hung.
             val host = if (target.p2pDeviceAddress != null) {
-                hudState.statusText = "Asking ${target.name} to connect..."
-                val owner = WifiDirectTransport.connectToOwner(
+                // The prompt is worth mentioning: it lands on the *other*
+                // phone, which the player is not looking at, and ignoring it
+                // is indistinguishable from the connection failing.
+                hudState.statusText = "Asking ${target.name} to connect...\n" +
+                    "Accept the invitation on the other device if it asks."
+                val result = WifiDirectTransport.connectToOwner(
                     applicationContext, target.p2pDeviceAddress
                 )
-                if (owner == null) {
-                    hudState.statusText =
+                if (result.address == null) {
+                    hudState.statusText = if (result.error != null) {
+                        "Couldn't connect to ${target.name}: ${result.error}. " +
+                            "Tap Cancel to go back."
+                    } else {
                         "Couldn't form a Wi-Fi Direct group with ${target.name}. " +
                             "Tap Cancel to go back."
+                    }
                     return@launch
                 }
-                owner
+                result.address
             } else {
                 target.host
             }
