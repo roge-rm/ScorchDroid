@@ -15,7 +15,14 @@ object NativeBridge {
      * ScorchedServer::startServer, with the money and every other option
      * exactly as the config and the setup screen set them.
      */
-    external fun startLocalGame(): Boolean
+    /**
+     * Starts hosting. [overBluetooth] swaps the TCP interface the server
+     * builds for a NetBridge over Bluetooth RFCOMM - not in addition to it:
+     * the engine has one network interface, so a Bluetooth game is not also
+     * a LAN game, and [getServerPort] reports 0 because there is no port to
+     * tell anyone.
+     */
+    external fun startLocalGame(overBluetooth: Boolean): Boolean
 
     /** Advances the real game simulation by one step (see ServerSimulator). */
     external fun tickEngine()
@@ -102,6 +109,14 @@ object NativeBridge {
      * to see how it's progressing.
      */
     external fun startJoinGame(host: String, port: Int): Boolean
+
+    /**
+     * The same join over Bluetooth RFCOMM, where [address] is a Bluetooth
+     * MAC and there is no port. Progress is polled with
+     * [getClientJoinState] exactly as for [startJoinGame] - everything after
+     * the connect is the same engine code.
+     */
+    external fun startJoinGameBluetooth(address: String): Boolean
 
     /**
      * M5 Phase 2: the joining client's handshake progress - one of

@@ -86,6 +86,8 @@ std::mutex g_engineMutex;
 #include <common/OptionsScorched.hpp>
 #include <ClientContext.hpp>
 #include <EngineState.hpp>
+#include <NetBridge.hpp>
+#include "JniTransport.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -323,9 +325,19 @@ static void promoteHumanToPlaying(ScorchedServer *server, Tank *tank) {
     LOGI("promoteHumanToPlaying: queued for player id=%u", tank->getPlayerId());
 }
 
+// Bluetooth's transport calls back into Kotlin from NetBridge's send thread,
+// which is a plain pthread with no JNIEnv of its own. This is the only way it
+// can get one - the VM handle has to be taken here, at load, because there is
+// no other moment when a thread that has one is guaranteed to be running.
+extern "C" JNIEXPORT jint JNICALL
+JNI_OnLoad(JavaVM *vm, void * /* reserved */) {
+    g_javaVM = vm;
+    return JNI_VERSION_1_6;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
-        JNIEnv *env, jobject /* this */) {
+        JNIEnv *env, jobject /* this */, jboolean overBluetooth) {
     std::lock_guard<std::mutex> lock(g_engineMutex);
     if (g_mode != EngineMode::kNone) {
         LOGE("startLocalGame: engine already started (mode=%d)", (int) g_mode);
@@ -406,8 +418,35 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
 
     int port = ScorchedServer::instance()->getOptionsGame().getPortNo();
     g_hostingPort = port;
-    g_hostingListening = ScorchedServer::instance()->getContext().getNetInterface().start(port);
-    LOGI("NetInterface::start(%d) -> %d", port, g_hostingListening);
+
+    if (overBluetooth) {
+        // A Bluetooth game is not also a LAN game: one NetInterface per
+        // process is the rule (see NetBridge.hpp), so this replaces the TCP
+        // one startServer() built rather than joining it. The port is
+        // reported as zero afterwards because there genuinely isn't one -
+        // nothing to type into another device, which is the point.
+        auto *transport = new JniTransport(env);
+        if (!transport->valid()) {
+            LOGE("Bluetooth hosting: the Kotlin transport is not available");
+            delete transport;
+            return JNI_FALSE;
+        }
+        auto *bridge = new NetBridge(transport);
+        ScorchedServer::instance()->getContext().setNetInterface(bridge);
+        // Re-set, not set: startServerInternal() handed the message handler
+        // to the interface it built, and replacing the interface means
+        // handing it over again. host-tests does exactly this.
+        bridge->setMessageHandler(&ScorchedServer::instance()->getComsMessageHandler());
+        g_hostingPort = 0;
+        g_hostingListening = bridge->start(0);
+        LOGI("NetBridge::start() over Bluetooth -> %d", g_hostingListening);
+        if (!g_hostingListening) {
+            LOGE("Bluetooth hosting failed to start listening");
+        }
+    } else {
+        g_hostingListening = ScorchedServer::instance()->getContext().getNetInterface().start(port);
+        LOGI("NetInterface::start(%d) -> %d", port, g_hostingListening);
+    }
     if (!g_hostingListening) {
         // Not fatal - matches upstream's own single-player-vs-loopback
         // fallback in spirit: local practice against bots still works
@@ -448,6 +487,44 @@ Java_com_rm_scorchdroid_NativeBridge_startJoinGame(JNIEnv *env, jobject /* this 
     bool connecting = client->connectToServer(host, (int) port);
     LOGI("ClientContext::connectToServer(%s, %d) -> %d", host, (int) port, connecting);
     env->ReleaseStringUTFChars(jHost, host);
+
+    if (!connecting) {
+        delete client;
+        return JNI_FALSE;
+    }
+
+    g_clientContext = client;
+    g_mode = EngineMode::kClient;
+    return JNI_TRUE;
+}
+
+// The same join, over Bluetooth. `address` is a Bluetooth MAC rather than an
+// IP one and there is no port: NetBridge passes the string to its transport
+// verbatim and ignores the port, which is why connect()'s signature did not
+// have to change for any of this. Everything after the connect - the auth
+// exchange, the mod manifest, the level, the simulation - is the same code
+// as the TCP path, which host-tests proves over a socket pair.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_startJoinGameBluetooth(JNIEnv *env, jobject /* this */,
+                                                            jstring jAddress) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    if (g_mode != EngineMode::kNone) {
+        LOGE("startJoinGameBluetooth: engine already started (mode=%d)", (int) g_mode);
+        return JNI_FALSE;
+    }
+
+    auto *transport = new JniTransport(env);
+    if (!transport->valid()) {
+        LOGE("Bluetooth join: the Kotlin transport is not available");
+        delete transport;
+        return JNI_FALSE;
+    }
+
+    const char *address = env->GetStringUTFChars(jAddress, nullptr);
+    auto *client = new ClientContext();
+    bool connecting = client->connectToServer(address, 0, new NetBridge(transport));
+    LOGI("ClientContext::connectToServer(%s, bluetooth) -> %d", address, connecting);
+    env->ReleaseStringUTFChars(jAddress, address);
 
     if (!connecting) {
         delete client;

@@ -215,15 +215,15 @@ with clients joining via `WifiNetworkSpecifier`. That API has grown fragile —
 `getSoftApConfiguration()`, and the whole path needs location services actually
 switched on.
 
-## Phase 3 — Bluetooth RFCOMM via a transport bridge (not started, parked)
+## Phase 3 — Bluetooth RFCOMM via a transport bridge (built 2026-09-11)
 
-Parked 2026-09-09 in favour of other work, so this section is a design to pick
-up from rather than something in progress.
+Parked 2026-09-09, unblocked by Phase 1 working on two devices on 2026-09-11,
+and built the same day. The design below is what was built; what changed in
+the building is noted against each piece.
 
-Deliberately gated behind Phase 1's device test: Wi-Fi Direct removes the
-"we need a router" problem for the large majority of cases at a fraction of
-this cost, so it should be proven on hardware before any C++ is written.
-Phase 0's numbers say the transport itself is viable whenever we want it.
+It was deliberately gated behind Phase 1's device test, and that gate was
+worth having: Wi-Fi Direct removes the "we need a router" problem for the
+large majority of cases at a fraction of this cost.
 
 Bluetooth is the genuine fallback — no Play Services, no Wi-Fi at all, works on
 every Android device.
@@ -273,14 +273,52 @@ process misroute messages through the shared `NetMessagePool` singleton. One
 instance per process stays the rule, which `engine_jni.cpp`'s mutually
 exclusive `kHost`/`kClient` modes already enforce.
 
+### What the building changed
+
+- **Peer ids are the transport's to allocate**, not NetBridge's. The
+  transport is the side that discovers peers, and an id it hands back is
+  used verbatim as a Scorched3D destination id. The contract - non-zero,
+  unique, never reused - is in `BridgeTransport.hpp`, and NetBridge rejects
+  0 and `UINT_MAX` because both mean something else to the engine.
+- **A client's "server" is simply the first peer that connects**, since a
+  client only ever has one. That removed the reserved-id machinery the
+  design implied.
+- **`onTransportFailed` was added to the sink.** A client that cannot reach
+  the host at all has no peer to be disconnected from, and the join screen
+  would otherwise wait for a connection that is not coming.
+- **`ClientContext::connectToServer` takes an optional `NetInterface`**
+  rather than always building a TCP one, which is the whole of the client
+  seam. The host seam is what the design said it would be: `setNetInterface`
+  plus re-setting the message handler.
+- **Hosting over Bluetooth is its own menu entry**, not an option inside
+  hosting. One NetInterface per process means a Bluetooth game is not also a
+  Wi-Fi game, so the choice cannot be made after the fact, and `getServerPort`
+  reports 0 because there is genuinely no port to tell anyone.
+- Discovery lists **paired devices immediately and scanned ones as they
+  arrive**, and does not ask each device whether it serves our UUID first.
+  An SDP lookup per device is slow and frequently answers nothing for a
+  device that is in fact hosting - and Phase 1's first failed test is the
+  standing reminder that an empty list nobody can explain is the worst
+  outcome available. A device that is not a host fails the connect in a
+  second or two and says so.
+
 ### Verification
 
-Implement a second `BridgeTransport` in `host-tests/main.cpp` over a Unix
-domain socket pair and run `NetBridge` through the existing `testClientJoin`
-fork+exec harness. That exercises the whole real handshake against the new
-transport with no Android involved, and keeps the clock-drift residual
-assertion as a check on the bridge's timing. Then two physical devices in
-airplane mode with only Bluetooth on.
+Done, and it is the part of this worth keeping: `host-tests` implements a
+second `BridgeTransport` over a Unix domain socket pair and runs `NetBridge`
+through the existing `testClientJoin` fork+exec harness. A real
+`ClientContext`, in a real separate process, completes the real handshake -
+auth, the 1130-file mod manifest, the level definition - sees every tank the
+host has, and converges its clock on the host's, with no TCP socket anywhere.
+There is also a smaller in-process test for the things a hand-written
+transport gets wrong: a 100KB message arriving whole and byte-identical
+rather than in read-sized pieces, the destination id surviving the round
+trip, and a peer that leaves being reported exactly once.
+
+**Still to do:** two physical devices with only Bluetooth on. Nothing about
+the radio itself has been exercised - `BluetoothTransport.kt` has never run
+against another phone, and the accept/connect/pairing path is exactly the
+kind of thing that works differently on every handset.
 
 ## Phase 4 — Wi-Fi Aware, investigated and shelved
 

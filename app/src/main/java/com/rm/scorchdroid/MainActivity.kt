@@ -66,6 +66,16 @@ class MainActivity : AppCompatActivity() {
         androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
     ) { /* Either way the game works; see above. */ }
 
+    // Bluetooth's are asked for separately and only when the player chooses
+    // to host over it: they are three permissions on a modern device, and
+    // asking for them on the way into multiplayer would put a prompt in
+    // front of everyone who only ever plays over Wi-Fi.
+    private val bluetoothPermissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted ->
+        if (granted.values.all { it }) startBluetoothHostFlow()
+    }
+
     // M10: the game-setup screen's state. The options come from the engine
     // (upstream's own entries, ranges and descriptions) rather than being
     // declared here - see GameSetup.h.
@@ -124,6 +134,11 @@ class MainActivity : AppCompatActivity() {
     // something has been fired this session.
     private var lastFiredAim: Triple<Float, Float, Float>? = null
 
+    // Whether the game being started hosts over Bluetooth instead of the
+    // network. Not a setting: the engine has one network interface, so this
+    // is chosen on the way in and cannot change while a game is running.
+    private var hostOverBluetooth = false
+
     // The move id this turn's committed move was submitted against, or 0 if
     // nothing is committed. The Fire button's locked state hangs off it - see
     // the tick loop, which cannot use "there is a move id" on its own.
@@ -141,6 +156,9 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The transport is reached from C++ with no context of its own (see
+        // JniTransport.cpp), so it is given one once, here.
+        BluetoothTransport.init(applicationContext)
         hideSystemBars()
         // A round can sit idle for a while waiting on other players/bots,
         // with no touch input in between - without this the screen times
@@ -193,8 +211,10 @@ class MainActivity : AppCompatActivity() {
                 )
                 AppScreen.MULTIPLAYER -> MultiplayerScreen(
                     onHost = { openSetup("Host Game") },
+                    onHostBluetooth = { startBluetoothHostFlow() },
                     onJoin = { startJoinFlow() },
                     onBack = { appScreen = AppScreen.MENU },
+                    bluetoothEnabled = BluetoothTransport.isSupported(applicationContext),
                 )
                 // M11 builds this screen; until then the button is honest
                 // about it rather than doing nothing when tapped.
@@ -393,7 +413,11 @@ class MainActivity : AppCompatActivity() {
      * here - they differ in wording, not in what they configure, because a
      * single-player game on this port *is* a hosted game that nobody joined.
      */
-    private fun openSetup(title: String) {
+    private fun openSetup(title: String, overBluetooth: Boolean = false) {
+        // Stated here rather than left over from whichever button was last
+        // pressed: a player who backed out of a Bluetooth game and then
+        // started a solo one would otherwise have hosted it over Bluetooth.
+        hostOverBluetooth = overBluetooth
         // Back to the shipped config: a player who ran the tutorial and then
         // started a real game would otherwise inherit its seven inert targets
         // and its missing shot clock, with the setup screen showing them as
@@ -487,6 +511,36 @@ class MainActivity : AppCompatActivity() {
             // host's screen, so it gets its own status line - told that it is
             // "connecting to :27270", a player would reasonably think the
             // game had hung.
+            // Bluetooth has no address to connect to at any point - the
+            // whole game runs over RFCOMM - so it takes its own path into
+            // the engine rather than being turned into a host and port.
+            if (target.bluetoothAddress != null) {
+                hudState.statusText = "Connecting to ${target.name} over Bluetooth...\n" +
+                    if (target.bluetoothPaired) {
+                        "This can take a few seconds."
+                    } else {
+                        "Accept the pairing request on both devices if one appears."
+                    }
+                val connecting = withContext(Dispatchers.Default) {
+                    NativeBridge.startJoinGameBluetooth(target.bluetoothAddress)
+                }
+                if (!connecting) {
+                    hudState.statusText =
+                        "Couldn't start a Bluetooth connection to ${target.name}. " +
+                            "Tap Cancel to go back."
+                    return@launch
+                }
+                // The same five lines the network path ends with - there
+                // is nothing different about a joined client from here on,
+                // whatever carried it.
+                hudState.isHost = false
+                applySettingsToHud()
+                attachGameSurface()
+                appScreen = AppScreen.GAME
+                awaitJoinAndPlay()
+                return@launch
+            }
+
             val host = if (target.p2pDeviceAddress != null) {
                 // The prompt is worth mentioning: it lands on the *other*
                 // phone, which the player is not looking at, and ignoring it
@@ -860,6 +914,46 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Hosting over Bluetooth, which needs two things the network paths do
+     * not: the permissions, and the system's own "make this device visible"
+     * dialog. A host nobody can see is the Bluetooth equivalent of a group
+     * that never formed, and a player would have no way of telling.
+     *
+     * Already-paired devices can find the game without this, which is why a
+     * refused dialog is a warning rather than a failure.
+     */
+    private fun startBluetoothHostFlow() {
+        val reason = BluetoothTransport.unavailableReason(applicationContext)
+        if (reason != null && !BluetoothTransport.hasPermissions(applicationContext)) {
+            bluetoothPermissionLauncher.launch(BluetoothTransport.requiredPermissions())
+            return
+        }
+        if (reason != null) {
+            hudState.dialog = HudDialog.Message("Can't host over Bluetooth: $reason.") {
+                hudState.dialog = HudDialog.None
+            }
+            return
+        }
+
+        try {
+            startActivityForResult(BluetoothTransport.discoverableIntent(), REQUEST_DISCOVERABLE)
+        } catch (e: android.content.ActivityNotFoundException) {
+            // No system dialog on this device; paired players can still join.
+            openSetup("Host over Bluetooth", overBluetooth = true)
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_DISCOVERABLE) return
+        // resultCode is the number of seconds granted, or RESULT_CANCELED.
+        // Either way the game can be hosted: refusing only means a device
+        // that has never paired with this one cannot find it.
+        openSetup("Host over Bluetooth", overBluetooth = true)
+    }
+
+    /**
      * Asks for Wi-Fi Direct's discovery permission the first time the player
      * goes looking for a multiplayer game, and never again in this session -
      * see [nearbyPermissionLauncher]. Silent on hardware that cannot do
@@ -887,6 +981,11 @@ class MainActivity : AppCompatActivity() {
         LanDiscovery.stopRegistration()
         LanDiscovery.stopDiscovery()
         stopWifiDirect()
+        // The sockets themselves belong to NetBridge and go with stopGame();
+        // this is the scan, which holds the radio and would otherwise keep
+        // running after the dialog that started it went away.
+        BluetoothTransport.stopDiscovery(applicationContext)
+        hostOverBluetooth = false
     }
 
     private fun stopWifiDirect() {
@@ -923,7 +1022,7 @@ class MainActivity : AppCompatActivity() {
 
     private suspend fun CoroutineScope.startAsHost() {
         hudState.statusText = "Starting local game..."
-        val gameOk = withContext(Dispatchers.Default) { NativeBridge.startLocalGame() }
+        val gameOk = withContext(Dispatchers.Default) { NativeBridge.startLocalGame(hostOverBluetooth) }
         if (!gameOk) {
             hudState.statusText = "Failed to start local game (see logcat)"
             return
@@ -1996,6 +2095,20 @@ class MainActivity : AppCompatActivity() {
         CoroutineScope(Dispatchers.Main).launch {
             val hosting = withContext(Dispatchers.Default) { NativeBridge.isHostingOnNetwork() }
             val port = withContext(Dispatchers.Default) { NativeBridge.getServerPort() }
+
+            // A Bluetooth game has no address and no port to publish, and
+            // nothing to advertise over the network either - the other
+            // device finds this one by its Bluetooth name.
+            if (hostOverBluetooth) {
+                hudState.hostingLabel = if (hosting) {
+                    "Hosting over Bluetooth as " +
+                        BluetoothTransport.localName(applicationContext)
+                } else {
+                    "Solo only - Bluetooth hosting did not start"
+                }
+                return@launch
+            }
+
             if (!hosting) {
                 hudState.hostingLabel = "Solo only - could not open port $port for LAN play"
                 return@launch
@@ -2066,7 +2179,12 @@ class MainActivity : AppCompatActivity() {
             else -> WifiDirectTransport.unavailableReason(applicationContext)
         }
         val wifiDirect = wifiDirectProblem == null
-        var scansRunning = if (wifiDirect) 2 else 1
+        // Bluetooth joins the same list. It reaches a third set of people
+        // again - two phones with no Wi-Fi on at all - and to a player these
+        // are one feature, differing only in which radio carried it.
+        val bluetoothProblem = BluetoothTransport.unavailableReason(applicationContext)
+        val bluetooth = bluetoothProblem == null && !hostOverBluetooth
+        var scansRunning = 1 + (if (wifiDirect) 1 else 0) + (if (bluetooth) 1 else 0)
         // Devices the radio can see that answered no service query - see
         // WifiDirectTransport.startDiscovery. Listed after the real results,
         // and joinable anyway: service discovery over Wi-Fi Direct is the
@@ -2080,6 +2198,7 @@ class MainActivity : AppCompatActivity() {
         fun stopScans() {
             LanDiscovery.stopDiscovery()
             if (wifiDirect) WifiDirectTransport.stopDiscovery()
+            if (bluetooth) BluetoothTransport.stopDiscovery(applicationContext)
         }
 
         val listDialog = HudDialog.ListChoice(
@@ -2111,16 +2230,26 @@ class MainActivity : AppCompatActivity() {
             // until a group forms - so it is labelled by how it was found
             // instead, which is the part the player cares about anyway.
             listDialog.items = found.map { game ->
-                if (game.p2pDeviceAddress != null) "${game.name} - Wi-Fi Direct"
-                else "${game.name} - ${game.host}:${game.port}"
+                when {
+                    game.p2pDeviceAddress != null -> "${game.name} - Wi-Fi Direct"
+                    // Said plainly, because it is what decides whether the
+                    // next tap shows a pairing prompt on both devices.
+                    game.bluetoothAddress != null && game.bluetoothPaired ->
+                        "${game.name} - Bluetooth, paired"
+                    game.bluetoothAddress != null -> "${game.name} - Bluetooth, not paired yet"
+                    else -> "${game.name} - ${game.host}:${game.port}"
+                }
             } + peersWithoutGames.map { "${it.name} - nearby, no game seen (try anyway)" } +
                 manualEntryLabel() + helpLabel()
         }
 
         fun add(game: LanDiscovery.FoundGame) {
             val duplicate = found.any {
-                if (game.p2pDeviceAddress != null) it.p2pDeviceAddress == game.p2pDeviceAddress
-                else it.host == game.host && it.port == game.port
+                when {
+                    game.p2pDeviceAddress != null -> it.p2pDeviceAddress == game.p2pDeviceAddress
+                    game.bluetoothAddress != null -> it.bluetoothAddress == game.bluetoothAddress
+                    else -> it.host == game.host && it.port == game.port
+                }
             }
             if (duplicate) return
             found.add(game)
@@ -2150,7 +2279,7 @@ class MainActivity : AppCompatActivity() {
         fun scanFinished() {
             if (scansRunning <= 0 || --scansRunning > 0) return
             listDialog.title = when {
-                found.isNotEmpty() -> "Found ${found.size} game(s)"
+                found.isNotEmpty() -> "Found ${found.size} device(s)"
                 // Naming the reason here rather than in the help text: this
                 // line is the one a player actually reads, and "no games
                 // found" with the Wi-Fi Direct half of the search silently
@@ -2168,6 +2297,17 @@ class MainActivity : AppCompatActivity() {
             onFound = { add(it) },
             onFinished = { scanFinished() },
         )
+
+        if (bluetooth) {
+            // Paired devices come back immediately; the scan itself is the
+            // slow part and runs for as long as the Wi-Fi Direct one.
+            BluetoothTransport.startDiscovery(
+                applicationContext,
+                durationMs = 20000,
+                onFound = { add(it) },
+                onFinished = { scanFinished() },
+            )
+        }
 
         if (wifiDirect) {
             // Far longer than the NSD scan, and re-issued throughout (see
@@ -2209,6 +2349,10 @@ class MainActivity : AppCompatActivity() {
                 "permission, which is only asked for once - if it was refused, " +
                 "turn it back on in Android's Settings under Apps, ScorchDroid, " +
                 "Permissions.\n\n" +
+                "Bluetooth - no Wi-Fi at all. The host picks \"Host over " +
+                "Bluetooth\" and allows the visibility prompt; the other device " +
+                "finds it in this list. Pairing the two first makes it quicker " +
+                "and more reliable.\n\n" +
                 "Hotspot - turn on the host's hotspot from Quick Settings and " +
                 "connect the other device to it. Then Host and Join as usual.\n\n" +
                 "By address - some guest and office networks block the way games " +
@@ -2325,6 +2469,9 @@ class MainActivity : AppCompatActivity() {
         // a Wi-Fi Direct peer that advertised no service record and so never
         // told us its port - a real result carries its own.
         const val DEFAULT_SERVER_PORT = 27270
+
+        // Bluetooth's "let other devices see this one" dialog.
+        const val REQUEST_DISCOVERABLE = 4001
 
 
     }

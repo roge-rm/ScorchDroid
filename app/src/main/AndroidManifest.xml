@@ -39,6 +39,33 @@
         android:name="android.hardware.wifi.direct"
         android:required="false" />
 
+    <!-- Bluetooth play (see BluetoothTransport.kt): the last way in, and the
+         only one that needs no Wi-Fi at all. The permission shape was
+         rearranged in API 31 - before it, scanning was a location capability
+         and BLUETOOTH/BLUETOOTH_ADMIN covered the rest, which is why those
+         are capped at 30 and ACCESS_FINE_LOCATION (declared above for Wi-Fi
+         Direct) is capped at 32. From 31 there are three dedicated
+         permissions, and BLUETOOTH_SCAN is declared neverForLocation because
+         the game does not want, derive or keep the player's location.
+         Bluetooth is required="false" like Wi-Fi Direct - every entry point
+         checks BluetoothTransport.isSupported. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
