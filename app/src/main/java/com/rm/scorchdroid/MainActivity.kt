@@ -305,8 +305,13 @@ class MainActivity : AppCompatActivity() {
             }
             // A game that fails to load has to be able to say so from the
             // screen it was picked on. HudDialogHost is drawn by the game and
-            // joining screens; these two raise dialogs without being either.
-            if (appScreen == AppScreen.SINGLE_PLAYER || appScreen == AppScreen.QUICK_GAME) {
+            // joining screens; these three raise dialogs without being any of
+            // them - and a dialog raised on a screen that does not draw one is
+            // invisible, which is how "Host over Bluetooth" came to do nothing
+            // at all when the radio was switched off.
+            if (appScreen == AppScreen.SINGLE_PLAYER || appScreen == AppScreen.QUICK_GAME ||
+                appScreen == AppScreen.MULTIPLAYER
+            ) {
                 HudDialogHost(hudState.dialog)
             }
             // M12: over the HUD, and only during a tutorial game.
@@ -923,15 +928,28 @@ class MainActivity : AppCompatActivity() {
      * refused dialog is a warning rather than a failure.
      */
     private fun startBluetoothHostFlow() {
-        val reason = BluetoothTransport.unavailableReason(applicationContext)
-        if (reason != null && !BluetoothTransport.hasPermissions(applicationContext)) {
+        if (!BluetoothTransport.isSupported(applicationContext)) {
+            showMenuMessage("This device has no Bluetooth, so it can't host over it.")
+            return
+        }
+        if (!BluetoothTransport.hasPermissions(applicationContext)) {
             bluetoothPermissionLauncher.launch(BluetoothTransport.requiredPermissions())
             return
         }
-        if (reason != null) {
-            hudState.dialog = HudDialog.Message("Can't host over Bluetooth: $reason.") {
-                hudState.dialog = HudDialog.None
+        // Switched off is the one fixable case, so it is offered as a fix
+        // rather than reported as a fault: this is the system's own prompt,
+        // and answering it lands back in onActivityResult below.
+        if (BluetoothTransport.isOff(applicationContext)) {
+            try {
+                startActivityForResult(BluetoothTransport.enableIntent(), REQUEST_ENABLE_BLUETOOTH)
+            } catch (e: android.content.ActivityNotFoundException) {
+                showMenuMessage("Bluetooth needs to be switched on to host over it.")
             }
+            return
+        }
+        val reason = BluetoothTransport.unavailableReason(applicationContext)
+        if (reason != null) {
+            showMenuMessage("Can't host over Bluetooth: $reason.")
             return
         }
 
@@ -943,9 +961,31 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** A message from a menu screen, which has no HUD to put one on. */
+    private fun showMenuMessage(text: String) {
+        hudState.dialog = HudDialog.Message(text) { hudState.dialog = HudDialog.None }
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+
+        if (requestCode == REQUEST_ENABLE_BLUETOOTH) {
+            if (BluetoothTransport.isOff(applicationContext)) {
+                // Refused, or it did not come up. Either way, saying so is
+                // the whole point - this silently did nothing before.
+                showMenuMessage(
+                    "Bluetooth needs to be switched on to host over it. " +
+                        "Turn it on and try again."
+                )
+            } else {
+                // Straight on to the visibility prompt, which is what the
+                // player was heading for before the radio got in the way.
+                startBluetoothHostFlow()
+            }
+            return
+        }
+
         if (requestCode != REQUEST_DISCOVERABLE) return
         // resultCode is the number of seconds granted, or RESULT_CANCELED.
         // Either way the game can be hosted: refusing only means a device
@@ -2182,8 +2222,11 @@ class MainActivity : AppCompatActivity() {
         // Bluetooth joins the same list. It reaches a third set of people
         // again - two phones with no Wi-Fi on at all - and to a player these
         // are one feature, differing only in which radio carried it.
-        val bluetoothProblem = BluetoothTransport.unavailableReason(applicationContext)
-        val bluetooth = bluetoothProblem == null && !hostOverBluetooth
+        val bluetoothProblem = when {
+            hostOverBluetooth -> "this device is hosting"
+            else -> BluetoothTransport.unavailableReason(applicationContext)
+        }
+        val bluetooth = bluetoothProblem == null
         var scansRunning = 1 + (if (wifiDirect) 1 else 0) + (if (bluetooth) 1 else 0)
         // Devices the radio can see that answered no service query - see
         // WifiDirectTransport.startDiscovery. Listed after the real results,
@@ -2278,16 +2321,25 @@ class MainActivity : AppCompatActivity() {
 
         fun scanFinished() {
             if (scansRunning <= 0 || --scansRunning > 0) return
-            listDialog.title = when {
+            // Every radio that sat this one out says so, by name and with
+            // its reason. This line is the one a player actually reads, and
+            // "no games found" with half the search silently skipped is how
+            // a working pair of phones comes to look broken - which is
+            // exactly how the first Wi-Fi Direct test went.
+            val skipped = listOfNotNull(
+                wifiDirectProblem?.let { "Wi-Fi Direct ($it)" },
+                bluetoothProblem?.let { "Bluetooth ($it)" },
+            )
+            val outcome = when {
                 found.isNotEmpty() -> "Found ${found.size} device(s)"
-                // Naming the reason here rather than in the help text: this
-                // line is the one a player actually reads, and "no games
-                // found" with the Wi-Fi Direct half of the search silently
-                // skipped is how a working pair of phones looks broken.
-                wifiDirectProblem != null -> "No LAN games found - no Wi-Fi Direct: $wifiDirectProblem"
                 peersWithoutGames.isNotEmpty() ->
                     "No games found - ${peersWithoutGames.size} nearby device(s) advertised none"
                 else -> "No games found"
+            }
+            listDialog.title = if (skipped.isEmpty()) {
+                outcome
+            } else {
+                "$outcome\nNot searched: ${skipped.joinToString(", ")}"
             }
         }
 
@@ -2470,8 +2522,10 @@ class MainActivity : AppCompatActivity() {
         // told us its port - a real result carries its own.
         const val DEFAULT_SERVER_PORT = 27270
 
-        // Bluetooth's "let other devices see this one" dialog.
+        // Bluetooth's "let other devices see this one" dialog, and the
+        // system's own "turn Bluetooth on?" prompt.
         const val REQUEST_DISCOVERABLE = 4001
+        const val REQUEST_ENABLE_BLUETOOTH = 4002
 
 
     }
