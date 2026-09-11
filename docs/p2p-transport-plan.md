@@ -61,7 +61,7 @@ takes a second or two and wants a progress indicator.
 The soak is opt-in via `SCORCHDROID_NET_SOAK_SECONDS` so the normal suite does
 not get slower to carry a measurement.
 
-## Phase 1 — Wi-Fi Direct (built; first device test failed)
+## Phase 1 — Wi-Fi Direct (working on two devices, 2026-09-11)
 
 `app/src/main/java/com/rm/scorchdroid/WifiDirectTransport.kt`, a sibling of
 `LanDiscovery.kt`: a rendezvous mechanism with no JNI, because Wi-Fi P2P has
@@ -169,19 +169,34 @@ retried up to three times with a fresh peer lookup each time. A *timeout* is
 not retried - it has already cost the player thirty seconds and the second
 thirty would look identical.
 
-**Still to verify, and it cannot be done on an emulator:** two physical devices
-with Wi-Fi *disconnected from any router*, so that it is the no-infrastructure
-path being tested and not the existing LAN one. Confirm the group-owner address
-in logcat and play a full round. Known risk to watch for: some devices route
-poorly with Wi-Fi and P2P up together — if connecting to the group owner fails
-while normal Wi-Fi is associated, bind the socket to the P2P network with
+### Fourth device test, 2026-09-11: connected
+
+Two phones, no router, a game joined and played. Wi-Fi Direct works, and the
+`ConnectivityManager.bindProcessToNetwork()` risk noted below did not
+materialise on this pair.
+
+It immediately found a bug that has nothing to do with Wi-Fi Direct and
+everything to do with never having had a second real device to play on: the
+Fire button's locked state did not stick on the joining device. The HUD asked
+"is there a move id on my tank", and there is - the client's own copy is set by
+`TankStartMoveSimAction` when the move is granted and cleared by
+`TankStopMoveSimAction` only once the server has the move, a round trip later.
+So the button unlocked on the next tick after firing. It now remembers the id
+it committed against and unlocks on a *different* one. Skipping locks the
+button too, which it never did: a skip is a committed move like any other, and
+it is the one move that otherwise looks like nothing happened at all.
+
+**Still open, and it cannot be done on an emulator:** the same on more than one
+pair of handsets. Known risk to watch for: some devices route poorly with Wi-Fi
+and P2P up together — if connecting to the group owner fails while normal Wi-Fi
+is associated, bind the socket to the P2P network with
 `ConnectivityManager.bindProcessToNetwork()`.
 
-If the next session still finds nothing with peers visible on both sides, the
-autonomous group owner itself is the suspect — the official DNS-SD sample never
-calls `createGroup`, and advertise-then-negotiate is a one-line change, since
-the joining side already asks for `groupOwnerIntent = 0` and reads the owner
-address out of its own connection info.
+If a future pair sees each other and still cannot connect, the autonomous group
+owner is the next suspect — the official DNS-SD sample never calls
+`createGroup`, and advertise-then-negotiate is a small change, since the joining
+side already asks for `groupOwnerIntent = 0` and reads the owner address out of
+its own connection info.
 
 ## Phase 2 — hotspot play (done)
 
