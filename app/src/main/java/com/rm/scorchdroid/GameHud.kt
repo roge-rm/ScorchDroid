@@ -341,83 +341,96 @@ fun GameHud(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // Top-left: status line (phase/turn/aim feedback - see
-        // NativeBridge.getMyStatusLabel()) plus the hosting address once
-        // bound. windowInsetsPadding(displayCutout) keeps this clear of a
-        // camera cutout - previously handled by hand in MainActivity,
-        // Compose does it natively.
-        Column(
+        // The top edge: status text on the left, session controls on the
+        // right, laid out as one row so that they cannot overlap.
+        //
+        // They used to be two independently aligned children of this box,
+        // which meant the text ran the full width and straight under the
+        // buttons - and the longest lines are exactly the ones that matter,
+        // a Bluetooth hosting name among them. Giving the text whatever
+        // width the buttons leave, rather than a guessed fraction of the
+        // screen, stays right on any screen shape and with any number of
+        // buttons - which varies already, since the admin one is the host's
+        // alone. windowInsetsPadding(displayCutout) keeps the whole row
+        // clear of a camera cutout.
+        Row(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .windowInsetsPadding(WindowInsets.displayCutout)
-                .padding(16.dp),
+                .fillMaxWidth()
+                .windowInsetsPadding(WindowInsets.displayCutout),
         ) {
-            if (state.statusText.isNotEmpty()) HudText(state.statusText)
-            if (state.hostingLabel.isNotEmpty()) HudText(state.hostingLabel)
-            if (state.windLabel.isNotEmpty()) HudText(state.windLabel)
-            if (state.speedLabel.isNotEmpty()) HudText(state.speedLabel)
-            // Upstream shows "Click ground to activate {0}" as a banner the
-            // moment such a weapon is selected; this is the same prompt in
-            // the place this HUD already puts status.
-            if (state.positionSelectWeapon.isNotEmpty()) {
-                HudText("Tap the ground to use ${state.positionSelectWeapon}")
+            // Status line (phase/turn/aim feedback - see
+            // NativeBridge.getMyStatusLabel()) plus the hosting address once
+            // bound.
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(16.dp),
+            ) {
+                if (state.statusText.isNotEmpty()) HudText(state.statusText)
+                if (state.hostingLabel.isNotEmpty()) HudText(state.hostingLabel)
+                if (state.windLabel.isNotEmpty()) HudText(state.windLabel)
+                if (state.speedLabel.isNotEmpty()) HudText(state.speedLabel)
+                // Upstream shows "Click ground to activate {0}" as a banner the
+                // moment such a weapon is selected; this is the same prompt in
+                // the place this HUD already puts status.
+                if (state.positionSelectWeapon.isNotEmpty()) {
+                    HudText("Tap the ground to use ${state.positionSelectWeapon}")
+                }
+                if (state.perfLabel.isNotEmpty()) HudText(state.perfLabel)
             }
-            if (state.perfLabel.isNotEmpty()) HudText(state.perfLabel)
-        }
 
-        // Top-right: "session / view" controls - things about this session
-        // or how you're looking at it, not about the fight itself. Icon-only
-        // and tightly stacked; a wall of word-labelled buttons was eating
-        // the screen and reading as noise.
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .windowInsetsPadding(WindowInsets.displayCutout)
-                .padding(12.dp),
-        ) {
-            // Host only. Everything behind it acts on other people in the
-            // game - kicking, banning, muting - and a joined client has no
-            // authority to do any of it, so it gets no button rather than
-            // one that quietly does nothing.
-            if (state.isHost) {
-                HudIconButton(Icons.Filled.AdminPanelSettings, "Admin", onAdmin)
+            // Top-right: "session / view" controls - things about this session
+            // or how you're looking at it, not about the fight itself. Icon-only
+            // and tightly stacked; a wall of word-labelled buttons was eating
+            // the screen and reading as noise.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(12.dp),
+            ) {
+                // Host only. Everything behind it acts on other people in the
+                // game - kicking, banning, muting - and a joined client has no
+                // authority to do any of it, so it gets no button rather than
+                // one that quietly does nothing.
+                if (state.isHost) {
+                    HudIconButton(Icons.Filled.AdminPanelSettings, "Admin", onAdmin)
+                }
+                HudIconButton(Icons.Filled.Search, "Find LAN games", onFindGames)
+                // Outermost, in the corner: the camera toggle is the one control
+                // here reached mid-aim, so it gets the position the thumb finds
+                // without looking. The icon carries its own state (globe =
+                // free-fly over the whole map, focus reticle = locked to your
+                // tank), so it needs no caption.
+                //
+                // The tutorial button that used to sit here is gone: its content
+                // described the drag-to-fire gesture and the old plain-view
+                // controls, none of which exist any more, so it was actively
+                // misleading. Worth rewriting once the controls settle rather
+                // than keeping a stale one on screen.
+                HudIconButton(
+                    icon = Icons.AutoMirrored.Filled.Chat,
+                    description = if (state.chatComposing) {
+                        "Close the message box (hold for scores and chat history)"
+                    } else {
+                        "Send a message (hold for scores and chat history)"
+                    },
+                    // A toggle, not a one-way open: the button is the obvious
+                    // thing to press to get rid of the box again, and the
+                    // keyboard covers the Close link when it is up.
+                    onClick = { state.chatComposing = !state.chatComposing },
+                    onLongClick = onScores,
+                )
+                HudIconButton(
+                    icon = if (state.cameraFollow) Icons.Filled.CenterFocusStrong else Icons.Filled.Public,
+                    description = if (state.cameraFollow) {
+                        "Camera: following your tank (hold for more views)"
+                    } else {
+                        "Camera: free-fly (hold for more views)"
+                    },
+                    onClick = onToggleCamera,
+                    onLongClick = onCameraPresets,
+                )
             }
-            HudIconButton(Icons.Filled.Search, "Find LAN games", onFindGames)
-            // Outermost, in the corner: the camera toggle is the one control
-            // here reached mid-aim, so it gets the position the thumb finds
-            // without looking. The icon carries its own state (globe =
-            // free-fly over the whole map, focus reticle = locked to your
-            // tank), so it needs no caption.
-            //
-            // The tutorial button that used to sit here is gone: its content
-            // described the drag-to-fire gesture and the old plain-view
-            // controls, none of which exist any more, so it was actively
-            // misleading. Worth rewriting once the controls settle rather
-            // than keeping a stale one on screen.
-            HudIconButton(
-                icon = Icons.AutoMirrored.Filled.Chat,
-                description = if (state.chatComposing) {
-                    "Close the message box (hold for scores and chat history)"
-                } else {
-                    "Send a message (hold for scores and chat history)"
-                },
-                // A toggle, not a one-way open: the button is the obvious
-                // thing to press to get rid of the box again, and the
-                // keyboard covers the Close link when it is up.
-                onClick = { state.chatComposing = !state.chatComposing },
-                onLongClick = onScores,
-            )
-            HudIconButton(
-                icon = if (state.cameraFollow) Icons.Filled.CenterFocusStrong else Icons.Filled.Public,
-                description = if (state.cameraFollow) {
-                    "Camera: following your tank (hold for more views)"
-                } else {
-                    "Camera: free-fly (hold for more views)"
-                },
-                onClick = onToggleCamera,
-                onLongClick = onCameraPresets,
-            )
         }
 
         // Chat, directly under those icons. Transient by design: it is a
