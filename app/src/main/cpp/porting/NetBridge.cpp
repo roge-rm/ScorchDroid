@@ -40,7 +40,10 @@ bool NetBridge::started()
 bool NetBridge::start(int portNo)
 {
 	if (!transport_) return false;
-	stop();
+	// No "stop any previous connection" first, unlike NetServerTCP3: a
+	// bridge is built around one transport and one game, every caller
+	// constructs a new one, and a transport's stop() is permitted to be
+	// final - the test one closes its descriptor and could never come back.
 	hosting_ = true;
 	if (!transport_->startListening())
 	{
@@ -54,7 +57,6 @@ bool NetBridge::start(int portNo)
 bool NetBridge::connect(const char *hostName, int portNo)
 {
 	if (!transport_) return false;
-	stop();
 	hosting_ = false;
 	// The port is genuinely meaningless here and is not passed on: a
 	// Bluetooth service is named by a UUID the transport already knows, and
@@ -112,14 +114,19 @@ void NetBridge::actualSendFunc()
 
 void NetBridge::stop()
 {
-	if (!started()) return;
-
-	SDL_Thread *localSendThread = sendThread_;
+	// Not gated on started(): the send thread takes itself down when the
+	// host disappears (see peerGone), and a stop() that returned early on
+	// that basis would leave the transport holding its sockets - on Android,
+	// a live Bluetooth link for a game that ended.
 	stopped_ = true;
 	if (transport_) transport_->stop();
 
-	int status = 0;
-	SDL_WaitThread(localSendThread, &status);
+	SDL_Thread *localSendThread = sendThread_;
+	if (localSendThread)
+	{
+		int status = 0;
+		SDL_WaitThread(localSendThread, &status);
+	}
 	sendThread_ = nullptr;
 
 	pthread_mutex_lock(&peersMutex_);
