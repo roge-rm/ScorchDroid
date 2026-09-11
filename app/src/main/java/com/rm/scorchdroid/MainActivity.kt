@@ -154,6 +154,11 @@ class MainActivity : AppCompatActivity() {
     // is chosen on the way in and cannot change while a game is running.
     private var hostOverBluetooth = false
 
+    // Whether this game has already put the visibility prompt up. Asked once
+    // per game, since a second prompt between setup and the first round would
+    // read as the first one not having worked.
+    private var bluetoothVisibilityAsked = false
+
     // The move id this turn's committed move was submitted against, or 0 if
     // nothing is committed. The Fire button's locked state hangs off it - see
     // the tick loop, which cannot use "there is a move id" on its own.
@@ -439,6 +444,7 @@ class MainActivity : AppCompatActivity() {
         // pressed: a player who backed out of a Bluetooth game and then
         // started a solo one would otherwise have hosted it over Bluetooth.
         hostOverBluetooth = overBluetooth
+        bluetoothVisibilityAsked = false
         // Back to the shipped config: a player who ran the tutorial and then
         // started a real game would otherwise inherit its seven inert targets
         // and its missing shot clock, with the setup screen showing them as
@@ -499,6 +505,29 @@ class MainActivity : AppCompatActivity() {
      */
     private fun startGame() {
         if (gameJob != null) return
+
+        // Bluetooth visibility is asked for here, not on the way into setup.
+        // Android grants it for five minutes at most and the clock starts the
+        // moment it is granted, so a player who spends two of them choosing
+        // options and waiting for a landscape has two left for the other
+        // phone to find them - which is how a host can be up and genuinely
+        // invisible. Answering lands in onActivityResult, which comes back
+        // here.
+        if (hostOverBluetooth && !bluetoothVisibilityAsked) {
+            bluetoothVisibilityAsked = true
+            try {
+                startActivityForResult(BluetoothTransport.discoverableIntent(), REQUEST_DISCOVERABLE)
+                return
+            } catch (e: android.content.ActivityNotFoundException) {
+                // No visibility prompt on this device at all. Same
+                // consequence as refusing one, and worth the same sentence.
+                showMenuMessage(
+                    "This device has no Bluetooth visibility setting, so only phones " +
+                        "already paired with it will find the game."
+                )
+            }
+        }
+
         music?.load(NativeBridge.getSelectedMod())
         applySettingsToHud()
         attachGameSurface()
@@ -988,17 +1017,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startBluetoothHostFlow() = requireBluetooth {
-        try {
-            startActivityForResult(BluetoothTransport.discoverableIntent(), REQUEST_DISCOVERABLE)
-        } catch (e: android.content.ActivityNotFoundException) {
-            // No visibility prompt on this device at all. Same consequence as
-            // refusing one, and worth the same sentence.
-            showMenuMessage(
-                "This device has no Bluetooth visibility setting, so only phones " +
-                    "already paired with it will find the game."
-            )
-            openSetup("Host over Bluetooth", overBluetooth = true)
-        }
+        openSetup("Host over Bluetooth", overBluetooth = true)
     }
 
     /** A message from a menu screen, which has no HUD to put one on. */
@@ -1036,27 +1055,28 @@ class MainActivity : AppCompatActivity() {
         // say which of those the player is choosing rather than deciding for
         // them - and having said it, make asking again the easy answer.
         if (resultCode == RESULT_CANCELED) {
-            val askAgain = "Ask again"
-            val hostAnyway = "Host anyway - paired devices only"
             hudState.dialog = HudDialog.ListChoice(
                 title = "This phone won't be visible.\nOnly devices already paired with " +
                     "it will be able to find the game.",
-                items = listOf(askAgain, hostAnyway),
+                items = listOf("Ask again", "Host anyway - paired devices only"),
                 cancelLabel = "Back",
                 onSelect = { index ->
                     hudState.dialog = HudDialog.None
-                    if (index == 0) startBluetoothHostFlow()
-                    else openSetup("Host over Bluetooth", overBluetooth = true)
+                    // Asking again means asking again, so the one-shot guard
+                    // has to be let go of first.
+                    if (index == 0) bluetoothVisibilityAsked = false
+                    startGame()
                 },
                 onCancel = {
                     hudState.dialog = HudDialog.None
-                    appScreen = AppScreen.MULTIPLAYER
+                    bluetoothVisibilityAsked = false
+                    appScreen = AppScreen.SETUP
                 },
             )
             return
         }
 
-        openSetup("Host over Bluetooth", overBluetooth = true)
+        startGame()
     }
 
     /**
@@ -1092,6 +1112,7 @@ class MainActivity : AppCompatActivity() {
         // running after the dialog that started it went away.
         BluetoothTransport.stopDiscovery(applicationContext)
         hostOverBluetooth = false
+        bluetoothVisibilityAsked = false
     }
 
     private fun stopWifiDirect() {
@@ -2208,8 +2229,12 @@ class MainActivity : AppCompatActivity() {
             // device finds this one by its Bluetooth name.
             if (hostOverBluetooth) {
                 hudState.hostingLabel = if (hosting) {
+                    // The five minutes is Android's cap and it is already
+                    // running. A player who does not know there is a clock
+                    // cannot know why the other phone stopped finding them.
                     "Hosting over Bluetooth as " +
-                        BluetoothTransport.localName(applicationContext)
+                        BluetoothTransport.localName(applicationContext) +
+                        " - new devices can find it for 5 minutes"
                 } else {
                     "Solo only - Bluetooth hosting did not start"
                 }

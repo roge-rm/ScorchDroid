@@ -320,10 +320,30 @@ transport gets wrong: a 100KB message arriving whole and byte-identical
 rather than in read-sized pieces, the destination id surviving the round
 trip, and a peer that leaves being reported exactly once.
 
-**Still to do:** two physical devices with only Bluetooth on. Nothing about
-the radio itself has been exercised - `BluetoothTransport.kt` has never run
-against another phone, and the accept/connect/pairing path is exactly the
-kind of thing that works differently on every handset.
+### Device test, 2026-09-11: a game over Bluetooth
+
+Two phones, no Wi-Fi, a game hosted and joined - **if the two were paired by
+hand first**. An unpaired host never appeared in the other phone's list, which
+is two separate faults, both now fixed:
+
+- **The location toggle was never checked.** Below API 31 a classic Bluetooth
+  scan needs the master location switch on as well as the permission; with it
+  off, discovery starts, succeeds and reports nothing. Paired devices still
+  list, because they need no scan - so the failure looks exactly like "only
+  pairing works". Wi-Fi Direct got this check after its own first failed
+  test; Bluetooth was written later and did not inherit it, which is the
+  argument for both transports answering the same `unavailableReason`
+  question in the same words.
+- **The visibility window was being spent on the setup screen.** Android
+  grants discoverability for five minutes at most (the documented default is
+  two) and the clock starts when the prompt is answered. It was asked on the
+  way *into* game setup, so choosing options and waiting for a landscape came
+  out of the other player's time. It is now asked at the moment the game
+  starts, and the hosting label says the window exists.
+
+**Still to do:** re-test unpaired, and on a handset pair that is not these
+two - accept/connect/pairing is exactly the kind of path that works
+differently on every device.
 
 ## Phase 4 — Wi-Fi Aware, investigated and shelved
 
