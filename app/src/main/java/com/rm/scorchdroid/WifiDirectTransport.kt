@@ -21,6 +21,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -84,6 +85,19 @@ object WifiDirectTransport {
     // up on joining someone else's, and how often to look.
     private const val GROUP_TEARDOWN_TIMEOUT_MS = 6_000L
     private const val GROUP_TEARDOWN_POLL_MS = 500L
+
+    // Long enough for the P2P stack to finish tearing a group down before
+    // being asked to build another one.
+    private const val GROUP_SETTLE_MS = 1_500L
+
+    // Finding the peer again, immediately before connecting to it.
+    private const val PEER_REFRESH_TIMEOUT_MS = 15_000L
+    private const val PEER_REFRESH_POLL_MS = 500L
+    private const val PEER_REDISCOVER_MS = 4_000L
+
+    // Immediate refusals are worth another go; see attemptConnect.
+    private const val CONNECT_ATTEMPTS = 3
+    private const val RETRY_DELAY_MS = 1_500L
 
     // Kept apart from [mainHandler]: connecting cancels its own pending work
     // with removeCallbacksAndMessages(null), which would otherwise take a
@@ -509,6 +523,12 @@ object WifiDirectTransport {
     data class ConnectResult(val address: String?, val error: String?)
 
     /**
+     * One attempt at [connectToOwner]'s job, and whether trying again could
+     * plausibly do better.
+     */
+    private data class Attempt(val result: ConnectResult, val retryable: Boolean)
+
+    /**
      * Joins [deviceAddress]'s group and answers with the group owner's IP -
      * the address the existing `NativeBridge.startJoinGame` path then dials,
      * exactly as if it had come from NSD.
@@ -556,16 +576,55 @@ object WifiDirectTransport {
                     "off and on again, or disconnect it under Settings, Wi-Fi, Wi-Fi Direct"
             )
         }
+        // Leaving a group puts the P2P stack through a state change; a
+        // connect issued into the middle of it is refused outright.
+        delay(GROUP_SETTLE_MS)
 
+        var lastError: String? = null
+        repeat(CONNECT_ATTEMPTS) {
+            // Every one of the three things above - stopping the scan,
+            // stopping advertising, leaving the group - empties the
+            // framework's list of known peers, and `connect()` to a device
+            // that is no longer in that list is refused with a bare internal
+            // error. So find the peer again, immediately before asking to
+            // connect to it, rather than trusting an address that was true
+            // when the player tapped it.
+            // Not retried: awaitPeer has already spent fifteen seconds
+            // looking, re-issuing discovery throughout, and another pass
+            // would only make the player wait three times as long to be told
+            // the same thing.
+            if (!awaitPeer(context, mgr, ch, deviceAddress)) {
+                return ConnectResult(
+                    null,
+                    "the other device stopped answering - is it still hosting?"
+                )
+            }
+            val attempt = attemptConnect(context, mgr, ch, deviceAddress, timeoutMs)
+            if (attempt.result.address != null || !attempt.retryable) return attempt.result
+            lastError = attempt.result.error
+            delay(RETRY_DELAY_MS)
+        }
+        return ConnectResult(null, lastError)
+    }
+
+    /** One `connect()` and the wait for a group to come of it. */
+    @SuppressLint("MissingPermission")  // Only called from guarded paths.
+    private suspend fun attemptConnect(
+        context: Context,
+        mgr: WifiP2pManager,
+        ch: WifiP2pManager.Channel,
+        deviceAddress: String,
+        timeoutMs: Long,
+    ): Attempt {
         return suspendCancellableCoroutine { continuation ->
             var settled = false
 
-            fun finish(result: ConnectResult) {
+            fun finish(result: ConnectResult, retryable: Boolean = false) {
                 if (settled) return
                 settled = true
                 unregisterConnectReceiver(context)
                 connectHandler.removeCallbacksAndMessages(null)
-                if (continuation.isActive) continuation.resume(result)
+                if (continuation.isActive) continuation.resume(Attempt(result, retryable))
             }
 
             val receiver = object : BroadcastReceiver() {
@@ -616,7 +675,14 @@ object WifiDirectTransport {
                 groupOwnerIntent = 0
             }
             mgr.connect(ch, config, actionListener("connect") { requested, reason ->
-                if (!requested) finish(ConnectResult(null, connectFailure(reason)))
+                // A refusal comes back in milliseconds and is often just the
+                // stack having been somewhere else at that moment, so it is
+                // worth another go with a freshly found peer. A timeout is
+                // not: it has already cost the player half a minute and the
+                // second half-minute would look identical.
+                if (!requested) {
+                    finish(ConnectResult(null, connectFailure(reason)), retryable = true)
+                }
             })
 
             connectHandler.postDelayed({
@@ -632,6 +698,60 @@ object WifiDirectTransport {
 
             continuation.invokeOnCancellation { finish(ConnectResult(null, null)) }
         }
+    }
+
+    /**
+     * Waits for [deviceAddress] to be in the framework's peer list, running
+     * peer discovery until it is. `connect()` is refused with a bare internal
+     * error for a device the framework does not currently know about, and
+     * everything this does to get into a fit state to connect - stopping the
+     * scan, dropping its own group - is exactly what makes it forget.
+     */
+    @SuppressLint("MissingPermission")  // Only called from guarded paths.
+    private suspend fun awaitPeer(
+        context: Context,
+        mgr: WifiP2pManager,
+        ch: WifiP2pManager.Channel,
+        deviceAddress: String,
+    ): Boolean = suspendCancellableCoroutine { continuation ->
+        var settled = false
+        var waited = 0L
+
+        fun settle(found: Boolean) {
+            if (settled) return
+            settled = true
+            if (!found) Log.e(TAG, "peer $deviceAddress never came back into the list")
+            if (continuation.isActive) continuation.resume(found)
+        }
+
+        mgr.discoverPeers(ch, actionListener("discoverPeers (for connect)"))
+
+        fun poll() {
+            if (unavailableReason(context) != null) return settle(false)
+            mgr.requestPeers(ch) { list ->
+                val known = list.deviceList.any {
+                    it.deviceAddress.equals(deviceAddress, ignoreCase = true)
+                }
+                if (known) return@requestPeers settle(true)
+                if (waited >= PEER_REFRESH_TIMEOUT_MS) {
+                    Log.w(TAG, "peers seen: ${list.deviceList.joinToString { it.deviceAddress }}")
+                    return@requestPeers settle(false)
+                }
+                waited += PEER_REFRESH_POLL_MS
+                // One round of discovery can miss a device whose radio was
+                // elsewhere, the same way the service query can.
+                if (waited % PEER_REDISCOVER_MS == 0L) {
+                    mgr.discoverPeers(ch, actionListener("discoverPeers (again)"))
+                }
+                connectHandler.postDelayed({ poll() }, PEER_REFRESH_POLL_MS)
+            }
+        }
+        connectHandler.postDelayed({ poll() }, PEER_REFRESH_POLL_MS)
+
+        // As in leaveAnyGroup: the poll only continues from inside a
+        // framework callback, so a stack that stops answering must not be
+        // able to strand the caller.
+        connectHandler.postDelayed({ settle(false) }, PEER_REFRESH_TIMEOUT_MS + 1_500L)
     }
 
     /**

@@ -152,6 +152,23 @@ group that formed with the wrong device as owner, and the timeout now saying
 that the other phone may be showing an invitation prompt - which lands on the
 device the player is not looking at.
 
+### Third device test, 2026-09-11: connect refused with reason 0
+
+A regression from the fix above, and the reason is worth keeping: everything
+done to get into a fit state to connect - stopping the scan, stopping peer
+discovery, leaving this device's own group - empties the framework's list of
+known peers, and `connect()` to a device that is no longer in that list is
+refused outright with `ERROR` (0) before anything goes on the air.
+
+So the peer is now found *again*, immediately before connecting, rather than
+the address being trusted because it was true when the player tapped it:
+`awaitPeer` runs peer discovery and polls `requestPeers` for up to fifteen
+seconds, re-issuing discovery every four. Leaving a group also gets a second
+and a half to settle before a connect goes in, and an immediate refusal is
+retried up to three times with a fresh peer lookup each time. A *timeout* is
+not retried - it has already cost the player thirty seconds and the second
+thirty would look identical.
+
 **Still to verify, and it cannot be done on an emulator:** two physical devices
 with Wi-Fi *disconnected from any router*, so that it is the no-infrastructure
 path being tested and not the existing LAN one. Confirm the group-owner address
