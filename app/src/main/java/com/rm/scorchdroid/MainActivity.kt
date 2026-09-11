@@ -124,6 +124,11 @@ class MainActivity : AppCompatActivity() {
     // something has been fired this session.
     private var lastFiredAim: Triple<Float, Float, Float>? = null
 
+    // The move id this turn's committed move was submitted against, or 0 if
+    // nothing is committed. The Fire button's locked state hangs off it - see
+    // the tick loop, which cannot use "there is a move id" on its own.
+    private var lockedMoveId = 0
+
     // M6: whether the aiming sliders have been seeded from the tank's real
     // starting turret rotation yet (see the tick loop). One-shot, so it
     // never fights the player's own adjustments afterwards.
@@ -551,6 +556,7 @@ class MainActivity : AppCompatActivity() {
         NativeBridge.stopGame()
         ambient?.stop()
         lastLandscapeTex = ""
+        lockedMoveId = 0
         hudState.reset()
         stopNetworkAdvertising()
         appScreen = AppScreen.MULTIPLAYER
@@ -905,6 +911,7 @@ class MainActivity : AppCompatActivity() {
             surfaceHost.removeView(gameSurface)
         }
         hudState.reset()
+        lockedMoveId = 0
         tutorial = null
         music?.setState(MusicPlayer.State.WAIT)
         aimSeeded = false
@@ -1066,7 +1073,19 @@ class MainActivity : AppCompatActivity() {
             tutorial?.observe(hudState)
 
             val moveId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
-            if (moveId != 0) hudState.shotLocked = false
+            // A move id *different* from the one we committed against - not
+            // merely a non-zero one. The id lives on our own tank, and only
+            // the server clears it: it is set locally by
+            // TankStartMoveSimAction when the move is granted and cleared by
+            // TankStopMoveSimAction when the server has the move, which is a
+            // round trip away. Testing for non-zero therefore unlocked the
+            // button again on the very next tick after firing, and on a
+            // client - where that round trip is a real network - the locked
+            // state was visible for a frame or two and then gone.
+            if (moveId != 0 && moveId != lockedMoveId) {
+                hudState.shotLocked = false
+                lockedMoveId = 0
+            }
 
             val seconds = withContext(Dispatchers.Default) { NativeBridge.getPhaseSecondsRemaining() }
             hudState.statusText = if (seconds >= 0) "${seconds}s | $baseStatus" else baseStatus
@@ -1414,6 +1433,10 @@ class MainActivity : AppCompatActivity() {
     private fun fireFromSliders() {
         val engineAngle = engineAngleFromDial(currentAngleDegrees)
         CoroutineScope(Dispatchers.Main).launch {
+            // Read before firing: this is the id the shot is submitted
+            // against, and the tick loop needs it to tell "still waiting on
+            // this move" from "granted a new one".
+            val movedId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
             val fired = withContext(Dispatchers.Default) {
                 val myTankId = NativeBridge.getMyTankId()
                 if (myTankId != 0) {
@@ -1423,6 +1446,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
             if (fired) {
+                lockedMoveId = movedId
                 // Remember what we actually fired so "revert to last
                 // angles" can restore it (see showActionsMenu).
                 lastFiredAim = Triple(currentAngleDegrees, currentElevationDegrees, currentPowerFraction)
@@ -1569,7 +1593,17 @@ class MainActivity : AppCompatActivity() {
     // be their own HUD buttons rather than menu entries.
     private fun submitMoveAsync(moveType: Int) {
         CoroutineScope(Dispatchers.Main).launch {
-            withContext(Dispatchers.Default) { NativeBridge.submitMove(moveType) }
+            val movedId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
+            val submitted = withContext(Dispatchers.Default) { NativeBridge.submitMove(moveType) }
+            // A skip is a committed move for this turn like any other: the
+            // player is done, and the round is now waiting on everyone else.
+            // The button said so for a shot and not for a skip, which left
+            // the one move that looks like nothing happening also looking
+            // like it had not registered.
+            if (submitted && moveType == MoveType.SKIP) {
+                lockedMoveId = movedId
+                hudState.shotLocked = true
+            }
         }
     }
 
