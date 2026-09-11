@@ -2448,7 +2448,15 @@ class MainActivity : AppCompatActivity() {
             val outcome = when {
                 found.isNotEmpty() && overBluetooth -> "${found.size} device(s) nearby"
                 found.isNotEmpty() -> "Found ${found.size} game(s)"
-                overBluetooth -> "No Bluetooth devices found"
+                // Naming the thing that does work. A Bluetooth scan finds
+                // only devices that are currently *discoverable*, which is a
+                // five-minute state the host has to have granted; pairing
+                // the two phones once, in Android's own settings, sidesteps
+                // that permanently - a paired device is listed here from the
+                // bonded list with no scan at all.
+                overBluetooth ->
+                    "No Bluetooth devices found - pair the two phones in Android's " +
+                        "Settings and they will be listed here without a search"
                 peersWithoutGames.isNotEmpty() ->
                     "No games found - ${peersWithoutGames.size} nearby device(s) advertised none"
                 else -> "No games found"
