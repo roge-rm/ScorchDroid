@@ -245,3 +245,52 @@ highp since 0.7.2, with `setprop debug.scorchdroid.highp 0` to compare.
 Verification per step: emulator smoke for shader compile; screenshots
 against PC captures dan can take of the same map, which is the only
 judge of "identical".
+
+## Open: banded water on a Unihertz Titan Pocket (2026-09-11)
+
+Reported once and **not reproducible since**, so this is a record of what was
+ruled out rather than an investigation in progress. The sea rendered as broad
+horizontal bands of saturated colour - green, blue, yellow, pink - each
+stippled, on a landscape whose upwelling colours are two blues. The same
+device also showed "a floating tank image" once; whether that is the same
+fault is unknown.
+
+The device, from the GPU line the renderer now logs at startup:
+
+    GPU: ARM / Mali-G72 MP3
+    GL: OpenGL ES 3.2 v1.r26p0-01eac0..., GLSL ES 3.20
+    Fragment highp float: range 2^+-127..127, 23 bits of mantissa
+    Fragment mediump float: 10 bits of mantissa
+
+Ruled out:
+
+- **Precision.** `highp` is real and full 32-bit float in the fragment shader,
+  so the water's `exp()` fog and its `pow(x, -8)` Fresnel are not quantising.
+  This was the leading theory and the log killed it.
+- **The reflection target being undefined.** It is cleared, colour and depth,
+  at the top of its pass. Its texture is RGB8/LINEAR/CLAMP_TO_EDGE with no mip
+  filter, so it is sample-complete. Its framebuffer reported complete
+  (`0x8cd5`) on the device, at 358x360 - half of that phone's near-square
+  716x720 screen.
+- **The sea's own colour inputs.** The landscape's upwelling colours logged as
+  two blues, and the ocean tile uploaded with sane peaks (height 3.67,
+  displacement 6.25, foam 0.96).
+
+Found while looking, fixed, and **not** the cause of this: the inner water
+grid read `textureLod` level 1 or 2 of the height tile at Water detail Low or
+Medium, and that tile has no mip chain - undefined, and it feeds vertex
+positions. The device was at detail 2 (level 0) when it banded.
+
+If it returns, the three tests that separate the remaining possibilities, in
+order of cost - the first two need no PC:
+
+1. **Water detail** between Low and High. If the banding changes shape, the
+   fault is in the surface's geometry (the vertex texture fetch), not its
+   colour.
+2. **Water reflections -> Sky**, which stops the shader sampling the
+   reflection texture at all. If the bands go, it is the reflection target.
+3. `adb shell setprop debug.scorchdroid.water 1`, which paints the water flat.
+   If the bands survive that, they are not the water shader at all - and the
+   floating tank becomes much more likely to be the same root cause. `0`
+   restores it. The property is polled once a second, so it works on a running
+   game with no rebuild.
