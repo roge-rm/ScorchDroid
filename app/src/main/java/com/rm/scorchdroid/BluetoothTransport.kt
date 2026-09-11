@@ -155,6 +155,22 @@ object BluetoothTransport {
         return adapter()?.name ?: Build.MODEL
     }
 
+    /**
+     * Whether other devices can currently *find* this one, as opposed to
+     * merely connect to it once they know it.
+     *
+     * Worth asking rather than assuming, because the two are different states
+     * and only one of them is what an unpaired player needs: a phone that is
+     * connectable but not discoverable is invisible to a scan while remaining
+     * perfectly joinable by anything already paired with it - which is
+     * exactly the shape of "only pairing works".
+     */
+    @SuppressLint("MissingPermission")  // Guarded by unavailableReason.
+    fun isDiscoverable(context: Context): Boolean {
+        if (unavailableReason(context) != null) return false
+        return adapter()?.scanMode == BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE
+    }
+
     /** Whether the radio is present but switched off - the one fixable case. */
     fun isOff(context: Context): Boolean = isSupported(context) && adapter()?.isEnabled != true
 
@@ -232,9 +248,28 @@ object BluetoothTransport {
         // a scan takes ten seconds or more.
         adapter.bondedDevices?.forEach { report(it, true) }
 
+        // Counted so the end of the scan can say whether the radio found
+        // nothing or was never really looking. Those are different faults and
+        // from the outside they are the same empty list.
+        var inquiryStarted = false
+        var devicesSeen = 0
+
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, intent: Intent) {
+                // The two that prove a scan actually ran. Without them, a
+                // scan that the framework declined to start and a scan that
+                // ran and found nobody are indistinguishable.
+                if (intent.action == BluetoothAdapter.ACTION_DISCOVERY_STARTED) {
+                    inquiryStarted = true
+                    Log.i(TAG, "inquiry started")
+                    return
+                }
+                if (intent.action == BluetoothAdapter.ACTION_DISCOVERY_FINISHED) {
+                    Log.i(TAG, "inquiry finished after $devicesSeen device(s)")
+                    return
+                }
                 if (intent.action != BluetoothDevice.ACTION_FOUND) return
+                devicesSeen++
                 val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
                 } else {
@@ -248,7 +283,11 @@ object BluetoothTransport {
         ContextCompat.registerReceiver(
             context.applicationContext,
             receiver,
-            IntentFilter(BluetoothDevice.ACTION_FOUND),
+            IntentFilter().apply {
+                addAction(BluetoothDevice.ACTION_FOUND)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
+                addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+            },
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
 
@@ -259,9 +298,18 @@ object BluetoothTransport {
             onFinished()
             return
         }
+        Log.i(TAG, "scanning for ${durationMs}ms, ${adapter.bondedDevices?.size ?: 0} device(s) already paired")
 
         discoveryTimeout = Runnable {
             discoveryTimeout = null
+            // The whole point of the two counters: a scan the framework never
+            // actually ran is a different problem from a scan that ran and
+            // saw nobody, and only one of them is about the other phone.
+            if (!inquiryStarted) {
+                Log.e(TAG, "the scan never started - startDiscovery said yes and no inquiry began")
+            } else if (devicesSeen == 0) {
+                Log.w(TAG, "the scan ran and saw no unpaired device at all")
+            }
             stopDiscovery(context)
             onFinished()
         }

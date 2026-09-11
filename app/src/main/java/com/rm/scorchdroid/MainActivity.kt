@@ -2228,15 +2228,19 @@ class MainActivity : AppCompatActivity() {
             // nothing to advertise over the network either - the other
             // device finds this one by its Bluetooth name.
             if (hostOverBluetooth) {
-                hudState.hostingLabel = if (hosting) {
-                    // The five minutes is Android's cap and it is already
-                    // running. A player who does not know there is a clock
-                    // cannot know why the other phone stopped finding them.
-                    "Hosting over Bluetooth as " +
-                        BluetoothTransport.localName(applicationContext) +
-                        " - new devices can find it for 5 minutes"
-                } else {
-                    "Solo only - Bluetooth hosting did not start"
+                // Asked of the adapter rather than assumed from the prompt
+                // having been answered: being connectable and being
+                // *findable* are different states, and only the second one
+                // gets an unpaired player in. Claiming the second while in
+                // the first is how a host can look fine to its own player
+                // and be invisible to everyone else.
+                val name = BluetoothTransport.localName(applicationContext)
+                hudState.hostingLabel = when {
+                    !hosting -> "Solo only - Bluetooth hosting did not start"
+                    BluetoothTransport.isDiscoverable(applicationContext) ->
+                        "Hosting over Bluetooth as $name - new devices can find it for 5 minutes"
+                    else ->
+                        "Hosting over Bluetooth as $name - NOT visible, only paired devices can join"
                 }
                 return@launch
             }
