@@ -1975,18 +1975,17 @@ class MainActivity : AppCompatActivity() {
             // next to you with no network at all. Only claimed in the label
             // once the group has actually formed - announcing a way to be
             // reached that isn't up is worse than not offering it.
-            if (WifiDirectTransport.isSupported(applicationContext) &&
-                WifiDirectTransport.hasPermissions(applicationContext)
-            ) {
-                WifiDirectTransport.advertise(applicationContext, port) { advertising ->
-                    if (!advertising) return@advertise
-                    // Worth saying even with no other network up: a Wi-Fi
-                    // Direct group is a way in on its own.
-                    hudState.hostingLabel = if (ip != null) {
-                        "Hosting on $ip:$port + Wi-Fi Direct"
-                    } else {
-                        "Hosting over Wi-Fi Direct"
-                    }
+            WifiDirectTransport.advertise(applicationContext, port) { advertising, why ->
+                // Worth saying either way. A host that believes it is
+                // reachable over Wi-Fi Direct when no group formed waits for
+                // peers that can never arrive, and the first two-device test
+                // of this could not tell the two apart from the screen.
+                hudState.hostingLabel = when {
+                    advertising && ip != null -> "Hosting on $ip:$port + Wi-Fi Direct"
+                    advertising -> "Hosting over Wi-Fi Direct"
+                    why != null && ip != null -> "Hosting on $ip:$port - no Wi-Fi Direct: $why"
+                    why != null -> "No network, and no Wi-Fi Direct: $why"
+                    else -> hudState.hostingLabel
                 }
             }
         }
@@ -2014,10 +2013,24 @@ class MainActivity : AppCompatActivity() {
         // Games" button is reachable mid-game, and putting the radio into a
         // peer scan there would disturb the very group the host is running
         // the game on. A host has no reason to be looking anyway.
-        val wifiDirect = WifiDirectTransport.isSupported(applicationContext) &&
-            WifiDirectTransport.hasPermissions(applicationContext) &&
-            !WifiDirectTransport.isAdvertising()
+        //
+        // Whichever reason keeps Wi-Fi Direct out of a search, the player is
+        // told it. Silently searching one radio while appearing to search
+        // both is how two devices sitting next to each other can each report
+        // finding nothing with nothing wrong with either of them.
+        val hostingHere = WifiDirectTransport.isAdvertising()
+        val wifiDirectProblem = when {
+            hostingHere -> "this device is hosting"
+            else -> WifiDirectTransport.unavailableReason(applicationContext)
+        }
+        val wifiDirect = wifiDirectProblem == null
         var scansRunning = if (wifiDirect) 2 else 1
+        // Devices the radio can see that answered no service query - see
+        // WifiDirectTransport.startDiscovery. Listed after the real results,
+        // and joinable anyway: service discovery over Wi-Fi Direct is the
+        // flakiest part of this path, and a player who can see the other
+        // phone's name should be able to try it.
+        val peersWithoutGames = mutableListOf<LanDiscovery.FoundGame>()
 
         fun manualEntryLabel() = "Enter address manually..."
         fun helpLabel() = "How do I connect?"
@@ -2035,9 +2048,11 @@ class MainActivity : AppCompatActivity() {
                 resolved = true
                 stopScans()
                 hudState.dialog = HudDialog.None
+                val rows = found.size + peersWithoutGames.size
                 when (index) {
                     in found.indices -> onSelected(found[index])
-                    found.size -> promptManualAddress(onSelected, onCancelled)
+                    in found.size until rows -> onSelected(peersWithoutGames[index - found.size])
+                    rows -> promptManualAddress(onSelected, onCancelled)
                     else -> showConnectionHelp { showFindGames(onSelected, onCancelled) }
                 }
             },
@@ -2056,7 +2071,8 @@ class MainActivity : AppCompatActivity() {
             listDialog.items = found.map { game ->
                 if (game.p2pDeviceAddress != null) "${game.name} - Wi-Fi Direct"
                 else "${game.name} - ${game.host}:${game.port}"
-            } + manualEntryLabel() + helpLabel()
+            } + peersWithoutGames.map { "${it.name} - nearby, no game seen (try anyway)" } +
+                manualEntryLabel() + helpLabel()
         }
 
         fun add(game: LanDiscovery.FoundGame) {
@@ -2066,12 +2082,42 @@ class MainActivity : AppCompatActivity() {
             }
             if (duplicate) return
             found.add(game)
+            // A device that answers properly should not also be offered as a
+            // guess.
+            peersWithoutGames.removeAll { it.p2pDeviceAddress == game.p2pDeviceAddress }
+            refresh()
+        }
+
+        // A device the radio can see that advertised no game. Offered last
+        // and labelled as the guess it is: it may be a phone hosting one
+        // whose service query went unanswered, or it may be a printer.
+        fun addPeer(name: String, deviceAddress: String) {
+            if (found.any { it.p2pDeviceAddress == deviceAddress }) return
+            if (peersWithoutGames.any { it.p2pDeviceAddress == deviceAddress }) return
+            peersWithoutGames.add(
+                LanDiscovery.FoundGame(
+                    name = name,
+                    host = "",
+                    port = DEFAULT_SERVER_PORT,
+                    p2pDeviceAddress = deviceAddress,
+                )
+            )
             refresh()
         }
 
         fun scanFinished() {
             if (scansRunning <= 0 || --scansRunning > 0) return
-            listDialog.title = if (found.isEmpty()) "No games found" else "Found ${found.size} game(s)"
+            listDialog.title = when {
+                found.isNotEmpty() -> "Found ${found.size} game(s)"
+                // Naming the reason here rather than in the help text: this
+                // line is the one a player actually reads, and "no games
+                // found" with the Wi-Fi Direct half of the search silently
+                // skipped is how a working pair of phones looks broken.
+                wifiDirectProblem != null -> "No LAN games found - no Wi-Fi Direct: $wifiDirectProblem"
+                peersWithoutGames.isNotEmpty() ->
+                    "No games found - ${peersWithoutGames.size} nearby device(s) advertised none"
+                else -> "No games found"
+            }
         }
 
         LanDiscovery.startDiscovery(
@@ -2082,14 +2128,19 @@ class MainActivity : AppCompatActivity() {
         )
 
         if (wifiDirect) {
-            // Longer than the NSD scan: a Wi-Fi Direct service discovery has
-            // to get the radio scanning for peers before any of them can
-            // answer, where mDNS is one multicast onto a network that already
-            // exists.
+            // Far longer than the NSD scan, and re-issued throughout (see
+            // WifiDirectTransport.startDiscovery): a Wi-Fi Direct service
+            // query has to get the radio scanning for peers before any of
+            // them can answer, and both devices have to be listening in the
+            // same round for an answer to arrive at all - where mDNS is one
+            // multicast onto a network that already exists. Twenty seconds
+            // is a long time to stare at a dialog, but results land in the
+            // list as they arrive rather than at the end.
             WifiDirectTransport.startDiscovery(
                 applicationContext,
-                durationMs = 8000,
+                durationMs = 20000,
                 onFound = { add(it) },
+                onPeerSeen = { name, address -> addPeer(name, address) },
                 onFinished = { scanFinished() },
             )
         }
@@ -2112,7 +2163,10 @@ class MainActivity : AppCompatActivity() {
                 "Host Game, the other taps Join Game.\n\n" +
                 "Wi-Fi Direct - no router needed. Both devices just need Wi-Fi " +
                 "switched on; the host's game shows up in this list marked " +
-                "\"Wi-Fi Direct\".\n\n" +
+                "\"Wi-Fi Direct\". It also needs this game's nearby-devices " +
+                "permission, which is only asked for once - if it was refused, " +
+                "turn it back on in Android's Settings under Apps, ScorchDroid, " +
+                "Permissions.\n\n" +
                 "Hotspot - turn on the host's hotspot from Quick Settings and " +
                 "connect the other device to it. Then Host and Join as usual.\n\n" +
                 "By address - some guest and office networks block the way games " +
@@ -2223,6 +2277,12 @@ class MainActivity : AppCompatActivity() {
         // A press longer than this is a deliberate hold, not a tap - it
         // stops a slow, still finger from firing off an aim on release.
         const val TAP_MAX_MS = 250L
+
+        // Upstream's PortNo default, which every ScorchDroid host uses since
+        // nothing in the port lets a player change it. Only ever a guess for
+        // a Wi-Fi Direct peer that advertised no service record and so never
+        // told us its port - a real result carries its own.
+        const val DEFAULT_SERVER_PORT = 27270
 
 
     }
