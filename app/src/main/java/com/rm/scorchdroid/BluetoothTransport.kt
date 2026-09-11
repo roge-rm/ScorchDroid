@@ -137,6 +137,17 @@ object BluetoothTransport {
         return adapter()?.name ?: Build.MODEL
     }
 
+    /** Whether the radio is present but switched off - the one fixable case. */
+    fun isOff(context: Context): Boolean = isSupported(context) && adapter()?.isEnabled != true
+
+    /**
+     * The system's own "turn Bluetooth on?" prompt. Offered rather than
+     * merely reported: a player who has chosen to host over Bluetooth has
+     * said what they want, and the alternative is telling them to go and
+     * find a settings screen.
+     */
+    fun enableIntent(): Intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+
     /**
      * The system dialog that makes this device findable by a phone that has
      * never paired with it. Without it, only already-paired devices can see
