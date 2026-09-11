@@ -38,6 +38,7 @@
 #include <engine/Simulator.hpp>
 #include <net/NetServerTCP3.hpp>
 #include <net/NetMessage.hpp>
+#include <NetBridge.hpp>
 #include <server/ServerState.hpp>
 #include <server/ServerFileServer.hpp>
 #include <server/ServerChannelManager.hpp>
@@ -103,6 +104,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <errno.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <execinfo.h>
@@ -142,7 +145,10 @@ namespace
 {
 	int failures = 0;
 
-	void check(bool condition, const char *description)
+	// Answers the condition back, so a test whose next step is meaningless
+	// without it can say `if (!check(...)) return;` rather than checking the
+	// same thing twice.
+	bool check(bool condition, const char *description)
 	{
 		if (condition)
 		{
@@ -153,6 +159,7 @@ namespace
 			printf("  [FAIL] %s\n", description);
 			failures++;
 		}
+		return condition;
 	}
 
 	// fixed's arithmetic underpins every gameplay calculation this port
@@ -2081,12 +2088,51 @@ namespace
 	// not the higher-level connect handshake (ComsConnectMessage etc,
 	// which nothing implements yet - see the plan's M5 "join as a client"
 	// notes).
+	// Counts what a NetInterface delivers, which is all either transport
+	// test needs to know. The buffer half is only exercised by the bridge
+	// test - the TCP one is about the handshake - but lives here rather than
+	// in a near-identical second handler.
 	struct CountingHandler : NetMessageHandlerI
 	{
-		int connectMessages = 0;
+		int          connectMessages = 0;
+		int          disconnectMessages = 0;
+		unsigned int bufferBytes = 0;
+		unsigned int lastDestinationId = 0;
+		bool         lastBufferMatchedPattern = false;
+
 		void processMessage(NetMessage &message) override
 		{
-			if (message.getMessageType() == NetMessage::ConnectMessage) connectMessages++;
+			lastDestinationId = message.getDestinationId();
+			switch (message.getMessageType())
+			{
+			case NetMessage::ConnectMessage:
+				connectMessages++;
+				break;
+			case NetMessage::DisconnectMessage:
+				disconnectMessages++;
+				break;
+			case NetMessage::BufferMessage:
+			{
+				unsigned int used = message.getBuffer().getBufferUsed();
+				bufferBytes += used;
+				// The sender fills the buffer with i % 251 (see
+				// testNetBridge): a prime stride, so a message reassembled
+				// from the wrong offsets cannot accidentally match.
+				const char *bytes = message.getBuffer().getBuffer();
+				lastBufferMatchedPattern = (used > 0);
+				for (unsigned int i = 0; i < used; i++)
+				{
+					if (bytes[i] != (char) (i % 251))
+					{
+						lastBufferMatchedPattern = false;
+						break;
+					}
+				}
+				break;
+			}
+			default:
+				break;
+			}
 		}
 	};
 
@@ -2125,6 +2171,59 @@ namespace
 
 		hostInterface.stop();
 		clientInterface.stop();
+	}
+
+	// Runs the host while a client process does its half, and answers
+	// whether that process exited cleanly. Shared by both join tests - the
+	// TCP one and the bridge one - because the composition of this loop is
+	// the interesting part and it must not drift between them: it is the
+	// same set of calls tickEngine() makes, for the reasons the porting plan
+	// gives, in particular ServerConnectAuthHandler::processMessages(),
+	// where the queued auth reply is actually processed, and
+	// getSimulator().simulate(), which promotes the resulting
+	// TankAddSimAction.
+	//
+	// This loop *is* the host: the client cannot converge, or even join,
+	// unless the server keeps stepping here, so the budget has to outlast
+	// the client's own caps rather than being a round number. Those are 150
+	// ticks waiting to join, 100 waiting for its own tank and 300 waiting
+	// for the clock correction to land, all on 100ms sleeps - 550 in the
+	// worst case. Anything less kills the client mid-wait, and the failure
+	// then reads "the client never joined" when the truth is that the host
+	// gave up first, which is a genuinely misleading place to start
+	// debugging. Only the failure path is ever this slow; a healthy run
+	// exits in about fifteen seconds. Plus whatever the client intends to
+	// spend soaking (see netSoakSeconds), since it cannot measure steady
+	// play unless the host is still stepping.
+	bool runHostUntilClientExits(ScorchedServer *server, pid_t pid, int &status)
+	{
+		Clock tickClock;
+		pid_t waited = 0;
+		const int hostTickBudget = 700 + netSoakSeconds() * 10;
+		for (int i = 0; i < hostTickBudget; i++)
+		{
+			unsigned int ticksDifference = tickClock.getTicksDifference();
+			fixed timeDifference(true, ((Sint64) ticksDifference) * 10);
+
+			server->getNetInterface().processMessages();
+			server->getSimulator().simulate();
+			server->getServerState().simulate(timeDifference);
+			server->getServerConnectAuthHandler().processMessages();
+			server->getServerFileServer().simulate();
+			server->getServerChannelManager().simulate(timeDifference);
+			server->getTimedMessage().simulate();
+
+			waited = waitpid(pid, &status, WNOHANG);
+			if (waited == pid) break;
+			usleep(100 * 1000);
+		}
+		if (waited != pid)
+		{
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+		}
+
+		return (waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
 	}
 
 	// M5 client-join, Phase 1: the real thing, not just the socket layer -
@@ -2192,49 +2291,8 @@ namespace
 		// gets processed, and getSimulator().simulate(), which is what
 		// promotes/invokes the resulting TankAddSimAction) while the child
 		// process runs its own handshake.
-		Clock tickClock;
 		int status = 0;
-		pid_t waited = 0;
-		// This loop *is* the host: the client cannot converge, or even
-		// join, unless the server keeps stepping here, so the budget has to
-		// outlast the client's own caps rather than being a round number.
-		// Those are 150 ticks waiting to join, 100 waiting for its own tank
-		// and 300 waiting for the clock correction to land, all on 100ms
-		// sleeps - 550 in the worst case. Anything less kills the client
-		// mid-wait, and the failure then reads "the client never joined"
-		// when the truth is that the host gave up first, which is a
-		// genuinely misleading place to start debugging. Only the failure
-		// path is ever this slow; a healthy run exits in about fifteen
-		// seconds.
-		// Plus whatever the client intends to spend soaking (see
-		// netSoakSeconds): the client cannot measure steady play unless the
-		// host is still stepping, and a host that gives up first shows as
-		// "the client never joined", which is a misleading place to start.
-		const int hostTickBudget = 700 + netSoakSeconds() * 10;
-		for (int i = 0; i < hostTickBudget; i++)
-		{
-			unsigned int ticksDifference = tickClock.getTicksDifference();
-			fixed timeDifference(true, ((Sint64) ticksDifference) * 10);
-
-			server->getNetInterface().processMessages();
-			server->getSimulator().simulate();
-			server->getServerState().simulate(timeDifference);
-			server->getServerConnectAuthHandler().processMessages();
-			server->getServerFileServer().simulate();
-			server->getServerChannelManager().simulate(timeDifference);
-			server->getTimedMessage().simulate();
-
-			waited = waitpid(pid, &status, WNOHANG);
-			if (waited == pid) break;
-			usleep(100 * 1000);
-		}
-		if (waited != pid)
-		{
-			kill(pid, SIGKILL);
-			waitpid(pid, &status, 0);
-		}
-
-		bool joined = (waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+		bool joined = runHostUntilClientExits(server, pid, status);
 		if (!joined)
 		{
 			FILE *resultFile = fopen(resultPath, "r");
@@ -2366,6 +2424,382 @@ namespace
 	}
 }
 
+// A BridgeTransport (see BridgeTransport.hpp) over one end of a Unix domain
+// socket pair, which is what lets the whole Bluetooth path be tested on a
+// build machine with no Bluetooth and no Android in it.
+//
+// The point is that NetBridge cannot tell this from a radio. It gets whole
+// messages, one peer, an id that is not an IP address, and callbacks from a
+// thread that is not the engine's - the same four things BluetoothTransport.kt
+// will hand it. Everything that makes the Android transport hard (pairing,
+// RFCOMM, JNI thread attachment) is absent here, and everything that makes
+// the *engine* side hard (destination ids, connect/disconnect messages, the
+// thread hand-off) is present.
+//
+// Framing is this transport's job, as it is for every BridgeTransport: a
+// four-byte big-endian length and then the payload, the same shape
+// NetServerTCPProtocol uses on a real socket, so a partial read can never be
+// mistaken for a short message.
+class UnixSocketTransport : public BridgeTransport
+{
+public:
+	UnixSocketTransport(int fd, unsigned int peerId)
+		: fd_(fd), peerId_(peerId), sink_(nullptr), readerThread_(nullptr),
+		  stopped_(false), announced_(false)
+	{
+		pthread_mutex_init(&sendMutex_, nullptr);
+	}
+
+	virtual ~UnixSocketTransport()
+	{
+		stop();
+		pthread_mutex_destroy(&sendMutex_);
+	}
+
+	virtual void setSink(BridgeTransportSink *sink) { sink_ = sink; }
+
+	// Both ends of a socket pair are already connected, so listening and
+	// connecting are the same act here - the difference between the two is
+	// the whole of what a real transport does and none of what this one is
+	// for.
+	virtual bool startListening() { return begin(); }
+	virtual bool connectTo(const char *endpoint) { return begin(); }
+
+	virtual bool send(unsigned int peerId, const unsigned char *bytes, unsigned int length)
+	{
+		if (peerId != peerId_ || fd_ < 0) return false;
+
+		unsigned char header[4];
+		header[0] = (unsigned char) ((length >> 24) & 0xff);
+		header[1] = (unsigned char) ((length >> 16) & 0xff);
+		header[2] = (unsigned char) ((length >> 8) & 0xff);
+		header[3] = (unsigned char) (length & 0xff);
+
+		pthread_mutex_lock(&sendMutex_);
+		bool ok = writeAll(header, 4) && writeAll(bytes, length);
+		pthread_mutex_unlock(&sendMutex_);
+		return ok;
+	}
+
+	virtual void disconnect(unsigned int peerId)
+	{
+		if (peerId != peerId_) return;
+		// Half-close rather than close: the reader thread is still in a
+		// blocking read on this descriptor, and closing it underneath would
+		// be a use-after-free the moment the number is reused.
+		if (fd_ >= 0) shutdown(fd_, SHUT_RDWR);
+	}
+
+	virtual void stop()
+	{
+		if (stopped_) return;
+		stopped_ = true;
+		if (fd_ >= 0) shutdown(fd_, SHUT_RDWR);
+
+		if (readerThread_)
+		{
+			int status = 0;
+			SDL_WaitThread(readerThread_, &status);
+			readerThread_ = nullptr;
+		}
+		if (fd_ >= 0)
+		{
+			close(fd_);
+			fd_ = -1;
+		}
+	}
+
+private:
+	bool begin()
+	{
+		if (fd_ < 0) return false;
+		readerThread_ = SDL_CreateThread(UnixSocketTransport::readerFunc, (void *) this);
+		if (!readerThread_) return false;
+		// The link is up the moment the pair exists. A radio would announce
+		// this from its own thread once the connection completed; either way
+		// NetBridge hears it as a peer arriving rather than as a return value.
+		announced_ = true;
+		if (sink_) sink_->onPeerConnected(peerId_);
+		return true;
+	}
+
+	bool writeAll(const unsigned char *bytes, unsigned int length)
+	{
+		unsigned int written = 0;
+		while (written < length)
+		{
+			ssize_t result = write(fd_, bytes + written, length - written);
+			if (result <= 0)
+			{
+				if (result < 0 && errno == EINTR) continue;
+				return false;
+			}
+			written += (unsigned int) result;
+		}
+		return true;
+	}
+
+	bool readAll(unsigned char *into, unsigned int length)
+	{
+		unsigned int got = 0;
+		while (got < length)
+		{
+			ssize_t result = read(fd_, into + got, length - got);
+			if (result <= 0)
+			{
+				if (result < 0 && errno == EINTR) continue;
+				return false;
+			}
+			got += (unsigned int) result;
+		}
+		return true;
+	}
+
+	void readLoop()
+	{
+		std::vector<unsigned char> payload;
+		while (!stopped_)
+		{
+			unsigned char header[4];
+			if (!readAll(header, 4)) break;
+
+			unsigned int length =
+				((unsigned int) header[0] << 24) | ((unsigned int) header[1] << 16) |
+				((unsigned int) header[2] << 8) | (unsigned int) header[3];
+			// The same sanity bound NetServerTCPProtocol applies, for the
+			// same reason: a length that is wrong is wrong by a lot, and
+			// allocating on it is how a corrupt stream becomes a crash.
+			if (length == 0 || length > 5000000) break;
+
+			payload.resize(length);
+			if (!readAll(&payload[0], length)) break;
+			if (sink_) sink_->onPayload(peerId_, &payload[0], length);
+		}
+
+		if (announced_ && sink_) sink_->onPeerDisconnected(peerId_);
+	}
+
+	static int readerFunc(void *data)
+	{
+		((UnixSocketTransport *) data)->readLoop();
+		return 0;
+	}
+
+	int             fd_;
+	unsigned int    peerId_;
+	BridgeTransportSink *sink_;
+	SDL_Thread     *readerThread_;
+	volatile bool   stopped_;
+	bool            announced_;
+	pthread_mutex_t sendMutex_;
+};
+
+// NetBridge on its own, before any of the game is involved: two of them over
+// a socket pair, exchanging the messages the engine exchanges.
+//
+// Two NetInterfaces in one process is the configuration that misroutes
+// through the shared NetMessagePool singleton (see testClientJoin's comment),
+// so this stays deliberately small - connect, a buffer each way, a
+// disconnect - and the real handshake is left to the separate-process test
+// below. Even so it covers what a hand-written transport gets wrong: ids
+// that do not survive the round trip, payloads that arrive truncated or
+// merged, and a disconnect that either never arrives or arrives twice.
+void testNetBridge()
+{
+	printf("net bridge (a NetInterface over a non-IP transport):\n");
+
+	int fds[2] = { -1, -1 };
+	bool paired = (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+	check(paired, "made a socket pair to stand in for a Bluetooth link");
+	if (!paired) return;
+
+	NetBridge hostBridge(new UnixSocketTransport(fds[0], 2));
+	CountingHandler hostHandler;
+	hostBridge.setMessageHandler(&hostHandler);
+	check(hostBridge.start(0), "NetBridge::start() brings up a listening transport");
+
+	NetBridge clientBridge(new UnixSocketTransport(fds[1], 2));
+	CountingHandler clientHandler;
+	clientBridge.setMessageHandler(&clientHandler);
+	check(clientBridge.connect("socketpair", 0), "NetBridge::connect() reaches the host over it");
+
+	bool bothConnected = false;
+	for (int i = 0; i < 50 && !bothConnected; i++)
+	{
+		hostBridge.processMessages();
+		clientBridge.processMessages();
+		bothConnected = hostHandler.connectMessages > 0 && clientHandler.connectMessages > 0;
+		if (!bothConnected) usleep(20 * 1000);
+	}
+	check(bothConnected, "both sides saw a ConnectMessage, as they do over TCP");
+
+	// Big enough to cross the read boundary a single read() would give us,
+	// which is the bug a length prefix exists to prevent.
+	const unsigned int payloadSize = 100000;
+	NetBuffer outgoing;
+	outgoing.reset();
+	for (unsigned int i = 0; i < payloadSize; i++)
+	{
+		char byte = (char) (i % 251);
+		outgoing.addDataToBuffer(&byte, 1);
+	}
+
+	unsigned int bytesInBefore = NetInterface::getBytesIn();
+	clientBridge.sendMessageServer(outgoing);
+
+	bool arrived = false;
+	for (int i = 0; i < 100 && !arrived; i++)
+	{
+		hostBridge.processMessages();
+		arrived = hostHandler.bufferBytes >= payloadSize;
+		if (!arrived) usleep(20 * 1000);
+	}
+	check(arrived, "a 100KB message crosses the bridge whole, not in read-sized pieces");
+	check(hostHandler.lastBufferMatchedPattern,
+		"and arrives byte-for-byte as it was sent");
+	check(hostHandler.lastDestinationId == 2,
+		"carrying the peer's destination id, which is what the server routes on");
+	check(NetInterface::getBytesIn() > bytesInBefore,
+		"and is counted in NetInterface's byte totals like any other transport");
+
+	// A disconnect from the far end has to reach the engine, or a game waits
+	// forever for a player who has gone.
+	clientBridge.stop();
+	bool sawDisconnect = false;
+	for (int i = 0; i < 100 && !sawDisconnect; i++)
+	{
+		hostBridge.processMessages();
+		sawDisconnect = hostHandler.disconnectMessages > 0;
+		if (!sawDisconnect) usleep(20 * 1000);
+	}
+	check(sawDisconnect, "the host sees a DisconnectMessage when the peer goes away");
+
+	hostBridge.processMessages();
+	check(hostHandler.disconnectMessages == 1,
+		"exactly one - a peer that leaves once must not be reported twice");
+
+	hostBridge.stop();
+}
+
+// The real thing over the bridge: a separate client process joining the
+// running ScorchedServer through a NetBridge at both ends, with not one TCP
+// socket between them.
+//
+// This is the test the Bluetooth work is gated on. Everything above it
+// proves NetBridge moves bytes; this proves the *game* goes through it -
+// the connect handshake, the auth exchange, the 1130-file mod manifest, the
+// level definition, and enough simulation for the client to see every tank
+// the host has. If this passes, what remains for Bluetooth is a transport
+// that hands NetBridge whole messages, which is the part a phone can be
+// asked to demonstrate on its own.
+//
+// The socket pair is created before the fork and inherited across the exec -
+// no CLOEXEC, so the number is still a live descriptor on the other side -
+// which is why the child needs nothing but that number to reach the host.
+void testBridgeClientJoin()
+{
+	printf("bridge client join (a real join over a NetBridge, no TCP anywhere):\n");
+
+	ScorchedServer *server = ScorchedServer::instance();
+
+	int fds[2] = { -1, -1 };
+	if (!check(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0,
+		"made a socket pair for the host and client to share")) return;
+
+	NetBridge *hostNet = new NetBridge(new UnixSocketTransport(fds[0], 2));
+	server->setNetInterface(hostNet);
+	// Re-set, not set: startServerInternal() gave the handler to the
+	// interface it built, so replacing the interface means handing it over
+	// again. This is the one line engine_jni.cpp will need too.
+	hostNet->setMessageHandler(&server->getComsMessageHandler());
+	if (!check(hostNet->start(0), "host brought up a NetBridge instead of a listening socket")) return;
+
+	char exePath[4096];
+	ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+	if (!check(len > 0, "resolved this binary's own path for spawning the client")) return;
+	exePath[len] = '\0';
+
+	const char *resultPath = "/tmp/scorchdroid-host-tests-bridge-result.txt";
+	unlink(resultPath);
+
+	pid_t pid = fork();
+	if (!check(pid >= 0, "forked a separate client process")) return;
+
+	if (pid == 0)
+	{
+		// The host's end of the pair means nothing here and would keep the
+		// link open after the parent closed it, so the child would never see
+		// the host go away.
+		close(fds[0]);
+		char fdStr[16];
+		snprintf(fdStr, sizeof(fdStr), "%d", fds[1]);
+		execl(exePath, exePath, "--bridge-client", fdStr, resultPath, (char *) nullptr);
+		_exit(127);  // execl only returns on failure.
+	}
+
+	// Same reason as the child's close above, the other way round.
+	close(fds[1]);
+
+	int status = 0;
+	bool joined = runHostUntilClientExits(server, pid, status);
+	if (!joined)
+	{
+		FILE *resultFile = fopen(resultPath, "r");
+		if (resultFile)
+		{
+			char line[512];
+			if (fgets(line, sizeof(line), resultFile)) fprintf(stderr, "  client process result: %s", line);
+			fclose(resultFile);
+		}
+		else
+		{
+			fprintf(stderr, "  client process exited without writing a result (status=%d)\n", status);
+		}
+	}
+	check(joined, "the client process joined the host over the bridge");
+
+	if (joined)
+	{
+		unsigned int clientTanks = 0, clientWidth = 0, clientHeight = 0;
+		long long clientTimeDiff = 0, clientStartDiff = 0;
+		int clientSettleTicks = 0;
+		FILE *resultFile = fopen(resultPath, "r");
+		bool parsed = resultFile &&
+			fscanf(resultFile,
+				"joined tanks=%u width=%u height=%u timediff=%lld startdiff=%lld ticks=%d",
+				&clientTanks, &clientWidth, &clientHeight, &clientTimeDiff,
+				&clientStartDiff, &clientSettleTicks) == 6;
+		if (resultFile) fclose(resultFile);
+		check(parsed, "parsed the client process's result file");
+
+		if (parsed)
+		{
+			check(clientTanks == server->getTargetContainer().getTanks().size(),
+				"client sees every tank over the bridge, including its own");
+			check(clientWidth == (unsigned int) server->getLandscapeMaps().getGroundMaps().getHeightMap().getMapWidth(),
+				"client's landscape width matches the host's");
+			check(clientHeight == (unsigned int) server->getLandscapeMaps().getGroundMaps().getHeightMap().getMapHeight(),
+				"client's landscape height matches the host's");
+
+			// The same assertion the TCP join makes, and the reason this
+			// test carries it: the clock correction is driven by message
+			// timing, so a transport that batched, reordered or delayed
+			// messages would converge differently or not at all. It is the
+			// closest thing here to a check that the bridge behaves like a
+			// stream and not like a pipe with its own ideas.
+			fprintf(stderr, "  (client/host clock difference over the bridge: %.3fs, from %.3fs at join, %d ticks)\n",
+				(double) clientTimeDiff / (double) fixed::FIXED_RESOLUTION,
+				(double) clientStartDiff / (double) fixed::FIXED_RESOLUTION,
+				clientSettleTicks);
+			const long long maxDriftInternal = (long long) (fixed::FIXED_RESOLUTION * 15 / 100);
+			check(clientTimeDiff < maxDriftInternal && clientTimeDiff > -maxDriftInternal,
+				"the bridged client's clock converges on the host's");
+		}
+	}
+
+	hostNet->stop();
+}
+
 // How many bytes a real join and real play actually cost, which is the
 // question that decides whether a non-IP transport (Bluetooth RFCOMM tops
 // out in the low hundreds of kbit/s) can carry this game at all. Nothing
@@ -2434,7 +2868,11 @@ struct NetTrafficMeter
 // - joins the host at host:port as a real ClientContext and writes a
 // one-line result to resultPath for the parent process to check, since a
 // child process's return value alone can't carry structured data back.
-static int runClientProcess(const char *host, int port, const char *resultPath)
+// [bridgeFd], when >= 0, is one end of a socket pair inherited across the
+// exec: the client then joins over a NetBridge rather than TCP, and `host`
+// and `port` mean nothing. Everything after the connect is identical, which
+// is the claim the bridge test exists to check.
+static int runClientProcess(const char *host, int port, const char *resultPath, int bridgeFd = -1)
 {
 	if (chdir(SCORCHED_SUBMODULE_ROOT) != 0)
 	{
@@ -2451,7 +2889,10 @@ static int runClientProcess(const char *host, int port, const char *resultPath)
 	NetTrafficMeter meter;
 
 	ClientContext client;
-	bool connecting = client.connectToServer(host, port);
+	NetInterface *netInterface = (bridgeFd >= 0)
+		? (NetInterface *) new NetBridge(new UnixSocketTransport(bridgeFd, 2))
+		: nullptr;
+	bool connecting = client.connectToServer(host, port, netInterface);
 	if (!connecting)
 	{
 		FILE *f = fopen(resultPath, "w");
@@ -3968,6 +4409,13 @@ int main(int argc, char **argv)
 		return runClientProcess(argv[2], atoi(argv[3]), argv[4]);
 	}
 
+	// The same client, joining over an inherited socket pair instead of a
+	// socket it opens itself - see testBridgeClientJoin.
+	if (argc == 4 && 0 == strcmp(argv[1], "--bridge-client"))
+	{
+		return runClientProcess("socketpair", 0, argv[3], atoi(argv[2]));
+	}
+
 	// Point cwd/$HOME/settings dir at the real submodule checkout, exactly
 	// like Android's initEngine() JNI function does at the extracted asset
 	// root - see the porting plan. No asset-extraction step is needed here
@@ -3998,7 +4446,9 @@ int main(int argc, char **argv)
 	testLandscapeTargets();
 	testTankMovement();
 	testRealTcpHostAndConnect();
+	testNetBridge();
 	testClientJoin();
+	testBridgeClientJoin();
 	// After the landscape exists: WeaponRoller::fireWeapon samples the
 	// ground height, and an empty height map is a segfault, not a zero.
 	testRollersAreCollected();

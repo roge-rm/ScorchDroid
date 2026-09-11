@@ -79,9 +79,13 @@ Simulator &ClientContext::getSimulator()
 	return *clientSync_;
 }
 
-bool ClientContext::connectToServer(const char *host, int port)
+bool ClientContext::connectToServer(const char *host, int port, NetInterface *netInterface)
 {
-	NetServerTCP3 *netInterface = new NetServerTCP3();
+	// Whatever carries it, the rest of this function is identical - which is
+	// the point of the transport being polymorphic. A NetBridge here is a
+	// Bluetooth link (or, in the tests, a socket pair) and `host` is then a
+	// device address rather than an IP one.
+	if (!netInterface) netInterface = new NetServerTCP3();
 	setNetInterface(netInterface);
 	netInterface->setMessageHandler(&getComsMessageHandler());
 	getComsMessageHandler().setConnectionHandler(this);

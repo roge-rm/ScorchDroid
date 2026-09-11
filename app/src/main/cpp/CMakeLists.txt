@@ -154,6 +154,7 @@ add_library(scorched_common STATIC
     porting/SkyDescription.cpp
     porting/ClientSync.cpp
     porting/ClientContext.cpp
+    porting/NetBridge.cpp
     porting/LandscapeTextureBuilder.cpp
 )
 
