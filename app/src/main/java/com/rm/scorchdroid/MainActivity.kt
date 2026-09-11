@@ -956,7 +956,12 @@ class MainActivity : AppCompatActivity() {
         try {
             startActivityForResult(BluetoothTransport.discoverableIntent(), REQUEST_DISCOVERABLE)
         } catch (e: android.content.ActivityNotFoundException) {
-            // No system dialog on this device; paired players can still join.
+            // No visibility prompt on this device at all. Same consequence as
+            // refusing one, and worth the same sentence.
+            showMenuMessage(
+                "This device has no Bluetooth visibility setting, so only phones " +
+                    "already paired with it will find the game."
+            )
             openSetup("Host over Bluetooth", overBluetooth = true)
         }
     }
@@ -987,9 +992,34 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (requestCode != REQUEST_DISCOVERABLE) return
+
         // resultCode is the number of seconds granted, or RESULT_CANCELED.
-        // Either way the game can be hosted: refusing only means a device
-        // that has never paired with this one cannot find it.
+        // A refusal used to walk straight on into game setup, which is only
+        // half defensible: a phone that is not visible can still be joined
+        // by one it has already paired with, and not by anything else. So
+        // say which of those the player is choosing rather than deciding for
+        // them - and having said it, make asking again the easy answer.
+        if (resultCode == RESULT_CANCELED) {
+            val askAgain = "Ask again"
+            val hostAnyway = "Host anyway - paired devices only"
+            hudState.dialog = HudDialog.ListChoice(
+                title = "This phone won't be visible.\nOnly devices already paired with " +
+                    "it will be able to find the game.",
+                items = listOf(askAgain, hostAnyway),
+                cancelLabel = "Back",
+                onSelect = { index ->
+                    hudState.dialog = HudDialog.None
+                    if (index == 0) startBluetoothHostFlow()
+                    else openSetup("Host over Bluetooth", overBluetooth = true)
+                },
+                onCancel = {
+                    hudState.dialog = HudDialog.None
+                    appScreen = AppScreen.MULTIPLAYER
+                },
+            )
+            return
+        }
+
         openSetup("Host over Bluetooth", overBluetooth = true)
     }
 
