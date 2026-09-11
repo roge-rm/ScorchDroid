@@ -294,6 +294,11 @@ exclusive `kHost`/`kClient` modes already enforce.
   hosting. One NetInterface per process means a Bluetooth game is not also a
   Wi-Fi game, so the choice cannot be made after the fact, and `getServerPort`
   reports 0 because there is genuinely no port to tell anyone.
+- **Joining over Bluetooth is its own search**, not a third row of "Find
+  Games". Because the scan cannot be narrowed to devices running the game
+  (below), it lists every speaker, headset and car in range, and burying the
+  two phones it exists for in that was worse than one more button. The
+  network search keeps NSD and Wi-Fi Direct, where every row is a real game.
 - Discovery lists **paired devices immediately and scanned ones as they
   arrive**, and does not ask each device whether it serves our UUID first.
   An SDP lookup per device is slow and frequently answers nothing for a
