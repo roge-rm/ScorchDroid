@@ -51,11 +51,18 @@ public:
 	virtual TargetSpace&  getTargetSpace() { return *targetSpace_; }
 	virtual Simulator&    getSimulator();
 
-	// Starts the connection - opens a real socket immediately, but the
-	// handshake itself only progresses via tick() below (matches how
-	// tickEngine() already drives everything server-side, one poll at a
-	// time, rather than blocking).
-	bool connectToServer( const char* host, int port );
+	// Starts the connection - opens the link immediately, but the handshake
+	// itself only progresses via tick() below (matches how tickEngine()
+	// already drives everything server-side, one poll at a time, rather than
+	// blocking).
+	//
+	// netInterface lets the caller supply the transport - a NetBridge over
+	// Bluetooth, or over a socket pair in the tests - and is taken over by
+	// this context; the default builds the TCP interface this has always
+	// used. `host` means whatever that interface says it means: an IP
+	// address for TCP, a device address for a bridge, and the port is
+	// ignored by transports that have no such thing.
+	bool connectToServer( const char* host, int port, NetInterface* netInterface = nullptr );
 
 	// Call every frame: pumps the network (advancing the handshake state
 	// machine as replies arrive) and, once sJoined, simulates.
