@@ -65,12 +65,18 @@ val TUTORIAL_STEPS: List<TutorialStep> = listOf(
             "swing the camera around it, and pinch to zoom."
     ),
     TutorialStep(
-        // Named by what they show rather than which edge they are on:
-        // left-hand mode swaps the two, and a tutorial that says "left" to a
-        // player who has swapped them is worse than saying nothing.
-        "A slider sits at each edge. The one reading degrees aims the barrel up and " +
-            "down; the one reading a percentage sets how hard you fire. Both show their " +
-            "value while you drag."
+        // Named by neither edge nor readout, and both exclusions were learned
+        // the hard way. Not by edge, because left-hand mode swaps the two and
+        // a tutorial that says "left" to a player who has swapped them is
+        // worse than saying nothing. Not by readout either, though that was
+        // the first fix attempted: FadingReadout only shows a value *while*
+        // it changes, so at the moment this card is read neither slider reads
+        // anything - and two of the three sliders read degrees anyway (the
+        // turn slider in the next step is the other). So it says how to tell
+        // them apart instead: drag one and watch. That costs nothing, commits
+        // nothing, and the barrel moving is its own label.
+        "A slider sits at each edge. Drag either one to see what it does - one tilts " +
+            "the barrel up and down, the other sets how hard you fire."
     ),
     TutorialStep(
         // "The bar along the bottom" used to be unambiguous. There are two

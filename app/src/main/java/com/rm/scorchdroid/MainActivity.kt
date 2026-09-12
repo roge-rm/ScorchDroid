@@ -154,6 +154,22 @@ class MainActivity : AppCompatActivity() {
     // is chosen on the way in and cannot change while a game is running.
     private var hostOverBluetooth = false
 
+    // Whether this game is meant for anyone else to join.
+    //
+    // Every game on this port is a hosted game - there is one engine and it
+    // always runs the server - but that is an implementation fact, not
+    // something a solo player has any use for. With this false nothing is
+    // published: no NSD registration, no Wi-Fi Direct group, no line of HUD
+    // naming an address, and none of the toasts that report how those two
+    // went. The server socket is still open (stopping it would mean a
+    // second startup path through the engine, for no gain), so a game can
+    // still be joined by someone told the address by hand - it just isn't
+    // announced to the room.
+    //
+    // Chosen on the way in like [hostOverBluetooth], and false unless one of
+    // the two Multiplayer host entries set it.
+    private var hostForOthers = false
+
     // Whether this game has already put the visibility prompt up. Asked once
     // per game, since a second prompt between setup and the first round would
     // read as the first one not having worked.
@@ -230,7 +246,7 @@ class MainActivity : AppCompatActivity() {
                     onBack = { appScreen = AppScreen.SINGLE_PLAYER },
                 )
                 AppScreen.MULTIPLAYER -> MultiplayerScreen(
-                    onHost = { openSetup("Host Game") },
+                    onHost = { openSetup("Host Game", forOthers = true) },
                     onHostBluetooth = { startBluetoothHostFlow() },
                     onJoin = { startJoinFlow() },
                     onJoinBluetooth = { requireBluetooth { startJoinFlow(overBluetooth = true) } },
@@ -439,11 +455,17 @@ class MainActivity : AppCompatActivity() {
      * here - they differ in wording, not in what they configure, because a
      * single-player game on this port *is* a hosted game that nobody joined.
      */
-    private fun openSetup(title: String, overBluetooth: Boolean = false) {
+    private fun openSetup(
+        title: String,
+        overBluetooth: Boolean = false,
+        forOthers: Boolean = false,
+    ) {
         // Stated here rather than left over from whichever button was last
         // pressed: a player who backed out of a Bluetooth game and then
-        // started a solo one would otherwise have hosted it over Bluetooth.
+        // started a solo one would otherwise have hosted it over Bluetooth,
+        // or advertised a solo game to the room.
         hostOverBluetooth = overBluetooth
+        hostForOthers = forOthers
         bluetoothVisibilityAsked = false
         // Back to the shipped config: a player who ran the tutorial and then
         // started a real game would otherwise inherit its seven inert targets
@@ -1018,7 +1040,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startBluetoothHostFlow() = requireBluetooth {
-        openSetup("Host over Bluetooth", overBluetooth = true)
+        openSetup("Host over Bluetooth", overBluetooth = true, forOthers = true)
     }
 
     /**
@@ -1138,6 +1160,7 @@ class MainActivity : AppCompatActivity() {
         // running after the dialog that started it went away.
         BluetoothTransport.stopDiscovery(applicationContext)
         hostOverBluetooth = false
+        hostForOthers = false
         bluetoothVisibilityAsked = false
     }
 
@@ -2296,6 +2319,24 @@ class MainActivity : AppCompatActivity() {
     // connect to. Falls back to explaining why not, rather than silently
     // doing nothing, if the port didn't bind.
     private fun updateHostingLabel() {
+        // A solo game announces nothing and says nothing about announcing.
+        //
+        // This is the first thing checked because everything below it either
+        // publishes the game or reports on having published it: the NSD
+        // registration, the Wi-Fi Direct group, the address on the HUD, and
+        // the two toasts saying how those went. None of it has a reader in a
+        // single-player game, and one of them proved it - "No Wi-Fi Direct:
+        // the nearby devices permission was refused" greeted the player over
+        // the tutorial's first card, which is a fine thing to say to someone
+        // hosting and nonsense to say to someone learning to aim.
+        //
+        // Leaving the label empty rather than writing something solo-shaped
+        // into it: HudText is skipped when it is empty, so the status column
+        // loses the line instead of spending one on the player's own IP.
+        if (!hostForOthers) {
+            hudState.hostingLabel = ""
+            return
+        }
         CoroutineScope(Dispatchers.Main).launch {
             val hosting = withContext(Dispatchers.Default) { NativeBridge.isHostingOnNetwork() }
             val port = withContext(Dispatchers.Default) { NativeBridge.getServerPort() }

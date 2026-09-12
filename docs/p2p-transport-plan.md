@@ -409,3 +409,33 @@ should be as cheap as Wi-Fi Direct. It is not.
 
 So Wi-Fi Aware costs *more* than Bluetooth despite looking cheaper. Revisit
 only if Phase 1 proves unreliable across real devices.
+
+## A solo game publishes nothing (2026-09-12)
+
+Every game on this port is a hosted game - one engine, always running the
+server - and for a while every game was also *advertised* like one: NSD
+registration, a Wi-Fi Direct group, the player's own IP on the HUD, and the
+two toasts reporting how those went.
+
+Found the plain way, on the emulator, while checking the tutorial's new
+wording. The tutorial's first card came up over the toast **"No Wi-Fi Direct:
+the nearby devices permission was refused"** - a reasonable thing to tell
+someone hosting, and nonsense to tell someone being taught to aim. The
+Wi-Fi Direct group and the NSD service were both real, on a single-player
+game, which is worth more than the wording: it holds the radio in a group and
+announces a solo game to the room.
+
+`MainActivity.hostForOthers` now decides, set on the way in beside
+`hostOverBluetooth` and true only from Multiplayer's two host entries.
+`updateHostingLabel()` returns immediately when it is false, ahead of
+everything that publishes or reports on publishing. The listening socket
+stays open - closing it would mean a second startup path through the engine
+for no gain - so a solo game can still be joined by someone told the address
+by hand. It just isn't announced.
+
+Verified as an A/B inside one process on the API 34 emulator, filtering
+logcat to `LanDiscovery` and `WifiDirectTransport`: the solo tutorial logs
+nothing from either tag, and a Host Game started from the same process
+logs `addLocalService succeeded`, `createGroup succeeded` and
+`Registered LAN service`. The HUD's hosting line follows the same gate -
+absent in solo, `Host 10.0.2.17` when hosting.
