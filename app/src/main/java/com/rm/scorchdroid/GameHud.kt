@@ -81,6 +81,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
@@ -468,59 +469,43 @@ fun GameHud(
                 .alpha(state.controlOpacity)
                 .padding(bottom = 10.dp),
         ) {
-            // Row 1: aim + fire. The weapon button keeps its text because,
-            // unlike the icon buttons, it isn't a label for a function -
-            // it's live data (weapon name + remaining ammo) read before
-            // firing. "Done buying" only exists during the buying phase,
-            // which is the one time it's ever useful.
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(onClick = onWeapon, contentPadding = PaddingValues(horizontal = 12.dp)) {
-                    Icon(Icons.Filled.Whatshot, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(state.weaponLabel, maxLines = 1)
-                }
-                Spacer(Modifier.width(8.dp))
-                // Red once the shot is committed, back to normal when the
-                // round resolves and a new move is granted. The label
-                // changes with it - colour alone would leave anyone who
-                // can't distinguish it with no feedback at all.
-                Button(
-                    onClick = onFire,
-                    // Choosing a spot on the ground *is* the shot for these
-                    // weapons, so there is nothing for this button to do -
-                    // upstream's fire key is refused for the same reason.
-                    enabled = state.positionSelectWeapon.isEmpty(),
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    colors = if (state.shotLocked) {
-                        ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFFC62828),
-                            contentColor = Color.White,
-                        )
-                    } else {
-                        ButtonDefaults.buttonColors()
-                    },
-                ) {
-                    Icon(
-                        when {
-                            state.positionSelectWeapon.isNotEmpty() -> Icons.Filled.TouchApp
-                            state.shotLocked -> Icons.Filled.HourglassTop
-                            else -> Icons.Filled.GpsFixed
-                        },
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        when {
-                            state.positionSelectWeapon.isNotEmpty() -> "TAP MAP"
-                            state.shotLocked -> "LOCKED"
-                            else -> "FIRE"
-                        },
-                    )
-                }
-                if (state.buyingPhase) {
-                    Spacer(Modifier.width(8.dp))
-                    HudIconButton(Icons.Filled.DoneAll, "Done buying", onDoneBuying)
+            // Row 1: aim + fire, as one split pill across the full width.
+            //
+            // Full width with a fixed-width FIRE, and that is the point. This
+            // row used to be intrinsically sized inside a centred column, so
+            // the pair was centred and FIRE's position therefore depended on
+            // how long the weapon's name was beside it: going from "Napalm"
+            // to "Baby Missile" slid the most-pressed control in the game
+            // sideways under the thumb. Pinning its width pins its centre,
+            // and the width it gains on the way - about half again - is most
+            // of what makes it a bigger target, at eight more dp of height.
+            //
+            // Two buttons rather than one with a long press, deliberately.
+            // Firing commits the turn and cannot be taken back, so it must
+            // not share a hit target with opening a list; and a long press
+            // means "more options" everywhere else in this HUD (the chat
+            // button's history, the camera's presets), never "the
+            // irreversible one".
+            //
+            // The outer corners are round and the inner ones nearly square,
+            // so the two read as halves of one control. Left-hand mode swaps
+            // the ends, as it does for the two aim sliders.
+            val roundStart = RoundedCornerShape(
+                topStart = 24.dp, bottomStart = 24.dp, topEnd = 4.dp, bottomEnd = 4.dp)
+            val roundEnd = RoundedCornerShape(
+                topStart = 4.dp, bottomStart = 4.dp, topEnd = 24.dp, bottomEnd = 24.dp)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+            ) {
+                if (state.leftHandMode) {
+                    FireHalf(state, roundStart, onFire, Modifier.width(150.dp).height(48.dp))
+                    Spacer(Modifier.width(2.dp))
+                    WeaponHalf(state.weaponLabel, roundEnd, onWeapon, Modifier.weight(1f).height(48.dp))
+                } else {
+                    WeaponHalf(state.weaponLabel, roundStart, onWeapon, Modifier.weight(1f).height(48.dp))
+                    Spacer(Modifier.width(2.dp))
+                    FireHalf(state, roundEnd, onFire, Modifier.width(150.dp).height(48.dp))
                 }
             }
 
@@ -544,6 +529,13 @@ fun GameHud(
                     onClick = onSkip,
                     onLongClick = onSimulationSpeed,
                 )
+                // Moved here from row 1, which the full-width pill leaves no
+                // room for. It belongs among the turn actions anyway, and it
+                // only exists during the buying phase - the one time it does
+                // anything.
+                if (state.buyingPhase) {
+                    HudIconButton(Icons.Filled.DoneAll, "Done buying", onDoneBuying)
+                }
                 Spacer(Modifier.width(10.dp))
                 HudIconButton(Icons.Filled.Shield, "Defenses", onDefenses)
                 HudIconButton(Icons.Filled.ShoppingCart, "Shop", onShop)
@@ -617,7 +609,22 @@ fun GameHud(
         // below it (hence the larger bottom offset than the other sliders).
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 130.dp),
+            // Measured from the same baseline as the strip it has to clear,
+            // which is the navigation bar and not the screen edge. Without
+            // that inset this offset was relative to the screen while the
+            // strip was relative to the bar, so on a device with three-button
+            // navigation - 48dp of it - the strip sat that much higher and
+            // the slider landed on top of the fire button. Gesture
+            // navigation insets almost nothing, which is why the phones this
+            // is usually tested on never showed it.
+            //
+            // 138 is the two rows plus their padding. It still has to track
+            // the strip's height by hand, and nothing enforces that: it went
+            // up by 8 when the fire pill became 48dp tall.
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .windowInsetsPadding(WindowInsets.navigationBars)
+                .padding(bottom = 138.dp),
         ) {
             FadingReadout("${state.angleDegrees.toInt()}°", state.angleDegrees)
             // Nudge buttons flank the slider. 220dp of track covering 360
@@ -948,6 +955,91 @@ private fun FadingReadout(text: String, value: Float) {
         label = "readout",
     )
     HudText(text, modifier = Modifier.alpha(alpha))
+}
+
+/**
+ * The left half of the fire pill: which weapon is loaded, and a way to change
+ * it. Text rather than an icon because, unlike the icon buttons, it is not a
+ * label for a function - it is live data read before firing.
+ *
+ * Tonal where FIRE is filled. Two primary-coloured halves abutted read as one
+ * blob, and the difference says which of them commits the turn; the pair is
+ * the one row 2's icon buttons already use.
+ */
+@Composable
+private fun WeaponHalf(
+    label: String,
+    shape: Shape,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Button(
+        onClick = onClick,
+        shape = shape,
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        ),
+    ) {
+        Icon(Icons.Filled.Whatshot, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, maxLines = 1)
+    }
+}
+
+/**
+ * The right half: fire, and what the game is waiting for instead.
+ *
+ * Red once the shot is committed, back to normal when the round resolves and
+ * a new move is granted. The label changes with it - colour alone would leave
+ * anyone who cannot distinguish it with no feedback at all.
+ */
+@Composable
+private fun FireHalf(
+    state: GameHudState,
+    shape: Shape,
+    onFire: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Button(
+        onClick = onFire,
+        shape = shape,
+        modifier = modifier,
+        // Choosing a spot on the ground *is* the shot for these weapons, so
+        // there is nothing for this button to do - upstream's fire key is
+        // refused for the same reason.
+        enabled = state.positionSelectWeapon.isEmpty(),
+        contentPadding = PaddingValues(horizontal = 12.dp),
+        colors = if (state.shotLocked) {
+            ButtonDefaults.buttonColors(
+                containerColor = Color(0xFFC62828),
+                contentColor = Color.White,
+            )
+        } else {
+            ButtonDefaults.buttonColors()
+        },
+    ) {
+        Icon(
+            when {
+                state.positionSelectWeapon.isNotEmpty() -> Icons.Filled.TouchApp
+                state.shotLocked -> Icons.Filled.HourglassTop
+                else -> Icons.Filled.GpsFixed
+            },
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            when {
+                state.positionSelectWeapon.isNotEmpty() -> "TAP MAP"
+                state.shotLocked -> "LOCKED"
+                else -> "FIRE"
+            },
+            maxLines = 1,
+        )
+    }
 }
 
 /**
