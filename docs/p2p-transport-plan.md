@@ -372,6 +372,25 @@ Confirmed working unpaired, both directions, 2026-09-11.
 **Still to do:** a handset pair that is not these two - accept/connect/pairing
 is exactly the kind of path that works differently on every device.
 
+## Cross-play with desktop Scorched3D, which was never a goal
+
+Demonstrated 2026-09-12: a desktop client and this port playing together in a
+PC-hosted game. Nothing here was done to achieve it. It rests on two things,
+both of which live in the submodule and can be ended by a bump with no other
+symptom, so `host_tests` pins both (`testDesktopCompatibility`):
+
+- **The handshake's version strings**, `44.3` and protocol `"ew"`, because the
+  port compiles upstream's own `DefinesScorched.hpp`. A desktop server compares
+  the protocol string exactly and rejects anything else.
+- **The 1129-file manifest of the global mod**, name, length and CRC each,
+  because the shipped data is upstream's own and no patch touches `data/`.
+  Drift there does not fail a join outright - the server sends whatever differs
+  - so it would show as a handshake quietly turning into a file transfer.
+
+The test cannot prove a desktop client will connect; only a desktop client can
+do that. It exists to fail the moment either foundation moves, rather than
+leaving that to be found by a player.
+
 ## Phase 4 — Wi-Fi Aware, investigated and shelved
 
 Technically the most elegant option: publish/subscribe with no group formation,
