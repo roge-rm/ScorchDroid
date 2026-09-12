@@ -215,7 +215,7 @@ with clients joining via `WifiNetworkSpecifier`. That API has grown fragile —
 `getSoftApConfiguration()`, and the whole path needs location services actually
 switched on.
 
-## Phase 3 — Bluetooth RFCOMM via a transport bridge (built 2026-09-11)
+## Phase 3 — Bluetooth RFCOMM via a transport bridge (working on two devices, 2026-09-11)
 
 Parked 2026-09-09, unblocked by Phase 1 working on two devices on 2026-09-11,
 and built the same day. The design below is what was built; what changed in
@@ -367,9 +367,10 @@ worth keeping. Each round answered one either/or:
 A silent failure needs to be made to name itself before it can be fixed, and
 none of these three questions could be answered from the outside.
 
-**Still to do:** re-test unpaired on the fix, and on a handset pair that is
-not these two - accept/connect/pairing is exactly the kind of path that works
-differently on every device.
+Confirmed working unpaired, both directions, 2026-09-11.
+
+**Still to do:** a handset pair that is not these two - accept/connect/pairing
+is exactly the kind of path that works differently on every device.
 
 ## Phase 4 — Wi-Fi Aware, investigated and shelved
 
