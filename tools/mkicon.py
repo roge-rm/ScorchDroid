@@ -47,33 +47,31 @@ paths = []
 def add(d, fill=None, stroke=None, width=None, cap=None):
     paths.append((d, fill, stroke, width, cap))
 
-# Craters, largest first.
-add(circle(120, 116, 58), fill="#5E2B1E")
-add(circle(115, 109, 42), fill="#8E4128")
-add(circle(110, 102, 26), fill="#C4623A")
-add(circle(105, 95, 10),  fill="#D98A5C")
-# Target reticle.
-add(circle(142, 140, 20),   fill="#1B1424")
-add(circle(142, 140, 17.5), stroke="#C4623A", width=5*S)
+# Three concentric range rings, stroked, then the reticle in the middle.
+for r in (58, 42, 26):
+    add(circle(120, 124, r), stroke="#8E4128", width=5*S)
+add(circle(120, 124, 15),   fill="#1B1424")
+add(circle(120, 124, 12.5), stroke="#C4623A", width=5*S)
 
-# The trajectory: stroke-dasharray "2 15" with round caps is a dotted line,
-# which VectorDrawable can't express - so it's flattened into the dots it
-# would have drawn, spaced by arc length along the curve.
-P0, C1, C2, P3 = (85,88), (108,100), (122,116), (132,128)
-samples = [bez(i/400.0, P0, C1, C2, P3) for i in range(401)]
-acc, dots, travelled = 0.0, [], 0.0
-for i in range(1, len(samples)):
-    seg = math.dist(samples[i-1], samples[i])
-    travelled += seg
-    acc += seg
-    if acc >= 17.0 or i == 1:      # 2 on + 15 off
-        acc = 0.0
-        dots.append(samples[i])
+# The two trajectories: stroke-dasharray "2 15" with round caps is a dotted
+# line, which VectorDrawable can't express - so each is flattened into the
+# dots it would have drawn, spaced by arc length along the curve.
+dots = []
+for P0, C1, C2, P3 in (((58,178), (82,162), (100,148), (108,138)),
+                       ((182,178), (158,162), (140,148), (132,138))):
+    samples = [bez(i/400.0, P0, C1, C2, P3) for i in range(401)]
+    acc = 0.0
+    for i in range(1, len(samples)):
+        seg = math.dist(samples[i-1], samples[i])
+        acc += seg
+        if acc >= 17.0 or i == 1:      # 2 on + 15 off
+            acc = 0.0
+            dots.append(samples[i])
 for d in dots:
     add(circle(d[0], d[1], 4), fill="#B8E04A")   # stroke-width 8 -> radius 4
 
 # Three tanks: a rotated barrel plus the shared hull symbol, transforms baked.
-for tx, ty, rot in ((56, 72, 28), (188, 96, 162), (86, 192, -58)):
+for tx, ty, rot in ((120, 40, 90), (58, 178, -34), (182, 178, 214)):
     a = math.radians(rot)
     add(line(tx, ty, tx + 33*math.cos(a), ty + 33*math.sin(a)),
         stroke="#F2E4CF", width=7*S, cap="round")
