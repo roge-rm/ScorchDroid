@@ -1673,6 +1673,16 @@ class MainActivity : AppCompatActivity() {
     // clock/compass-face reading), while the engine's bearing runs
     // counter-clockwise - see engineAngleFromDial for the conversion.
     private fun fireFromSliders() {
+        // The fire button used to be disabled for these weapons - choosing a
+        // spot on the ground *is* the shot, and upstream refuses its fire key
+        // for the same reason. It cannot be disabled now that the same button
+        // is the only way to reach the weapon list, so the refusal moves here
+        // and says so instead of doing nothing.
+        if (hudState.positionSelectWeapon.isNotEmpty()) {
+            notifyPlayer("Tap the ground to use ${hudState.positionSelectWeapon}")
+            return
+        }
+
         val engineAngle = engineAngleFromDial(currentAngleDegrees)
         CoroutineScope(Dispatchers.Main).launch {
             // Read before firing: this is the id the shot is submitted

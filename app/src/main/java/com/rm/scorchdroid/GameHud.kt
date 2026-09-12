@@ -54,6 +54,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Spacer
@@ -469,77 +470,76 @@ fun GameHud(
                 .alpha(state.controlOpacity)
                 .padding(bottom = 10.dp),
         ) {
-            // Row 1: aim + fire, as one split pill across the full width.
+            // Row 1 is one button that both picks the weapon and fires it:
+            // a tap queues the shot, a hold opens the weapon list.
             //
-            // Full width with a fixed-width FIRE, and that is the point. This
-            // row used to be intrinsically sized inside a centred column, so
-            // the pair was centred and FIRE's position therefore depended on
-            // how long the weapon's name was beside it: going from "Napalm"
-            // to "Baby Missile" slid the most-pressed control in the game
-            // sideways under the thumb. Pinning its width pins its centre,
-            // and the width it gains on the way - about half again - is most
-            // of what makes it a bigger target, at eight more dp of height.
+            // One hit target, which is dan's call after seeing the two-target
+            // version. It puts the irreversible action on the *short* press,
+            // so the tradeoff is worth stating: a stray tap commits the turn.
+            // What makes that liveable is that the label always names the
+            // weapon that tap will send, and that resting a thumb produces a
+            // hold, which only opens a list.
             //
-            // Two buttons rather than one with a long press, deliberately.
-            // Firing commits the turn and cannot be taken back, so it must
-            // not share a hit target with opening a list; and a long press
-            // means "more options" everywhere else in this HUD (the chat
-            // button's history, the camera's presets), never "the
-            // irreversible one".
-            //
-            // The outer corners are round and the inner ones nearly square,
-            // so the two read as halves of one control. Left-hand mode swaps
-            // the ends, as it does for the two aim sliders.
-            val roundStart = RoundedCornerShape(
-                topStart = 24.dp, bottomStart = 24.dp, topEnd = 4.dp, bottomEnd = 4.dp)
-            val roundEnd = RoundedCornerShape(
-                topStart = 4.dp, bottomStart = 4.dp, topEnd = 24.dp, bottomEnd = 24.dp)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-            ) {
-                if (state.leftHandMode) {
-                    FireHalf(state, roundStart, onFire, Modifier.width(150.dp).height(48.dp))
-                    Spacer(Modifier.width(2.dp))
-                    WeaponHalf(state.weaponLabel, roundEnd, onWeapon, Modifier.weight(1f).height(48.dp))
-                } else {
-                    WeaponHalf(state.weaponLabel, roundStart, onWeapon, Modifier.weight(1f).height(48.dp))
-                    Spacer(Modifier.width(2.dp))
-                    FireHalf(state, roundEnd, onFire, Modifier.width(150.dp).height(48.dp))
-                }
-            }
+            // Full width, so the one control anyone reaches for without
+            // looking is the whole bottom of the screen and its centre never
+            // moves - it used to slide sideways with the length of the
+            // weapon's name, which is what made it feel off to the side.
+            FirePill(
+                state = state,
+                onFire = onFire,
+                onWeapon = onWeapon,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .height(48.dp),
+            )
 
             Spacer(Modifier.height(6.dp))
 
-            // Row 2: turn actions then loadout. Undo and skip are common
-            // enough (fire, nudge, fire again; pass when you can't reach
-            // anyone) that they get their own buttons rather than hiding
-            // in a menu - only genuinely rare things like resigning sit
-            // behind the overflow.
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                HudIconButton(
-                    icon = Icons.Filled.Undo,
-                    description = "Revert to last angles (hold to quit to menu)",
-                    onClick = onUndo,
-                    onLongClick = onQuitToMenu,
-                )
-                HudIconButton(
-                    icon = Icons.Filled.SkipNext,
-                    description = "Skip turn (hold for game speed)",
-                    onClick = onSkip,
-                    onLongClick = onSimulationSpeed,
-                )
-                // Moved here from row 1, which the full-width pill leaves no
-                // room for. It belongs among the turn actions anyway, and it
-                // only exists during the buying phase - the one time it does
-                // anything.
-                if (state.buyingPhase) {
-                    HudIconButton(Icons.Filled.DoneAll, "Done buying", onDoneBuying)
+            // Row 2: the overflow sits in the middle of the pack, with a
+            // gap either side of it - undo and skip on the left, defences and
+            // the shop on the right - so the two groups read as groups and
+            // the thing that opens a menu is not mistaken for one of them.
+            //
+            // A Box rather than a Row so the cluster stays centred whatever
+            // else appears: "Done buying" is pinned to the far right and
+            // therefore cannot shove the other five sideways when the buying
+            // phase starts and ends. Same reason the fire button above has a
+            // fixed centre.
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.align(Alignment.Center),
+                ) {
+                    HudIconButton(
+                        icon = Icons.Filled.Undo,
+                        description = "Revert to last angles (hold to quit to menu)",
+                        onClick = onUndo,
+                        onLongClick = onQuitToMenu,
+                    )
+                    HudIconButton(
+                        icon = Icons.Filled.SkipNext,
+                        description = "Skip turn (hold for game speed)",
+                        onClick = onSkip,
+                        onLongClick = onSimulationSpeed,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    HudIconButton(Icons.Filled.MoreVert, "More actions", onActions)
+                    Spacer(Modifier.width(10.dp))
+                    HudIconButton(Icons.Filled.Shield, "Defenses", onDefenses)
+                    HudIconButton(Icons.Filled.ShoppingCart, "Shop", onShop)
                 }
-                Spacer(Modifier.width(10.dp))
-                HudIconButton(Icons.Filled.Shield, "Defenses", onDefenses)
-                HudIconButton(Icons.Filled.ShoppingCart, "Shop", onShop)
-                HudIconButton(Icons.Filled.MoreVert, "More actions", onActions)
+                // Only during the buying phase - the one time it does
+                // anything - and out on its own, away from the controls that
+                // are always there.
+                if (state.buyingPhase) {
+                    HudIconButton(
+                        icon = Icons.Filled.DoneAll,
+                        description = "Done buying",
+                        onClick = onDoneBuying,
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                    )
+                }
             }
         }
 
@@ -958,87 +958,67 @@ private fun FadingReadout(text: String, value: Float) {
 }
 
 /**
- * The left half of the fire pill: which weapon is loaded, and a way to change
- * it. Text rather than an icon because, unlike the icon buttons, it is not a
- * label for a function - it is live data read before firing.
+ * The fire button, which is also the weapon button: a tap queues the shot, a
+ * hold opens the weapon list.
  *
- * Tonal where FIRE is filled. Two primary-coloured halves abutted read as one
- * blob, and the difference says which of them commits the turn; the pair is
- * the one row 2's icon buttons already use.
+ * A Surface with combinedClickable rather than a Button, because Material's
+ * Button takes only an onClick - the same reason HudIconButton's long-press
+ * variant is built this way.
+ *
+ * The icon is repeated at both ends. The middle is the weapon's name, so
+ * without them nothing on the control says what pressing it does: reticles
+ * while it can fire, hourglasses once the shot is in, and a tap-target while
+ * a position weapon wants the map instead of this button.
  */
 @Composable
-private fun WeaponHalf(
-    label: String,
-    shape: Shape,
-    onClick: () -> Unit,
+private fun FirePill(
+    state: GameHudState,
+    onFire: () -> Unit,
+    onWeapon: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Button(
-        onClick = onClick,
-        shape = shape,
-        modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 12.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+    val icon = when {
+        state.positionSelectWeapon.isNotEmpty() -> Icons.Filled.TouchApp
+        state.shotLocked -> Icons.Filled.HourglassTop
+        else -> Icons.Filled.GpsFixed
+    }
+    // Red once the shot is committed, back to normal when the round resolves
+    // and a new move is granted. Never colour alone: the icons at both ends
+    // change with it, so it still reads for anyone who cannot tell the two
+    // colours apart.
+    Surface(
+        color = if (state.shotLocked) {
+            Color(0xFFC62828)
+        } else {
+            MaterialTheme.colorScheme.primary
+        },
+        contentColor = if (state.shotLocked) {
+            Color.White
+        } else {
+            MaterialTheme.colorScheme.onPrimary
+        },
+        shape = RoundedCornerShape(24.dp),
+        modifier = modifier.combinedClickable(
+            onClick = onFire,
+            onLongClick = onWeapon,
+            role = Role.Button,
+            onClickLabel = if (state.shotLocked) "Shot already sent" else "Fire",
+            onLongClickLabel = "Change weapon",
         ),
     ) {
-        Icon(Icons.Filled.Whatshot, contentDescription = null, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, maxLines = 1)
-    }
-}
-
-/**
- * The right half: fire, and what the game is waiting for instead.
- *
- * Red once the shot is committed, back to normal when the round resolves and
- * a new move is granted. The label changes with it - colour alone would leave
- * anyone who cannot distinguish it with no feedback at all.
- */
-@Composable
-private fun FireHalf(
-    state: GameHudState,
-    shape: Shape,
-    onFire: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Button(
-        onClick = onFire,
-        shape = shape,
-        modifier = modifier,
-        // Choosing a spot on the ground *is* the shot for these weapons, so
-        // there is nothing for this button to do - upstream's fire key is
-        // refused for the same reason.
-        enabled = state.positionSelectWeapon.isEmpty(),
-        contentPadding = PaddingValues(horizontal = 12.dp),
-        colors = if (state.shotLocked) {
-            ButtonDefaults.buttonColors(
-                containerColor = Color(0xFFC62828),
-                contentColor = Color.White,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
+            Text(
+                state.weaponLabel,
+                maxLines = 1,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             )
-        } else {
-            ButtonDefaults.buttonColors()
-        },
-    ) {
-        Icon(
-            when {
-                state.positionSelectWeapon.isNotEmpty() -> Icons.Filled.TouchApp
-                state.shotLocked -> Icons.Filled.HourglassTop
-                else -> Icons.Filled.GpsFixed
-            },
-            contentDescription = null,
-            modifier = Modifier.size(18.dp),
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-            when {
-                state.positionSelectWeapon.isNotEmpty() -> "TAP MAP"
-                state.shotLocked -> "LOCKED"
-                else -> "FIRE"
-            },
-            maxLines = 1,
-        )
+            Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
+        }
     }
 }
 
@@ -1054,6 +1034,7 @@ private fun HudIconButton(
     description: String,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
 ) {
     // A long press opens the fuller version of whatever the button does -
     // the message button's chat history, the camera button's preset list.
@@ -1062,7 +1043,7 @@ private fun HudIconButton(
     if (onLongClick == null) {
         FilledTonalIconButton(
             onClick = onClick,
-            modifier = Modifier.padding(horizontal = 2.dp).size(44.dp),
+            modifier = modifier.padding(horizontal = 2.dp).size(44.dp),
         ) {
             Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
         }
@@ -1075,7 +1056,7 @@ private fun HudIconButton(
         color = MaterialTheme.colorScheme.secondaryContainer,
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         shape = CircleShape,
-        modifier = Modifier
+        modifier = modifier
             .padding(horizontal = 2.dp)
             .size(44.dp)
             .combinedClickable(
