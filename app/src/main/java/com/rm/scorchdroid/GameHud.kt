@@ -480,18 +480,19 @@ fun GameHud(
             // weapon that tap will send, and that resting a thumb produces a
             // hold, which only opens a list.
             //
-            // Full width, so the one control anyone reaches for without
-            // looking is the whole bottom of the screen and its centre never
-            // moves - it used to slide sideways with the length of the
-            // weapon's name, which is what made it feel off to the side.
+            // Its centre never moves, which is the half of "off to the
+            // side" that was a bug: the old pair was intrinsically sized and
+            // centred together, so the fire button slid sideways with the
+            // length of the weapon's name beside it.
             FirePill(
                 state = state,
                 onFire = onFire,
                 onWeapon = onWeapon,
+                // As wide as the row of icons below and no wider, so the
+                // two are one block rather than a bar with a row under it.
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp)
-                    .height(48.dp),
+                    .width(kControlRowWidth)
+                    .height(40.dp),
             )
 
             Spacer(Modifier.height(6.dp))
@@ -523,9 +524,9 @@ fun GameHud(
                         onClick = onSkip,
                         onLongClick = onSimulationSpeed,
                     )
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(kHudGroupGap))
                     HudIconButton(Icons.Filled.MoreVert, "More actions", onActions)
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(kHudGroupGap))
                     HudIconButton(Icons.Filled.Shield, "Defenses", onDefenses)
                     HudIconButton(Icons.Filled.ShoppingCart, "Shop", onShop)
                 }
@@ -618,13 +619,12 @@ fun GameHud(
             // navigation insets almost nothing, which is why the phones this
             // is usually tested on never showed it.
             //
-            // 138 is the two rows plus their padding. It still has to track
-            // the strip's height by hand, and nothing enforces that: it went
-            // up by 8 when the fire pill became 48dp tall.
+            // 130 is the two rows plus their padding. It still has to track
+            // the strip's height by hand, and nothing enforces that.
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(bottom = 138.dp),
+                .padding(bottom = 130.dp),
         ) {
             FadingReadout("${state.angleDegrees.toInt()}°", state.angleDegrees)
             // Nudge buttons flank the slider. 220dp of track covering 360
@@ -957,6 +957,17 @@ private fun FadingReadout(text: String, value: Float) {
     HudText(text, modifier = Modifier.alpha(alpha))
 }
 
+// Row 2's metrics, in one place because the fire bar above is sized from
+// them: it is exactly as wide as the five always-present icon buttons and
+// the two gaps that group them, so the two rows read as one block. Derived
+// rather than written out as a number, so adding or resizing a button moves
+// the bar with it instead of quietly leaving it the wrong width.
+private val kHudIconSize = 44.dp
+private val kHudIconSidePadding = 2.dp
+private val kHudGroupGap = 10.dp
+private val kControlRowWidth =
+    (kHudIconSize + kHudIconSidePadding * 2) * 5 + kHudGroupGap * 2
+
 /**
  * The fire button, which is also the weapon button: a tap queues the shot, a
  * hold opens the weapon list.
@@ -1043,7 +1054,7 @@ private fun HudIconButton(
     if (onLongClick == null) {
         FilledTonalIconButton(
             onClick = onClick,
-            modifier = modifier.padding(horizontal = 2.dp).size(44.dp),
+            modifier = modifier.padding(horizontal = kHudIconSidePadding).size(kHudIconSize),
         ) {
             Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
         }
@@ -1057,8 +1068,8 @@ private fun HudIconButton(
         contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         shape = CircleShape,
         modifier = modifier
-            .padding(horizontal = 2.dp)
-            .size(44.dp)
+            .padding(horizontal = kHudIconSidePadding)
+            .size(kHudIconSize)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick,

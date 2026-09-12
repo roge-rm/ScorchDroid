@@ -230,7 +230,11 @@ class GameSettings(context: Context) {
     }
 
     /** How opaque the on-screen controls are. */
-    var controlOpacity by mutableFloatStateOf(prefs.getFloat(KEY_OPACITY, 1.0f))
+    // 80% by default: the fire bar and the icon row under it sit over the
+    // battlefield, and at full opacity they read as a wall across the bottom
+    // of it. The slider still goes to 100% - the number it shows is the one
+    // actually applied, so this is a default and not a hidden multiplier.
+    var controlOpacity by mutableFloatStateOf(prefs.getFloat(KEY_OPACITY, 0.8f))
         private set
 
     fun updateControlOpacity(value: Float) {
