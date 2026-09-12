@@ -38,6 +38,13 @@ Cheers, enjoy! roge-rm
   with automatic game discovery. Wi-Fi Direct needs no router, hotspot or
   internet at all, and Bluetooth needs no Wi-Fi either: two phones side by
   side can play with every other radio switched off.
+- It can also join a **desktop Scorched3D server** and play alongside PC
+  clients — enter the server's address under Join Game. This was never a goal
+  and is not something the port does anything to achieve: it compiles
+  upstream's own protocol code and version constants unchanged, and ships
+  upstream's own data, so the handshake and the mod checksums simply match.
+  It holds only while the two sides agree on Scorched3D's version and protocol
+  (44.3 / "ew" here), and nothing tests it.
 - In-game chat and a live score table, with each player's avatar, their tank colour and — in a team
   game — the team totals. The game's own announcements — who killed whom with what, who joined —
   arrive in the same place.
