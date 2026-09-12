@@ -34,9 +34,10 @@ Cheers, enjoy! roge-rm
 - Touch controls: drag to orbit, pinch to zoom, tap to aim, plus angle/elevation/power sliders and
   a Fire button that don't depend on screen-to-world mapping.
 - Seven camera views including a shot camera that follows the projectile.
-- Multiplayer — host or join over Wi-Fi, a hotspot, or Wi-Fi Direct, with
-  automatic game discovery. Wi-Fi Direct needs no router, hotspot or internet
-  at all.
+- Multiplayer — host or join over Wi-Fi, a hotspot, Wi-Fi Direct or Bluetooth,
+  with automatic game discovery. Wi-Fi Direct needs no router, hotspot or
+  internet at all, and Bluetooth needs no Wi-Fi either: two phones side by
+  side can play with every other radio switched off.
 - In-game chat and a live score table, with each player's avatar, their tank colour and — in a team
   game — the team totals. The game's own announcements — who killed whom with what, who joined —
   arrive in the same place.
