@@ -275,7 +275,7 @@ namespace
 	// what makes the distortion a displacement in the world rather than a
 	// nudge in screen space, so a wave bends the reflection of the thing it
 	// is actually in front of.
-	GLint  waterReflectMatrixLoc = -1;
+	GLint  waterReflectMatrixLoc = -1, waterViewportLoc = -1;
 
 	// The sun's shadow map. Upstream renders the scene's depth from the sun
 	// into a 2048-square depth texture (Landscape::drawShadows) and samples it
@@ -1752,6 +1752,9 @@ namespace
 		// W10a: the landscape's foam bitmap, tiled across the map.
 		uniform sampler2D uFoamMask;
 		uniform int uDebugMode;
+		// The screen, so a debug mode can show the reflection buffer as it
+		// actually is rather than through the projective lookup.
+		uniform vec2 uViewport;
 
 		// Upstream's water shininess, from water.fshader.
 		const float kWaterShininess = 120.0;
@@ -1855,6 +1858,24 @@ namespace
 				else if (uDebugMode == 8) d = vec3(aof);
 				else if (uDebugMode == 9) d = vec3(fogFactor);
 				else if (uDebugMode == 10) d = vUpwell;
+				// The projective lookup's own coordinate, as red and green.
+				// It should be a smooth ramp inside 0..1 - the fragment's
+				// own screen position, bent along the wave. Flat, or pinned
+				// at 0 or 1, means the reflection is being read from off the
+				// edge of the buffer, where CLAMP_TO_EDGE repeats whatever
+				// the border pixel happens to be.
+				else if (uDebugMode == 11) {
+					d = vec3(vReflectCoord.xy / max(vReflectCoord.w, 0.0001), 0.0);
+				}
+				// The reflection buffer itself, read straight at this
+				// fragment's screen position with no projection involved.
+				// This is what the mirrored pass actually drew: sky above
+				// its horizon, mirrored land below it. If this is black, the
+				// pass is not drawing; if it looks like a scene and mode 4
+				// is black, the lookup is at fault.
+				else if (uDebugMode == 12) {
+					d = texture(uReflectionTex, gl_FragCoord.xy / uViewport).rgb;
+				}
 				fragColor = vec4(d, 1.0);
 				return;
 			}
@@ -5897,6 +5918,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	waterNoise0Loc = glGetUniformLocation(waterProgram, "uNoise0");
 	waterNoise1Loc = glGetUniformLocation(waterProgram, "uNoise1");
 	waterReflectMatrixLoc = glGetUniformLocation(waterProgram, "uReflectMatrix");
+	waterViewportLoc = glGetUniformLocation(waterProgram, "uViewport");
 	waterShadowTexLoc = glGetUniformLocation(waterProgram, "uShadowTex");
 	waterShadowMatrixLoc = glGetUniformLocation(waterProgram, "uShadowMatrix");
 	waterShadowEnabledLoc = glGetUniformLocation(waterProgram, "uShadowEnabled");
@@ -8113,6 +8135,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		glBindTexture(GL_TEXTURE_2D, waterFoamMaskTexture);
 		glUniform1i(waterFoamMaskLoc, 7);
 		glUniformMatrix4fv(waterMvpLoc, 1, GL_FALSE, mvp.m);
+		glUniform2f(waterViewportLoc, (float) std::max(surfaceWidth, 1),
+					(float) std::max(surfaceHeight, 1));
 		// Upstream's reflection texture matrix: bias * proj * view of the
 		// *real* camera. The mirrored pass drew into the buffer with a view
 		// that agrees with this one on the water plane, so this projects a
