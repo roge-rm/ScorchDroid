@@ -282,6 +282,20 @@ object BluetoothTransport {
             }
         }
         discoveryReceiver = receiver
+        // RECEIVER_EXPORTED, where every other receiver in this port is
+        // NOT_EXPORTED, and it is not a relaxation of anything.
+        //
+        // These three come from the Bluetooth module, which since Android 12
+        // is a separate APEX app with its own UID - not the system server
+        // that sends Wi-Fi P2P's. NOT_EXPORTED means "same app only", so it
+        // dropped every one of them: the radio ran a full twelve-second
+        // inquiry, found the other phone, and this app was told nothing.
+        // From the outside that is indistinguishable from there being no
+        // other phone, which is how it read for two evenings.
+        //
+        // Exporting costs nothing here because all three are *protected*
+        // broadcasts: the platform refuses to let any app but the system
+        // send them, so there is no one else who could deliver one.
         ContextCompat.registerReceiver(
             context.applicationContext,
             receiver,
@@ -290,7 +304,7 @@ object BluetoothTransport {
                 addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
                 addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
             },
-            ContextCompat.RECEIVER_NOT_EXPORTED,
+            ContextCompat.RECEIVER_EXPORTED,
         )
 
         if (adapter.isDiscovering) adapter.cancelDiscovery()
