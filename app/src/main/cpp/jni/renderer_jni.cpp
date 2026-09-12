@@ -227,7 +227,9 @@ namespace
 	// M6 sky.
 	GLuint skyProgram = 0, skyVao = 0, skyVbo = 0;
 	GLint  skyGradientLoc = -1, skySunDirLoc = -1, skySunColorLoc = -1, skyGlowLoc = -1;
-	GLint  skyFlashLoc = -1, skySunDiscLoc = -1;
+	GLint  skyFlashLoc = -1, skySunDiscLoc = -1, skyDebugModeLoc = -1;
+	// Defined with the water's own, further down, and used above it.
+	int skyDebugMode();
 	bool   skyBuilt = false;
 	ScorchDroidSky::Description skyDescription;
 
@@ -1437,6 +1439,11 @@ namespace
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
 		uniform float uEyeHeight;
+		// `adb shell setprop debug.scorchdroid.sky N` shows one term of the
+		// sum instead of the sum, exactly as the water shader's own switch
+		// does - which is how the water's faults were each found in one tap
+		// after rounds of inference got them wrong.
+		uniform int uDebugMode;
 		void main() {
 			vec3 d = normalize(vRay);
 
@@ -1446,17 +1453,18 @@ namespace
 			// the sine of it. Below the horizon there is nothing to show
 			// but the horizon colour - the ground is drawn over that
 			// anyway, and clamping avoids a hard band when the camera dips.
+			float fogFactor = 1.0;
 			float t = asin(clamp(d.y, 0.0, 1.0)) / 1.5707963 * 15.0;
 			int lo = int(floor(t));
 			int hi = min(lo + 1, 15);
-			vec3 sky = mix(uGradient[lo], uGradient[hi], fract(t));
+			vec3 gradientOnly = mix(uGradient[lo], uGradient[hi], fract(t));
+			vec3 sky = gradientOnly;
 
 			// Upstream's horizon glow, per vertex of the dome: every colour
 			// channel lifted by (dot(direction, sun) + 1) / 4 - a quarter
 			// everywhere, half towards the sun - and capped at 1.
-			if (uHorizonGlow > 0.5) {
-				sky = min(sky + vec3((dot(d, uSunDir) + 1.0) / 4.0), vec3(1.0));
-			}
+			float glow = (uHorizonGlow > 0.5) ? (dot(d, uSunDir) + 1.0) / 4.0 : 0.0;
+			sky = min(sky + vec3(glow), vec3(1.0));
 
 			// Upstream draws its sky dome with fixed-function fog *on*: a
 			// flattened ellipsoid 2000 units across and 225 tall, centred
@@ -1485,7 +1493,31 @@ namespace
 				float disc = b * b - 4.0 * a * c;
 				float dist = (disc > 0.0 && a > 0.0) ? (-b + sqrt(disc)) / (2.0 * a) : R;
 				float z = uFogDensity * 1000.0 * dist;
-				sky = mix(uFogColor, sky, exp(-z * z));
+				fogFactor = exp(-z * z);
+				sky = mix(uFogColor, sky, fogFactor);
+			}
+
+			if (uDebugMode != 0) {
+				vec3 dbg = vec3(1.0, 0.0, 1.0);
+				if (uDebugMode == 1) dbg = gradientOnly;
+				else if (uDebugMode == 2) dbg = vec3(glow);
+				else if (uDebugMode == 3) dbg = vec3(fogFactor);
+				else if (uDebugMode == 4) dbg = uFogColor;
+				else if (uDebugMode == 5) dbg = vec3(uFlash);
+				// The gradient index as a ramp: black at the horizon, white
+				// at the zenith. Anything else means the height-to-colour
+				// mapping is wrong and every colour above is read from the
+				// wrong row.
+				else if (uDebugMode == 6) dbg = vec3(t / 15.0);
+				// The ray itself, to prove the dome's own geometry.
+				else if (uDebugMode == 7) dbg = d * 0.5 + 0.5;
+				// The two ends of the gradient as uploaded, side by side -
+				// left half the horizon row, right half the zenith one. If
+				// these are not the colours the log printed, the array did
+				// not arrive.
+				else if (uDebugMode == 8) dbg = (gl_FragCoord.x < 400.0) ? uGradient[0] : uGradient[15];
+				fragColor = vec4(dbg, 1.0);
+				return;
 			}
 
 			// The sun itself, only when the landscape has no sun texture of
@@ -2701,6 +2733,7 @@ namespace
 		glUniform1f(skyFlashLoc,
 					std::min(1.0f, skyFlashRemaining / kSkyFlashSeconds));
 		glUniform1f(skySunDiscLoc, (sunTexture != 0) ? 0.0f : 1.0f);
+		glUniform1i(skyDebugModeLoc, skyDebugMode());
 		{
 			float fog[3];
 			currentFogColor(fog);
@@ -5388,6 +5421,21 @@ namespace
 		return cached;
 	}
 
+	// The same for the sky - see uDebugMode in its fragment shader. Polled
+	// rather than read once so a landscape already on screen can be taken
+	// apart without restarting the game.
+	int skyDebugMode()
+	{
+		static int cached = 0;
+		static double checkedAt = -10.0;
+		if (lastFrameSeconds - checkedAt < 1.0) return cached;
+		checkedAt = lastFrameSeconds;
+		char value[PROP_VALUE_MAX] = { 0 };
+		if (__system_property_get("debug.scorchdroid.sky", value) > 0) cached = atoi(value);
+		else cached = 0;
+		return cached;
+	}
+
 	// The view matrix of the pass being drawn, for the sphere-mapped
 	// meshes (GL_SPHERE_MAP works in eye space). Set before each pass.
 	Mat4 g_passView = Mat4::identity();
@@ -5814,6 +5862,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	skySunColorLoc = glGetUniformLocation(skyProgram, "uSunColor");
 	skyGlowLoc = glGetUniformLocation(skyProgram, "uHorizonGlow");
 	skyFlashLoc = glGetUniformLocation(skyProgram, "uFlash");
+	skyDebugModeLoc = glGetUniformLocation(skyProgram, "uDebugMode");
 	skySunDiscLoc = glGetUniformLocation(skyProgram, "uSunDisc");
 	skyFogColorLoc = glGetUniformLocation(skyProgram, "uFogColor");
 	skyFogDensityLoc = glGetUniformLocation(skyProgram, "uFogDensity");
