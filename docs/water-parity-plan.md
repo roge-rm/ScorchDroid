@@ -287,3 +287,50 @@ upstream's.
 Each step: host-tests for anything in `porting/`; the "Ocean tile uploaded"
 log line for the numbers; a screenshot beside the upstream islands
 screenshots for the look. Build delivered to `/srv/downloads/temp/debug`.
+
+## Reflection and specular, checked line by line (2026-09-12)
+
+Prompted by a sea that looked like crumpled foil on texvulcano and like a
+smeared mirror on the ice map. Every term was checked against upstream's own
+shaders and data, and **all of them match**:
+
+- `uNoise0.z` = 8/256 and `uNoise1.z` = 32/256, giving the 64- and 16-unit
+  repeats upstream's `noise_xform_*` produce.
+- The virtual-plane displacement is 12 units, which is
+  `const float virtualplane_height = 12.0` *inside upstream's own
+  water.vshader* - not a value this port chose. `texc.z -= 12` in upstream's
+  Z-up world is our `texc.y -= 12`, and its `N.z` is our `n.y`.
+- The refraction term is `upwelling * max(dot(L, N), 0) * min(1, s0 + 0.9)`,
+  upstream's water.fshader line for line, as is the Fresnel
+  `pow(clamp(dot(E,N),0,1) + 1, -8) * 0.8` and the 120-power specular.
+- `uUseReflection` is set from the reflection level and a live texture, and
+  the reflection pass clears colour and depth, draws the sky, and clips
+  submerged land (`drawLandPass(reflMvp, true)`).
+
+What the screenshots actually showed, once the debug modes were used:
+
+- **The ice map reflects correctly** - a mirrored ship and treeline are
+  plainly visible - so the pass and the lookup both work.
+- **texvulcano's dark sea is right.** Its whole mirrored scene is dark: sky
+  horizon (0.39, 0.32, 0.22), zenith (0.06, 0.08, 0.22). Upstream's own
+  screenshot of that landscape has a dark sea too. What reads as wrong there
+  is the 120-power specular sparkling on a near-black surface, which is the
+  only bright term left when the reflection is legitimately dark.
+- **The smearing close to the camera** is the virtual-plane displacement
+  doing what it does: a 12-unit world offset is a small screen shift at
+  distance and an enormous one a few metres away. Upstream's camera never
+  gets that low; this port's does, at sea level.
+
+Also settled: ambience and diffuse *are* read per landscape, not defaulted -
+ice (0.35, 0.39, 0.40), storm diffuse (0.20, 0.20, 0.20), vulcano diffuse
+(0.90, 0.90, 0.90).
+
+### The one deviation worth considering
+
+Fading the virtual-plane displacement towards zero as a fragment approaches
+the camera. The technique assumes a viewpoint well above the surface, which
+upstream's camera satisfies and this port's does not. It would be a
+*deliberate* deviation from upstream's constant, for a camera upstream does
+not have - the kind this port's rules allow, since the rendering is ours and
+only the gameplay is not. Not done: it needs a judgement about how close is
+close, and it should be judged on a screen rather than argued for here.
