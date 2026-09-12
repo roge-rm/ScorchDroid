@@ -350,3 +350,28 @@ the only place the two implementations still differ.
 **How to check a sky again:** point the camera *away* from the sun. If it goes
 dark there, the glow is behaving; if it stays pale in every direction, it is
 not. That test costs nothing and would have been the first thing to ask for.
+
+### Reopened the same day: it was not the glow either
+
+The away-from-the-sun test was run and the sky stayed pale, where the glow
+there is 0.025 and contributes nothing. So the conclusion above is wrong in
+its cause, and a fifth theory died.
+
+What the pairs actually have in common is that **none of them matched the
+camera**. The desktop shots look down at the island from thirty or forty
+degrees up, so their visible sky spans twenty to sixty degrees of elevation.
+The phone shots sit near sea level looking horizontally, so the whole visible
+sky is within about twenty-five degrees of the horizon - which is precisely
+where the 2000-unit fog term dominates, in either renderer, and where both
+should be pale. Earlier pairs also differed in landscape and in azimuth.
+
+So the position is: every term in the sky has been measured and each matches
+upstream, and no comparison yet taken can distinguish a real difference from
+a difference in where the camera was pointing. That is not the same as
+"faithful", and it is not the same as "broken".
+
+**What would actually settle it**, if it is worth the trouble: one pair on the
+same landscape with the camera at a matched height and pitch - or better,
+sample the pixel colour at a known elevation angle in both and compare the
+numbers rather than the impressions. Everything up to here has been an
+argument about photographs.
