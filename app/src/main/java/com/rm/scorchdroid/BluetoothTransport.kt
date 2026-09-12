@@ -253,6 +253,8 @@ object BluetoothTransport {
         // from the outside they are the same empty list.
         var inquiryStarted = false
         var devicesSeen = 0
+        // Whether the adapter ever admitted to scanning, polled below.
+        var sawDiscovering = false
 
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(ctx: Context, intent: Intent) {
@@ -300,13 +302,44 @@ object BluetoothTransport {
         }
         Log.i(TAG, "scanning for ${durationMs}ms, ${adapter.bondedDevices?.size ?: 0} device(s) already paired")
 
+        // Ask the adapter what it is doing, rather than only waiting to be
+        // told. A scan that the radio is genuinely running and a scan whose
+        // broadcasts are not reaching this app look identical from the
+        // receiver's side - and they are opposite problems, one in the
+        // framework's willingness to look and one in this file's own
+        // registration.
+        val discoveringPoll = object : Runnable {
+            var ticks = 0
+            override fun run() {
+                if (discoveryTimeout == null) return
+                val discovering = try {
+                    adapter.isDiscovering
+                } catch (e: SecurityException) {
+                    false
+                }
+                if (discovering) sawDiscovering = true
+                if (ticks < 4 || discovering) {
+                    Log.i(TAG, "adapter.isDiscovering = $discovering (${ticks}s in)")
+                }
+                ticks++
+                mainHandler.postDelayed(this, 1000L)
+            }
+        }
+        mainHandler.postDelayed(discoveringPoll, 1000L)
+
         discoveryTimeout = Runnable {
             discoveryTimeout = null
             // The whole point of the two counters: a scan the framework never
             // actually ran is a different problem from a scan that ran and
             // saw nobody, and only one of them is about the other phone.
-            if (!inquiryStarted) {
-                Log.e(TAG, "the scan never started - startDiscovery said yes and no inquiry began")
+            mainHandler.removeCallbacks(discoveringPoll)
+            if (!inquiryStarted && sawDiscovering) {
+                // The radio looked. We simply never heard it say so, which
+                // makes this a fault in how these broadcasts are registered
+                // for and nothing to do with the other phone.
+                Log.e(TAG, "the radio scanned but no broadcast reached us - receiver registration")
+            } else if (!inquiryStarted) {
+                Log.e(TAG, "the scan never started - startDiscovery said yes and the adapter never scanned")
             } else if (devicesSeen == 0) {
                 Log.w(TAG, "the scan ran and saw no unpaired device at all")
             }
