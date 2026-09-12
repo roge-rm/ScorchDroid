@@ -7938,12 +7938,23 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 		glBindFramebuffer(GL_FRAMEBUFFER, reflectionFbo);
 		glViewport(0, 0, rw, rh);
-		// Upstream's own clear colour for this buffer, from
-		// Landscape::drawWater: a near-black blue-green. It was the fog colour
-		// here, which is a pale haze on most landscapes - and since the
-		// mirrored view has nothing to draw below its own horizon, that pale
-		// clear showed through as a hard diagonal band of lighter sea wherever
-		// the reflection was sampled from that part of the buffer.
+		// Upstream's own clear colour for this buffer, verbatim from
+		// Landscape.cpp:374: a near-black blue-green.
+		//
+		// The reason recorded here for changing it was wrong, and is worth
+		// correcting because it cost several rounds of looking in the wrong
+		// place. It said the mirrored view has nothing to draw below its own
+		// horizon, so a pale clear showed through as a band of lighter sea.
+		// It has nothing of the sort: the sky is a fullscreen quad drawn
+		// first, with the depth test off, so it covers this buffer entirely
+		// and the clear is never seen at all.
+		//
+		// The band was the reflection being *sampled from outside* the
+		// buffer - the virtual-plane drop pushed the lookup off the bottom
+		// of it near the camera, and CLAMP_TO_EDGE then stretched an edge
+		// texel across the near sea. Those texels are sky, hence pale.
+		// Darkening the clear made that less obvious in some views without
+		// touching it; the lookup is fixed in the water vertex shader now.
 		glClearColor(0.0f, 1.0f / 16.0f, 1.0f / 8.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		// Mirroring turns every triangle inside out, so what was front-facing
