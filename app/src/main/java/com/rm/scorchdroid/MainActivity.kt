@@ -791,9 +791,10 @@ class MainActivity : AppCompatActivity() {
                     val change = item.activationChange
                     CoroutineScope(Dispatchers.Main).launch {
                         if (change != null) {
-                            withContext(Dispatchers.Default) {
+                            val used = withContext(Dispatchers.Default) {
                                 NativeBridge.useDefense(item.accessoryId, change)
                             }
+                            if (!used) notifyPlayer("Couldn't activate ${item.name}")
                         }
                         // Straight back to the list: upstream's dialog lets a
                         // player set a shield *and* parachutes before going
@@ -1023,6 +1024,20 @@ class MainActivity : AppCompatActivity() {
     /** A message from a menu screen, which has no HUD to put one on. */
     private fun showMenuMessage(text: String) {
         hudState.dialog = HudDialog.Message(text) { hudState.dialog = HudDialog.None }
+    }
+
+    /**
+     * A brief word to the player during a game, for an action that did not
+     * happen.
+     *
+     * A toast rather than [GameHudState.statusText], which is not a channel
+     * at all: the tick loop rewrites it from the engine's own status every
+     * hundred milliseconds, so anything put there mid-game is gone before it
+     * can be read. Chat send failures were reported that way and were
+     * therefore never once seen.
+     */
+    private fun notifyPlayer(text: String) {
+        Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
     }
 
     @Deprecated("Deprecated in Java")
@@ -1664,13 +1679,9 @@ class MainActivity : AppCompatActivity() {
             // against, and the tick loop needs it to tell "still waiting on
             // this move" from "granted a new one".
             val movedId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
-            val fired = withContext(Dispatchers.Default) {
-                val myTankId = NativeBridge.getMyTankId()
-                if (myTankId != 0) {
-                    NativeBridge.fireWeapon(myTankId, engineAngle, currentElevationDegrees, currentPowerFraction)
-                } else {
-                    false
-                }
+            val myTankId = withContext(Dispatchers.Default) { NativeBridge.getMyTankId() }
+            val fired = myTankId != 0 && withContext(Dispatchers.Default) {
+                NativeBridge.fireWeapon(myTankId, engineAngle, currentElevationDegrees, currentPowerFraction)
             }
             if (fired) {
                 lockedMoveId = movedId
@@ -1681,6 +1692,21 @@ class MainActivity : AppCompatActivity() {
                 // has committed too - the tick loop clears this once the
                 // server grants the next move.
                 hudState.shotLocked = true
+            } else {
+                // The most-pressed button in the game, and refusing was
+                // indistinguishable from the tap not registering. The engine
+                // answers only yes or no (see fireWeapon in engine_jni.cpp),
+                // so the reason is worked out from the same two things it
+                // checks: whether there is a tank of ours at all, and what
+                // the current accessory is.
+                val weapon = withContext(Dispatchers.Default) { NativeBridge.getCurrentWeaponName() }
+                notifyPlayer(
+                    when {
+                        myTankId == 0 -> "No tank yet - wait for the round to start"
+                        weapon.isEmpty() -> "No weapon selected - pick one from the shop"
+                        else -> "Can't fire $weapon right now"
+                    }
+                )
             }
         }
     }
@@ -1788,7 +1814,12 @@ class MainActivity : AppCompatActivity() {
         val angle = withContext(Dispatchers.Default) {
             NativeBridge.aimAtPoint(landscapeX, landscapeY)
         }
-        if (angle < 0f) return
+        if (angle < 0f) {
+            // Only happens when there is no tank of ours to turn, which from
+            // the player's side is a tap on the ground doing nothing.
+            notifyPlayer("No tank to aim yet")
+            return
+        }
 
         // aimAtPoint has already moved the real turret; this just keeps
         // the dial showing what the tank is actually doing.
@@ -1830,6 +1861,16 @@ class MainActivity : AppCompatActivity() {
             if (submitted && moveType == MoveType.SKIP) {
                 lockedMoveId = movedId
                 hudState.shotLocked = true
+            } else if (!submitted) {
+                // Skip, Resign and done-buying all arrive here, and all three
+                // were buttons that could do nothing without saying so.
+                notifyPlayer(
+                    when (moveType) {
+                        MoveType.SKIP -> "Couldn't skip - it may not be your move"
+                        MoveType.RESIGN -> "Couldn't resign right now"
+                        else -> "Couldn't finish buying - the phase may have ended"
+                    }
+                )
             }
         }
     }
@@ -1957,9 +1998,7 @@ class MainActivity : AppCompatActivity() {
     private fun sendChatAsync(channel: String, text: String) {
         CoroutineScope(Dispatchers.Main).launch {
             val sent = withContext(Dispatchers.Default) { NativeBridge.sendChat(channel, text) }
-            if (!sent) {
-                hudState.statusText = "Could not send that message"
-            }
+            if (!sent) notifyPlayer("Could not send that message")
         }
     }
 
@@ -2028,16 +2067,18 @@ class MainActivity : AppCompatActivity() {
                             when {
                                 // Tapping an owned weapon picks it to fire.
                                 weapon.isWeapon -> {
-                                    withContext(Dispatchers.Default) {
+                                    val picked = withContext(Dispatchers.Default) {
                                         NativeBridge.selectWeapon(weapon.accessoryId)
                                     }
+                                    if (!picked) notifyPlayer("Couldn't select ${weapon.name}")
                                     hudState.dialog = HudDialog.None
                                 }
                                 // A shield, parachute or battery goes up.
                                 change != null -> {
-                                    withContext(Dispatchers.Default) {
+                                    val used = withContext(Dispatchers.Default) {
                                         NativeBridge.useDefense(weapon.accessoryId, change)
                                     }
+                                    if (!used) notifyPlayer("Couldn't activate ${weapon.name}")
                                     hudState.dialog = HudDialog.None
                                 }
                                 // Owned, but neither fired nor raised - Auto
@@ -2130,9 +2171,12 @@ class MainActivity : AppCompatActivity() {
                 onSelect = { index ->
                     val weapon = owned[index]
                     CoroutineScope(Dispatchers.Main).launch {
-                        withContext(Dispatchers.Default) {
+                        val picked = withContext(Dispatchers.Default) {
                             NativeBridge.selectWeapon(weapon.accessoryId)
                         }
+                        // The weapon button keeps its old name when this
+                        // fails, which is easy to miss in the moment.
+                        if (!picked) notifyPlayer("Couldn't select ${weapon.name}")
                     }
                     hudState.dialog = HudDialog.None
                 },
@@ -2173,7 +2217,12 @@ class MainActivity : AppCompatActivity() {
                 val verb = if (item.type == AccessoryType.BATTERY) "use" else "activate"
                 entries += "$activeMarker${item.name} [${item.type}] x${item.ownedLabel} - $verb" to {
                     CoroutineScope(Dispatchers.Main).launch {
-                        withContext(Dispatchers.Default) { NativeBridge.useDefense(item.accessoryId, change) }
+                        // The dialog closes either way, so a refusal used to
+                        // look exactly like a shield going up.
+                        val used = withContext(Dispatchers.Default) {
+                            NativeBridge.useDefense(item.accessoryId, change)
+                        }
+                        if (!used) notifyPlayer("Couldn't $verb ${item.name}")
                     }
                     hudState.dialog = HudDialog.None
                 }
@@ -2181,7 +2230,10 @@ class MainActivity : AppCompatActivity() {
             if (activeShield.isNotEmpty()) {
                 entries += "Lower shield ($activeShield)" to {
                     CoroutineScope(Dispatchers.Main).launch {
-                        withContext(Dispatchers.Default) { NativeBridge.useDefense(0, DefenseChange.SHIELD_DOWN) }
+                        val used = withContext(Dispatchers.Default) {
+                            NativeBridge.useDefense(0, DefenseChange.SHIELD_DOWN)
+                        }
+                        if (!used) notifyPlayer("Couldn't lower the shield")
                     }
                     hudState.dialog = HudDialog.None
                 }
@@ -2189,7 +2241,10 @@ class MainActivity : AppCompatActivity() {
             if (activeParachute.isNotEmpty()) {
                 entries += "Disable parachutes ($activeParachute)" to {
                     CoroutineScope(Dispatchers.Main).launch {
-                        withContext(Dispatchers.Default) { NativeBridge.useDefense(0, DefenseChange.PARACHUTES_DOWN) }
+                        val used = withContext(Dispatchers.Default) {
+                            NativeBridge.useDefense(0, DefenseChange.PARACHUTES_DOWN)
+                        }
+                        if (!used) notifyPlayer("Couldn't disable parachutes")
                     }
                     hudState.dialog = HudDialog.None
                 }
@@ -2558,11 +2613,21 @@ class MainActivity : AppCompatActivity() {
     ) {
         hudState.dialog = HudDialog.ManualAddress(
             onConnect = { text ->
-                val parts = text.trim().split(":")
-                val host = parts.getOrNull(0)?.takeIf { it.isNotEmpty() }
-                val port = parts.getOrNull(1)?.toIntOrNull()
+                val typed = text.trim()
+                val host = typed.substringBefore(':').trim().takeIf { it.isNotEmpty() }
+                // The port is optional, and anything unusable in its place is
+                // treated as absent rather than as a reason to give up: an
+                // address with no port used to close the dialog and return to
+                // the menu having said nothing, which reads as the Connect
+                // button being broken. Every Scorched3D host listens on
+                // 27270 unless its config says otherwise, so that is the
+                // right guess - and the status line names the port it dialled,
+                // so a wrong guess explains itself.
+                val port = typed.substringAfter(':', "").trim().toIntOrNull()
+                    ?.takeIf { it in 1..65535 }
+                    ?: DEFAULT_SERVER_PORT
                 hudState.dialog = HudDialog.None
-                if (host != null && port != null) {
+                if (host != null) {
                     onSelected(LanDiscovery.FoundGame(name = host, host = host, port = port))
                 } else {
                     onCancelled()

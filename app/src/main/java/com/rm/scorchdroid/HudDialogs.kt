@@ -407,12 +407,22 @@ fun HudDialogHost(dialog: HudDialog) {
                 onDismissRequest = {},
                 title = { Text("Enter game address") },
                 text = {
-                    OutlinedTextField(
-                        value = text,
-                        onValueChange = { text = it },
-                        placeholder = { Text("192.168.1.42:47376") },
-                        singleLine = true,
-                    )
+                    Column {
+                        OutlinedTextField(
+                            value = text,
+                            onValueChange = { text = it },
+                            placeholder = { Text("192.168.1.42") },
+                            singleLine = true,
+                        )
+                        // The placeholder used to show a port, and a made-up
+                        // one at that, which made typing one look required.
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "The port is optional - without one this uses 27270, " +
+                                "which is what a Scorched3D host listens on.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                 },
                 confirmButton = { TextButton(onClick = { dialog.onConnect(text) }) { Text("Connect") } },
                 dismissButton = { TextButton(onClick = dialog.onCancel) { Text("Cancel") } },
