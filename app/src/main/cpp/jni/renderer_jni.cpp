@@ -2634,6 +2634,16 @@ namespace
 			LOGI("Sky: gradient loaded, sun towards (%.2f, %.2f, %.2f), glow %d",
 				 skyDescription.sunDirection[0], skyDescription.sunDirection[1],
 				 skyDescription.sunDirection[2], skyDescription.horizonGlow ? 1 : 0);
+			// The two numbers that decide how a landscape reads when its sun
+			// is below the horizon, which several of the shipped ones have.
+			// The water goes correctly black there - its diffuse term is
+			// max(dot(L, N), 0), upstream's own - so everything still lit is
+			// lit by ambience alone, and a bright ambience against a black
+			// sea is the mismatch to look for.
+			LOGI("Sky: ambience (%.2f, %.2f, %.2f), diffuse (%.2f, %.2f, %.2f), sun %s the horizon",
+				 skyDescription.ambience[0], skyDescription.ambience[1], skyDescription.ambience[2],
+				 skyDescription.diffuse[0], skyDescription.diffuse[1], skyDescription.diffuse[2],
+				 skyDescription.sunDirection[1] >= 0.0f ? "above" : "BELOW");
 			LOGI("Sky: horizon (%.2f, %.2f, %.2f), zenith (%.2f, %.2f, %.2f), fog density %.4f",
 				 skyDescription.gradient[0][0], skyDescription.gradient[0][1],
 				 skyDescription.gradient[0][2],
