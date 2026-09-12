@@ -304,3 +304,49 @@ order of cost - the first two need no PC:
    floating tank becomes much more likely to be the same root cause. `0`
    restores it. The property is polled once a second, so it works on a running
    game with no rebuild.
+
+
+## Closed: the pale sky, and how it was closed (2026-09-12)
+
+Several desktop/phone pairs looked wrong in the same way - the port's sky pale
+where upstream's was dark, and the sea pale with it. Every term turned out to
+be faithful, and the answer is that the pale ones were taken facing the sun.
+
+Worth recording because four plausible theories died on the way, each of which
+would have been a real bug: precision (the GPU has full highp), a wrong sun
+height (the sun direction is engine-space, and the height is the *third*
+component - misreading the second turns a dusk sun into one below the horizon),
+foam saturating the near sea (`peak foam 0.00`), and the fog colour being
+defaulted rather than read (the landscape genuinely asks for 0.8 grey).
+
+What settled it was `debug.scorchdroid.sky`, which shows one term of the sky
+instead of the sum, polled once a second so a landscape already on screen can
+be taken apart. On texvulcano, gradient (0.39, 0.32, 0.22) to (0.06, 0.08, 0.22),
+fog 0.8 grey at density 0.001, sun 0.26 above the horizon:
+
+- **Mode 8** (the gradient as uploaded) matched the log exactly - the sixteen
+  colours arrive intact.
+- **Mode 6** (the gradient row as a ramp) was a clean horizon-to-zenith ramp,
+  so the height-to-colour mapping is right.
+- **Mode 7** (the ray as colour) varied smoothly, `d.y` from 0.44 at the top of
+  the frame to 0.1 at the bottom - about twenty degrees of elevation, as the
+  field of view says it should be.
+- **Mode 2** (the glow alone) was near-uniform at about 0.46. Which is
+  *correct*: normalising the rays mode 7 gave and dotting them with the sun
+  yields 0.93 top-left and 0.76 top-right, so the glow is 0.48 and 0.44 - a ten
+  per cent spread, invisible to the eye.
+
+So the sky is `(dark olive-navy) + 0.46 everywhere + fog toward 0.8 grey`,
+which is pale, and upstream's `Hemisphere.cpp` computes the same `(dot + 1) / 4`
+lift from the same normalised sun direction. Its screenshots show the same pale
+halo around the moon; the moon is simply not centred in them.
+
+The one structural difference left, if this is ever revisited: upstream applies
+the glow **per vertex** of a coarse 10x10 hemisphere and interpolates, where
+this port applies it **per fragment**. That changes how the lift is spread
+across a triangle, not its peak, so it is not a candidate for this - but it is
+the only place the two implementations still differ.
+
+**How to check a sky again:** point the camera *away* from the sun. If it goes
+dark there, the glow is behaving; if it stays pale in every direction, it is
+not. That test costs nothing and would have been the first thing to ask for.
