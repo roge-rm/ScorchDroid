@@ -1660,6 +1660,9 @@ namespace
 		uniform sampler2D uWaveTex;
 		uniform sampler2D uWaveNormalTex;
 		uniform float uWaveTileLength;
+		// Shared with the fragment stage, which declares the same name: the
+		// virtual plane below needs to know how far away this vertex is.
+		uniform vec3 uEyePos;
 
 		void main() {
 			vWorld = aPosition.xz;
@@ -1704,8 +1707,21 @@ namespace
 			// units on a plane 12 above the surface, which is why the
 			// distortion follows the wave rather than sliding across the
 			// screen the way a texture-space nudge does.
-			vec3 texc = world + n * (12.0 * n.y);
-			texc.y -= 12.0;
+			//
+			// The 12 is faded out close to the camera, which upstream does
+			// not do, because upstream never has to: its camera stays well
+			// above the sea and this port's drops to sea level. Twelve units
+			// down is a couple of pixels at three hundred units and most of
+			// the screen at three, so near the camera the lookup left the
+			// buffer entirely - and with CLAMP_TO_EDGE that is a stretched
+			// border pixel, which is the smearing the near sea showed, and
+			// on a dark landscape a black one, which is how the reflection
+			// looked absent altogether. Below twenty units there is no
+			// displacement at all, which is a plain planar reflection and
+			// exactly right; the full amount is back by two hundred.
+			float planeHeight = 12.0 * clamp((length(uEyePos - world) - 20.0) / 180.0, 0.0, 1.0);
+			vec3 texc = world + n * (planeHeight * n.y);
+			texc.y -= planeHeight;
 			vReflectCoord = uReflectMatrix * vec4(texc, 1.0);
 			vShadowCoord = uShadowMatrix * vec4(world, 1.0);
 
