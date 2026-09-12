@@ -370,7 +370,14 @@ fun GameHud(
                     .padding(16.dp),
             ) {
                 if (state.statusText.isNotEmpty()) HudText(state.statusText)
-                if (state.hostingLabel.isNotEmpty()) HudText(state.hostingLabel)
+                // Capped at one line, and not only because the current
+                // messages fit: this line is built from an address, a
+                // transport and sometimes a reason, and it has already been
+                // five wrapped lines across the battlefield once. The cap
+                // makes that impossible rather than unlikely.
+                if (state.hostingLabel.isNotEmpty()) {
+                    HudText(state.hostingLabel, maxLines = 1)
+                }
                 if (state.windLabel.isNotEmpty()) HudText(state.windLabel)
                 if (state.speedLabel.isNotEmpty()) HudText(state.speedLabel)
                 // Upstream shows "Click ground to activate {0}" as a banner the
@@ -470,6 +477,46 @@ fun GameHud(
                 .alpha(state.controlOpacity)
                 .padding(bottom = 10.dp),
         ) {
+            // Angle - horizontal, and part of this strip rather than a
+            // separate thing positioned to clear it. It used to sit in the
+            // enclosing Box with a hardcoded bottom offset that had to track
+            // this strip's height by hand: nothing enforced that, it was
+            // wrong twice in one afternoon as the fire bar changed height,
+            // and being outside the strip it was also the one control that
+            // never faded with the opacity setting. As a child it inherits
+            // both, and the gap below is a single number that means what it
+            // says.
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                FadingReadout("${state.angleDegrees.toInt()}°", state.angleDegrees)
+                // Nudge buttons flank the slider. 220dp of track covering 360
+                // degrees is about 1.6 degrees per dp, so a single degree is
+                // less than a pixel of travel - unhittable by dragging, however
+                // steady your thumb. These give exact single-degree steps for
+                // the final adjustment while the slider still does the coarse
+                // sweep.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    NudgeButton("−") { onAngleChange(wrapDegrees(state.angleDegrees - it)) }
+                    AxisSlider(
+                        value = state.angleDegrees,
+                        valueRange = 0f..360f,
+                        orientation = SliderOrientation.Horizontal,
+                        onValueChange = onAngleChange,
+                        modifier = Modifier.size(width = 220.dp, height = 40.dp),
+                        // A compass has no ends: dragging off either side keeps
+                        // turning the turret and the value wraps, so the whole
+                        // 360 is reachable in one continuous swipe instead of
+                        // having to lift off and restart from the far side.
+                        wrapAround = true,
+                        onDragActive = { active -> onAimGesture(AimAxis.ANGLE, active) },
+                    )
+                    NudgeButton("+") { onAngleChange(wrapDegrees(state.angleDegrees + it)) }
+                }
+            }
+
+            // The gap between the aim slider and the button below it. One
+            // number, next to the things it separates.
+            Spacer(Modifier.height(20.dp))
+
             // Row 1 is one button that both picks the weapon and fires it:
             // a tap queues the shot, a hold opens the weapon list.
             //
@@ -606,51 +653,6 @@ fun GameHud(
             NudgeButton("−") { onPowerChange((state.powerFraction - it / 100f).coerceIn(0f, 1f)) }
         }
 
-        // Angle - horizontal, sitting just above the two-row control strip
-        // below it (hence the larger bottom offset than the other sliders).
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            // Measured from the same baseline as the strip it has to clear,
-            // which is the navigation bar and not the screen edge. Without
-            // that inset this offset was relative to the screen while the
-            // strip was relative to the bar, so on a device with three-button
-            // navigation - 48dp of it - the strip sat that much higher and
-            // the slider landed on top of the fire button. Gesture
-            // navigation insets almost nothing, which is why the phones this
-            // is usually tested on never showed it.
-            //
-            // 130 is the two rows plus their padding. It still has to track
-            // the strip's height by hand, and nothing enforces that.
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(bottom = 130.dp),
-        ) {
-            FadingReadout("${state.angleDegrees.toInt()}°", state.angleDegrees)
-            // Nudge buttons flank the slider. 220dp of track covering 360
-            // degrees is about 1.6 degrees per dp, so a single degree is
-            // less than a pixel of travel - unhittable by dragging, however
-            // steady your thumb. These give exact single-degree steps for
-            // the final adjustment while the slider still does the coarse
-            // sweep.
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                NudgeButton("−") { onAngleChange(wrapDegrees(state.angleDegrees - it)) }
-                AxisSlider(
-                    value = state.angleDegrees,
-                    valueRange = 0f..360f,
-                    orientation = SliderOrientation.Horizontal,
-                    onValueChange = onAngleChange,
-                    modifier = Modifier.size(width = 220.dp, height = 40.dp),
-                    // A compass has no ends: dragging off either side keeps
-                    // turning the turret and the value wraps, so the whole 360
-                    // is reachable in one continuous swipe instead of having to
-                    // lift off and restart from the far side of the track.
-                    wrapAround = true,
-                    onDragActive = { active -> onAimGesture(AimAxis.ANGLE, active) },
-                )
-                NudgeButton("+") { onAngleChange(wrapDegrees(state.angleDegrees + it)) }
-            }
-        }
 
         // Name plates and health bars, positioned from the renderer's own
         // projection. Drawn before the dialog host so a modal covers them.
@@ -928,8 +930,19 @@ private fun AxisSlider(
 }
 
 @Composable
-private fun HudText(text: String, modifier: Modifier = Modifier) {
-    Text(text, color = Color.White, style = MaterialTheme.typography.bodyMedium, modifier = modifier)
+private fun HudText(
+    text: String,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE,
+) {
+    Text(
+        text,
+        color = Color.White,
+        style = MaterialTheme.typography.bodyMedium,
+        maxLines = maxLines,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier,
+    )
 }
 
 /**

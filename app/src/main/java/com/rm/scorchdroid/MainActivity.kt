@@ -1021,6 +1021,17 @@ class MainActivity : AppCompatActivity() {
         openSetup("Host over Bluetooth", overBluetooth = true)
     }
 
+    /**
+     * The address to put on the HUD's one line: the port is left off when it
+     * is the default, because a joiner typing a bare address now gets 27270
+     * anyway (see promptManualAddress). That is what buys the line enough
+     * room for a long local address without clipping - "Host
+     * 192.168.232.2:27270" is thirty characters and the column has about
+     * twenty-two, sharing its row with four icon buttons.
+     */
+    private fun shownAddress(ip: String, port: Int): String =
+        if (port == DEFAULT_SERVER_PORT) ip else "$ip:$port"
+
     /** A message from a menu screen, which has no HUD to put one on. */
     private fun showMenuMessage(text: String) {
         hudState.dialog = HudDialog.Message(text) { hudState.dialog = HudDialog.None }
@@ -2300,28 +2311,50 @@ class MainActivity : AppCompatActivity() {
                 // the first is how a host can look fine to its own player
                 // and be invisible to everyone else.
                 val name = BluetoothTransport.localName(applicationContext)
+                val visible = BluetoothTransport.isDiscoverable(applicationContext)
                 hudState.hostingLabel = when {
-                    !hosting -> "Solo only - Bluetooth hosting did not start"
-                    BluetoothTransport.isDiscoverable(applicationContext) ->
-                        "Hosting over Bluetooth as $name - new devices can find it for 5 minutes"
-                    else ->
-                        "Hosting over Bluetooth as $name - NOT visible, only paired devices can join"
+                    !hosting -> "Bluetooth hosting failed"
+                    visible -> "Bluetooth: $name"
+                    else -> "Bluetooth: $name (not visible)"
+                }
+                // The detail that used to ride along on that line. It is
+                // worth saying once and not worth a permanent line of HUD:
+                // the five minutes is Android's own cap and is already
+                // running, and a host that is not findable at all is
+                // something the player has to be told rather than left to
+                // infer from nobody arriving.
+                if (hosting) {
+                    notifyPlayer(
+                        if (visible) {
+                            "New devices can find this game for 5 minutes"
+                        } else {
+                            "Not visible - only devices already paired with this phone can join"
+                        }
+                    )
                 }
                 return@launch
             }
 
             if (!hosting) {
-                hudState.hostingLabel = "Solo only - could not open port $port for LAN play"
+                hudState.hostingLabel = "Solo only (port $port busy)"
                 return@launch
             }
 
             // No address at all means no network is up, which "Hosting on
             // unknown IP" managed to say without saying what to do about it.
+            // "Host" and the address, and nothing else. The status column
+            // shares its row with four icon buttons, so it has about
+            // twenty-five characters: "Hosting on 192.168.232.2:27270" is
+            // thirty and came out as "Hosting on 192.168.23...", which cut
+            // the one thing on the line worth reading out to someone.
+            //
+            // If a long address still clips, what goes is the port - and the
+            // port is now the part a joiner can leave out, since typing a
+            // bare address uses 27270.
             val ip = getLocalIpAddress()
-            hudState.hostingLabel = if (ip != null) {
-                "Hosting on $ip:$port"
-            } else {
-                "No network - turn on Wi-Fi or your hotspot for others to join"
+            hudState.hostingLabel = if (ip != null) "Host ${shownAddress(ip, port)}" else "No network"
+            if (ip == null) {
+                notifyPlayer("No network - turn on Wi-Fi or your hotspot for others to join")
             }
             LanDiscovery.registerService(applicationContext, port)
 
@@ -2332,17 +2365,30 @@ class MainActivity : AppCompatActivity() {
             // once the group has actually formed - announcing a way to be
             // reached that isn't up is worse than not offering it.
             WifiDirectTransport.advertise(applicationContext, port) { advertising, why ->
-                // Worth saying either way. A host that believes it is
-                // reachable over Wi-Fi Direct when no group formed waits for
-                // peers that can never arrive, and the first two-device test
-                // of this could not tell the two apart from the screen.
+                // One line, and the reason goes to a toast instead.
+                //
+                // A host that believes it is reachable over Wi-Fi Direct when
+                // no group formed waits for peers that can never arrive, so
+                // the reason still has to be said - the first two-device test
+                // of this could not tell the two apart from the screen. But it
+                // was five wrapped lines of HUD sitting over the battlefield
+                // for the whole game, which is too high a price for something
+                // a player reads once.
                 hudState.hostingLabel = when {
-                    advertising && ip != null -> "Hosting on $ip:$port + Wi-Fi Direct"
-                    advertising -> "Hosting over Wi-Fi Direct"
-                    why != null && ip != null -> "Hosting on $ip:$port - no Wi-Fi Direct: $why"
-                    why != null -> "No network, and no Wi-Fi Direct: $why"
+                    ip != null -> "Host ${shownAddress(ip, port)}"
+                    advertising -> "Host over Wi-Fi Direct"
                     else -> hudState.hostingLabel
                 }
+                // Whether Wi-Fi Direct came up is said once rather than
+                // carried on the line for the whole game - the line has
+                // room for the address and that is what it is for.
+                notifyPlayer(
+                    if (advertising) {
+                        "Wi-Fi Direct is on - phones nearby can find this game"
+                    } else {
+                        "No Wi-Fi Direct: ${why ?: "it did not start"}"
+                    }
+                )
             }
         }
     }
