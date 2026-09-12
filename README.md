@@ -31,8 +31,9 @@ Cheers, enjoy! roge-rm
   way it mixes them — eight channels handed to the nearest and most important sounds, the rest
   dropped, everything falling away with distance — plus the turn countdown, the servo as the turret
   swings, and its three music loops keyed to the state of the game by its own `music.xml`.
-- Touch controls: drag to orbit, pinch to zoom, tap to aim, plus angle/elevation/power sliders and
-  a Fire button that don't depend on screen-to-world mapping.
+- Touch controls: drag to orbit, pinch to zoom, tap to aim, plus angle/elevation/power sliders that
+  don't depend on screen-to-world mapping. One bar fires and picks the weapon — a tap sends the shot,
+  a hold opens the weapon list — and it turns red once the shot is in.
 - Seven camera views including a shot camera that follows the projectile.
 - Multiplayer — host or join over Wi-Fi, a hotspot, Wi-Fi Direct or Bluetooth,
   with automatic game discovery. Wi-Fi Direct needs no router, hotspot or
