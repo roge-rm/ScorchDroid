@@ -10,7 +10,9 @@ It is in a playable state now with most of the graphics and gameplay implemented
 
 Cheers, enjoy! roge-rm
 
-<img src="docs/shot-menu.png" alt="The ScorchDroid main menu: the title over Single Player, Multiplayer, Settings and About" width="180" /> <img src="docs/shot-setup.png" alt="The New Game setup screen on its Players tab: Start and Reset to defaults under the header, tabs for Game, Players, Arms and World, sliders for the player count and teams, and a row of chips naming the bots the mod offers with Scorched3D's own description of the one selected" width="180" /> <img src="docs/shot-settings.png" alt="The Settings screen on its Player tab: name, tank model, a grid of tank colours and a grid of avatars, with tabs for Player, Audio, Display and Controls" width="180" /> <img src="docs/shot-gameplay.png" alt="ScorchDroid mid-round: a pine-covered island seen from above and behind the player's tank, the sea beyond the shoreline, with the angle and elevation sliders either side and the weapon and Fire buttons below" width="180" /> <img src="docs/shot-scores.png" alt="The score table for round 1 of 5, turn 1 of 15, listing the player and two bots with their avatars, tank colours, score, kills, wins and money, with the chat history below" width="180" />
+<img src="docs/shot-menu.png" alt="The ScorchDroid main menu: the title over Single Player, Multiplayer, Settings and About" width="180" /> <img src="docs/shot-setup.png" alt="The New Game setup screen on its Players tab: tabs for Game, Players, Arms and World, sliders for teams and team balance, and a row of chips naming the bots the mod offers with Scorched3D's own description of the one selected" width="180" /> <img src="docs/shot-settings.png" alt="The Settings screen on its Player tab: name, tank model, a grid of tank colours and a grid of avatars, with tabs for Player, Audio, Display and Controls" width="180" />
+
+<img src="docs/shot-gameplay-1.png" alt="Mid-round on a green island: the player's tank on a clifftop above a sea inlet with an opponent on the ridge opposite, the elevation and power sliders at either edge, the turn slider below them, and the wide bar naming the loaded weapon" width="180" /> <img src="docs/shot-gameplay-2.png" alt="The same game a round later at dusk: an orange sky over a dark sea dotted with ships, the player's tank on a bare headland below a stand of pines, an opponent along the ridge" width="180" /> <img src="docs/shot-gameplay-3.png" alt="A volcanic landscape: red and yellow glowing rock falling away to surf and a near-black sea under a deep red sky, the player's tank on the slope" width="180" />
 
 ## Features
 
@@ -38,7 +40,9 @@ Cheers, enjoy! roge-rm
 - Multiplayer — host or join over Wi-Fi, a hotspot, Wi-Fi Direct or Bluetooth,
   with automatic game discovery. Wi-Fi Direct needs no router, hotspot or
   internet at all, and Bluetooth needs no Wi-Fi either: two phones side by
-  side can play with every other radio switched off.
+  side can play with every other radio switched off. A single-player game
+  announces nothing: it registers no service and forms no Wi-Fi Direct group,
+  even though the engine still runs a server for it.
 - It can also join a **desktop Scorched3D server** and play alongside PC
   clients — enter the server's address under Join Game. This was never a goal
   and is not something the port does anything to achieve: it compiles
