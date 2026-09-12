@@ -39,10 +39,15 @@ import androidx.compose.ui.unit.dp
  * reusable and is reused; the words are not.
  *
  * The steps below deliberately teach only what a player cannot discover by
- * pressing things: which slider is which, that wind moves the shot, and that
- * targets are what the practice landscape is full of. Everything else - the
- * shop, the camera, the menus - is left to be found, because a tutorial that
- * explains the whole interface is one people skip.
+ * pressing things: which slider is which, that holding the fire bar picks the
+ * weapon, that wind moves the shot, and that targets are what the practice
+ * landscape is full of. Everything else - the shop, the camera, the menus -
+ * is left to be found, because a tutorial that explains the whole interface
+ * is one people skip.
+ *
+ * The hold is the clearest case for any of this existing: a long press
+ * announces itself to nobody, and it is the only way to change weapon
+ * without going through the shop.
  */
 data class TutorialStep(
     val text: String,
@@ -60,14 +65,29 @@ val TUTORIAL_STEPS: List<TutorialStep> = listOf(
             "swing the camera around it, and pinch to zoom."
     ),
     TutorialStep(
-        "The slider on the left aims the barrel up and down. The one on the right sets " +
-            "how hard you fire. Both show their value while you drag."
+        // Named by what they show rather than which edge they are on:
+        // left-hand mode swaps the two, and a tutorial that says "left" to a
+        // player who has swapped them is worse than saying nothing.
+        "A slider sits at each edge. The one reading degrees aims the barrel up and " +
+            "down; the one reading a percentage sets how hard you fire. Both show their " +
+            "value while you drag."
     ),
     TutorialStep(
-        "The bar along the bottom turns the tank to face left and right.\n\n" +
-            "Set an angle you like and press FIRE.",
+        // "The bar along the bottom" used to be unambiguous. There are two
+        // down there now, so each is named by what it does.
+        "The slider just above the buttons turns the tank to face left and right.\n\n" +
+            "Set an angle you like, then tap the wide bar below it to fire.",
         // The shot itself is the lesson; no need to make them tap Got it too.
         advanceWhen = { it.shotLocked },
+    ),
+    TutorialStep(
+        // The one genuinely hidden control in the game, and therefore the one
+        // this tutorial most has to exist for - a long press announces itself
+        // to nobody. Taught after the first shot rather than before it, so it
+        // is read while watching that shot land.
+        "That bar always names the weapon it will send. Hold it to pick a different " +
+            "one.\n\nIt turns red while your shot is queued, and goes back to normal when " +
+            "the round plays out."
     ),
     TutorialStep(
         // Deliberately says this practice game has *no* wind. Upstream's
