@@ -341,8 +341,34 @@ is two separate faults, both now fixed:
   out of the other player's time. It is now asked at the moment the game
   starts, and the hosting label says the window exists.
 
-**Still to do:** re-test unpaired, and on a handset pair that is not these
-two - accept/connect/pairing is exactly the kind of path that works
+### Unpaired discovery, 2026-09-11: the broadcasts were being dropped
+
+Unpaired never worked, in either direction, and the cause was in this code.
+`startDiscovery()` returned true, the adapter reported `isDiscovering` for a
+full twelve-second inquiry, the host reported itself discoverable - and not
+one `ACTION_FOUND` arrived. The receiver was registered `RECEIVER_NOT_EXPORTED`.
+
+Since Android 12 the Bluetooth stack is an APEX module with **its own UID**,
+so its broadcasts come from a different app; Wi-Fi P2P's come from the system
+server, which is why the identical flag works there and drops everything here.
+Exporting this one costs nothing: all three actions are *protected* broadcasts
+that the platform will not let any app but the system send.
+
+Getting there took three rounds of instrumentation, and the shape of it is
+worth keeping. Each round answered one either/or:
+
+1. Does the host advertise and the joiner scan at all? (Both, yes - the host's
+   label now asks the adapter whether it is *discoverable* rather than
+   claiming it, since connectable and discoverable are different states.)
+2. Did an inquiry begin? (No broadcast said so.)
+3. Was the radio scanning anyway? (`adapter.isDiscovering` - yes, which moved
+   the fault from the framework to this file in one step.)
+
+A silent failure needs to be made to name itself before it can be fixed, and
+none of these three questions could be answered from the outside.
+
+**Still to do:** re-test unpaired on the fix, and on a handset pair that is
+not these two - accept/connect/pairing is exactly the kind of path that works
 differently on every device.
 
 ## Phase 4 — Wi-Fi Aware, investigated and shelved
