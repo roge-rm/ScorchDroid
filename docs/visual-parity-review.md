@@ -276,10 +276,20 @@ Ruled out:
   two blues, and the ocean tile uploaded with sane peaks (height 3.67,
   displacement 6.25, foam 0.96).
 
-Found while looking, fixed, and **not** the cause of this: the inner water
-grid read `textureLod` level 1 or 2 of the height tile at Water detail Low or
-Medium, and that tile has no mip chain - undefined, and it feeds vertex
-positions. The device was at detail 2 (level 0) when it banded.
+Found while looking, and fixed: the inner water grid read `textureLod` level 1
+or 2 of the height tile at Water detail Low or Medium, and that tile has no mip
+chain - undefined, and it feeds vertex *positions*. Garbage there does not tint
+the sea, it throws the surface's vertices apart, which would show as stretched
+regions of flat colour.
+
+**Not seen since that fix** (reported 2026-09-12), which makes this the leading
+explanation without being proof: it only fires at Water detail Low or Medium,
+and the one log captured from the device says detail 2, where the level is
+already 0 - but that log came from a different session than the screenshot, so
+what the detail was set to when it banded is not known.
+
+If it never returns, this is why. If it returns at detail 2, it was never
+this, and the three tests below still stand.
 
 If it returns, the three tests that separate the remaining possibilities, in
 order of cost - the first two need no PC:
