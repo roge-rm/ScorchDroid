@@ -39,6 +39,9 @@
 #include <net/NetServerTCP3.hpp>
 #include <net/NetMessage.hpp>
 #include <NetBridge.hpp>
+#include <common/DefinesScorched.hpp>
+#include <engine/ModFiles.hpp>
+#include <engine/ModFileEntry.hpp>
 #include <server/ServerState.hpp>
 #include <server/ServerFileServer.hpp>
 #include <server/ServerChannelManager.hpp>
@@ -144,6 +147,15 @@ static int netSoakSeconds()
 namespace
 {
 	int failures = 0;
+
+	// What the shipped global mod is expected to be, for
+	// testDesktopCompatibility. Deliberately literal: these are the numbers
+	// as of Scorched3D 44.3 with this port's patches, and a submodule bump
+	// or a patch that touches data/ is meant to fail against them. Updating
+	// them is a decision - it says cross-play with stock desktop clients has
+	// changed - not a chore.
+	const unsigned int       kDesktopModFileCount = 1129;
+	const unsigned long long kDesktopModDigest    = 0x7dda79dd0d8e09c1ULL;
 
 	// Answers the condition back, so a test whose next step is meaningless
 	// without it can say `if (!check(...)) return;` rather than checking the
@@ -2224,6 +2236,72 @@ namespace
 		}
 
 		return (waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	}
+
+	// Cross-play with a desktop Scorched3D was never a goal of this port,
+	// and nothing here does anything to bring it about - see the README. It
+	// works, and it works for exactly two reasons, both of which live in the
+	// submodule where a bump can end them silently and with no other
+	// symptom: the handshake announces upstream's own version strings
+	// because it compiles upstream's own header, and the mod manifest the
+	// server checks a joining client against matches because the shipped
+	// data is upstream's own, unpatched.
+	//
+	// So this is a tripwire, not a claim that cross-play is supported. It
+	// cannot prove a desktop client will connect - only a desktop client can
+	// do that - but it will fail the moment either foundation moves, which
+	// is the part that would otherwise be discovered by a player.
+	void testDesktopCompatibility()
+	{
+		printf("desktop compatibility (undesigned - this only says when it ends):\n");
+
+		// A desktop server compares the protocol string exactly and rejects
+		// anything else, so a change here is the end of cross-play with every
+		// stock client until they move too. The version is the softer of the
+		// two and is checked for the same reason: to be told.
+		check(S3D::ScorchedProtocolVersion == "ew",
+			"protocol version is still \"ew\", which is what desktop 44 speaks");
+		check(S3D::ScorchedVersion == "44.3",
+			"game version is still 44.3");
+
+		// The manifest a joining client sends (ComsHaveModFilesMessage): every
+		// file of the global mod by name, length and CRC. A desktop server
+		// compares it against its own and sends whatever differs, so drift
+		// here does not fail a join outright - it quietly turns a 46KB
+		// handshake into a file transfer, which is worth knowing before a
+		// player finds it.
+		S3D::setDataFileMod("none");
+		ModFiles modFiles;
+		bool loaded = modFiles.loadModFiles("none", false, nullptr);
+		check(loaded, "the global mod's files enumerate");
+		if (!loaded) return;
+
+		// Ordered by name (std::map), so this is stable across machines and
+		// runs; it is a change detector, and nothing about the value is
+		// meaningful beyond "the same files, with the same contents".
+		unsigned int count = 0;
+		unsigned long long digest = 1469598103934665603ULL;   // FNV-1a 64
+		auto mix = [&digest](unsigned long long value) {
+			for (int byte = 0; byte < 8; byte++) {
+				digest ^= (value >> (byte * 8)) & 0xff;
+				digest *= 1099511628211ULL;
+			}
+		};
+		std::map<std::string, ModFileEntry *> &files = modFiles.getFiles();
+		for (std::map<std::string, ModFileEntry *>::iterator itor = files.begin();
+			 itor != files.end(); ++itor)
+		{
+			count++;
+			for (size_t i = 0; i < itor->first.size(); i++) mix((unsigned char) itor->first[i]);
+			mix(itor->second->getUncompressedSize());
+			mix(itor->second->getUncompressedCrc());
+		}
+
+		fprintf(stderr, "  (mod manifest: %u files, digest %016llx)\n", count, digest);
+		check(count == kDesktopModFileCount,
+			"the global mod still has the file count a desktop server expects");
+		check(digest == kDesktopModDigest,
+			"...and every one of them is byte-identical to upstream's");
 	}
 
 	// M5 client-join, Phase 1: the real thing, not just the socket layer -
@@ -4449,6 +4527,7 @@ int main(int argc, char **argv)
 	testNetBridge();
 	testClientJoin();
 	testBridgeClientJoin();
+	testDesktopCompatibility();
 	// After the landscape exists: WeaponRoller::fireWeapon samples the
 	// ground height, and an empty height map is a segfault, not a zero.
 	testRollersAreCollected();
