@@ -45,7 +45,9 @@ Cheers, enjoy! roge-rm
   upstream's own protocol code and version constants unchanged, and ships
   upstream's own data, so the handshake and the mod checksums simply match.
   It holds only while the two sides agree on Scorched3D's version and protocol
-  (44.3 / "ew" here), and nothing tests it.
+  (44.3 / "ew" here) and on the contents of the shipped data, so `host_tests`
+  pins both — it cannot prove a desktop client will connect, only fail the
+  moment either foundation moves.
 - In-game chat and a live score table, with each player's avatar, their tank colour and — in a team
   game — the team totals. The game's own announcements — who killed whom with what, who joined —
   arrive in the same place.
@@ -97,15 +99,17 @@ Game logic is verified on the host, not the emulator:
 cd host-tests/build && cmake .. && make && ./host_tests
 ```
 
-That target builds the same `src/common` + `src/server` sources natively and runs over 200 checks
-against the real engine — including a full two-process client/host join over real TCP sockets. It
-runs in seconds, which is why it, rather than an emulator, is where behaviour is pinned down.
+That target builds the same `src/common` + `src/server` sources natively and runs over 400 checks
+against the real engine — including the full two-process client/host join, run twice: once over real
+TCP sockets, and once over a Unix socket pair through the same transport bridge Bluetooth play uses,
+with no TCP anywhere. It runs in seconds, which is why it, rather than an emulator, is where
+behaviour is pinned down.
 
 ## Architecture
 
 - `third_party/scorched3d/` — upstream, as a submodule pinned to an exact commit. **Never edited
   directly.**
-- `patches/scorched3d/` — the eighteen patches applied to that checkout on every build, and the
+- `patches/scorched3d/` — the twenty-three patches applied to that checkout on every build, and the
   tracked record of every change made to upstream. Most are *hooks*: upstream guards its
   presentation work behind `#ifndef S3D_SERVER`, and this build is one that *is* `S3D_SERVER` but
   still has a renderer and a speaker, so each patch adds the smallest possible `#else` beside an
