@@ -313,6 +313,12 @@ private fun BotRow(bots: List<BotOption>, selected: List<String>, onChange: (Lis
  *
  * Nothing selected is upstream's own "all of them", not "none" - there is no
  * way to say a game has no landscapes to play on, so All is the empty list.
+ *
+ * Which makes the button a toggle with an asymmetry worth knowing about: its
+ * off position clears the ticks so a few maps can be picked without untapping
+ * every other one, but it cannot mean "play on nothing". Until a map is
+ * picked, the game still uses them all - and the caption says so rather than
+ * leaving an empty-looking screen to imply otherwise.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -321,6 +327,12 @@ private fun LandscapeRow(
     selected: List<String>,
     onChange: (List<String>) -> Unit,
 ) {
+    // Lives here and nowhere else: the engine has no "no landscapes" to
+    // store, so this is the difference between "every map, deliberately" and
+    // "nothing ticked yet", which look the same to it and not to a player.
+    var cleared by remember { mutableStateOf(false) }
+    val everythingOn = !cleared && (selected.isEmpty() || selected.size == landscapes.size)
+
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -328,15 +340,25 @@ private fun LandscapeRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Maps", color = Color.White, style = MaterialTheme.typography.titleSmall)
-            TextButton(onClick = { onChange(emptyList()) }) {
-                Text("All", color = SetupAccent, style = MaterialTheme.typography.bodySmall)
+            // Labelled with what pressing it does, not with what it is: the
+            // whole point of the off position is picking a couple of maps
+            // without untapping the twenty you don't want.
+            TextButton(onClick = {
+                cleared = everythingOn
+                onChange(emptyList())
+            }) {
+                Text(
+                    if (everythingOn) "None" else "All",
+                    color = SetupAccent,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
         Text(
-            text = if (selected.isEmpty()) {
-                "Every landscape this mod defines"
-            } else {
-                "${selected.size} of ${landscapes.size} landscapes"
+            text = when {
+                cleared -> "None picked - every landscape until you choose one"
+                selected.isEmpty() -> "Every landscape this mod defines"
+                else -> "${selected.size} of ${landscapes.size} landscapes"
             },
             color = Color.White.copy(alpha = 0.55f),
             style = MaterialTheme.typography.bodySmall,
@@ -346,19 +368,24 @@ private fun LandscapeRow(
             landscapes.forEach { name ->
                 // With nothing chosen every map is in play, so every chip
                 // reads as on - which is what the game will actually do.
-                val isOn = selected.isEmpty() || name in selected
+                // Unless None was pressed, when nothing reads as on because
+                // nothing has been picked yet.
+                val isOn = !cleared && (selected.isEmpty() || name in selected)
                 FilterChip(
                     selected = isOn,
                     onClick = {
-                        val current = if (selected.isEmpty()) landscapes else selected
+                        val current = when {
+                            cleared -> emptyList()
+                            selected.isEmpty() -> landscapes
+                            else -> selected
+                        }
                         val next = if (name in current) current - name else current + name
-                        // Turning the last one off would leave a game with
-                        // nowhere to play; read it as "back to all".
-                        onChange(if (next.isEmpty() || next.size == landscapes.size) {
-                            emptyList()
-                        } else {
-                            next
-                        })
+                        // Unticking the last one lands back in "nothing
+                        // picked" rather than silently flipping to all, which
+                        // was the old behaviour and read as the tap having
+                        // ticked everything.
+                        cleared = next.isEmpty()
+                        onChange(if (next.size == landscapes.size) emptyList() else next)
                     },
                     label = { Text(name, style = MaterialTheme.typography.bodySmall) },
                     colors = FilterChipDefaults.filterChipColors(
