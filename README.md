@@ -6,7 +6,9 @@ It is built on [bberberov/scorched3d](https://github.com/bberberov/scorched3d), 
 
 This port uses Scorched3D's ballistics, weapons, terrain deformation, economy, AI, and network protocol code along with the original rules. The interface is fresh, made with Jetpack Compose and OpenGLES3 designed for a touch phone screen instead of a PC with mouse and keyboard. 
 
-It is in a playable state now with most of the graphics and gameplay implemented but will be iterated upon until it meets parity (or as close as we can get) with the original game.
+At this point I am very close to a 1.0.0 stable release, I just have to do some checking through the Scorched3D code to see what we missed (like the mini map).
+
+A little bonus - you can join PC hosted games of Scorched3D so long as they are version 44. 
 
 Cheers, enjoy! roge-rm
 
