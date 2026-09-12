@@ -325,12 +325,24 @@ Also settled: ambience and diffuse *are* read per landscape, not defaulted -
 ice (0.35, 0.39, 0.40), storm diffuse (0.20, 0.20, 0.20), vulcano diffuse
 (0.90, 0.90, 0.90).
 
-### The one deviation worth considering
+### The deviation, now made and why
 
-Fading the virtual-plane displacement towards zero as a fragment approaches
-the camera. The technique assumes a viewpoint well above the surface, which
-upstream's camera satisfies and this port's does not. It would be a
-*deliberate* deviation from upstream's constant, for a camera upstream does
-not have - the kind this port's rules allow, since the rendering is ours and
-only the gameplay is not. Not done: it needs a judgement about how close is
-close, and it should be judged on a screen rather than argued for here.
+`debug.scorchdroid.water 11` draws the projective lookup's own coordinate, and
+it settled this outright: healthy across the top of the frame - `x/w` running
+0 to 1 left to right - and **saturated over the whole near half**, `x/w` past 1
+and `y/w` below 0. The reflection was being read from off the edge of the
+buffer, where CLAMP_TO_EDGE gives a stretched border pixel. That is the
+smearing the ice map showed, and on a dark landscape it is a black pixel,
+which is why texvulcano's sea looked as though it had no reflection at all.
+
+The cause is the 12-unit drop. It is faithful to upstream, and upstream can
+afford it: twelve units below the surface is a couple of pixels at three
+hundred units away and most of the screen at three, and upstream's camera
+never comes that close. This port's sits at sea level.
+
+So the displacement now fades with distance - nothing under twenty units,
+the full twelve by two hundred. Under twenty it is a plain planar reflection,
+which is undistorted and correct; beyond two hundred it is upstream's own
+number. A deliberate deviation for a camera upstream does not have, which is
+the kind this port's rules allow: the rendering is ours, only the gameplay is
+not.
