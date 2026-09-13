@@ -2,12 +2,17 @@ package com.rm.scorchdroid
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -18,74 +23,72 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.DoneAll
-import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.GpsFixed
 import androidx.compose.material.icons.filled.HourglassTop
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Public
-import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.ShoppingCart
-import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Undo
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.Box
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import kotlinx.coroutines.delay
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
@@ -226,6 +229,21 @@ class GameHudState {
     // on. The rest are read-only or need admin authentication.
     var chatChannel by mutableStateOf("general")
 
+    // The mini-map - upstream's plan view, which it keeps permanently in a
+    // corner. Here it is off by default and toggled by holding the search
+    // button: a phone has a fraction of the screen a monitor does, and a
+    // permanent 180dp square over the battlefield is a real cost to anyone
+    // who does not want it.
+    var miniMapVisible by mutableStateOf(false)
+    // The picture, already an ImageBitmap - rebuilt only when the renderer's
+    // version moves, which is a handful of times a round.
+    var miniMapImage by mutableStateOf<ImageBitmap?>(null)
+    var miniMapVersion by mutableStateOf(-1)
+    var miniMapInfo by mutableStateOf<MiniMapInfo?>(null)
+    var miniMapTanks by mutableStateOf<List<MiniMapTank>>(emptyList())
+    // "lookX|lookY|dirX|dirY" in landscape coordinates, for the camera arrow.
+    var miniMapCamera by mutableStateOf("")
+
     // M6 parity: upstream's HUD_ITEMS key, which toggles its HUD panel off.
     // Here that means everything except a single button to bring it back -
     // without one there would be no way to undo it on a touch screen, which
@@ -275,6 +293,15 @@ class GameHudState {
         chatChannel = "general"
         hudHidden = false
         speedLabel = ""
+        // The map belongs to the landscape that has just gone; leaving the
+        // old one up over a new game is exactly the class of staleness this
+        // whole function exists to prevent.
+        miniMapVisible = false
+        miniMapImage = null
+        miniMapVersion = -1
+        miniMapInfo = null
+        miniMapTanks = emptyList()
+        miniMapCamera = ""
     }
 }
 
@@ -320,6 +347,8 @@ fun GameHud(
     onAdmin: () -> Unit,
     onAimGesture: (AimAxis, Boolean) -> Unit,
     onSendChat: (String) -> Unit,
+    /** Point the camera at a spot on the map - tapping the mini-map. */
+    onLookAt: (Float, Float) -> Unit,
 ) {
     // M6 parity: upstream's HUD_ITEMS toggle. Everything goes except one
     // button to bring it back - a keyboard can rebind the same key to
@@ -404,7 +433,17 @@ fun GameHud(
                 if (state.isHost) {
                     HudIconButton(Icons.Filled.AdminPanelSettings, "Admin", onAdmin)
                 }
-                HudIconButton(Icons.Filled.Search, "Find LAN games", onFindGames)
+                // Hold for the map. The gesture is said out loud in the
+                // description for the same reason the chat button says
+                // "(hold for scores...)": every other long press in this HUD
+                // opens more of what the button already does, and a map
+                // behind a magnifying glass is not something anyone guesses.
+                HudIconButton(
+                    icon = Icons.Filled.Search,
+                    description = "Find LAN games (hold for the map)",
+                    onClick = onFindGames,
+                    onLongClick = { state.miniMapVisible = !state.miniMapVisible },
+                )
                 // Outermost, in the corner: the camera toggle is the one control
                 // here reached mid-aim, so it gets the position the thumb finds
                 // without looking. The icon carries its own state (globe =
@@ -442,19 +481,31 @@ fun GameHud(
             }
         }
 
-        // Chat, directly under those icons. Transient by design: it is a
-        // glance, not a log - the full history is in the score dialog's
-        // sibling, and anything important repeats.
-        ChatOverlay(
-            state = state,
-            onSend = onSendChat,
+        // The right-hand column under those icons: the map, then chat.
+        //
+        // One column rather than two independently aligned children, so that
+        // "the map is always on top" is a fact about the layout instead of a
+        // second magic offset that has to be kept in step with the map's
+        // height. The compose box lives inside ChatOverlay, so it stacks
+        // under the map for free along with the messages.
+        Column(
+            horizontalAlignment = Alignment.End,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .windowInsetsPadding(WindowInsets.displayCutout)
                 .padding(horizontal = 12.dp)
                 // Clear of the icon row above.
                 .padding(top = 72.dp),
-        )
+        ) {
+            if (state.miniMapVisible) {
+                MiniMap(state = state, onLookAt = onLookAt)
+                Spacer(Modifier.height(8.dp))
+            }
+            // Chat, directly under. Transient by design: it is a glance, not
+            // a log - the full history is in the score dialog's sibling, and
+            // anything important repeats.
+            ChatOverlay(state = state, onSend = onSendChat)
+        }
 
         // Everything else lives in a stacked strip along the bottom edge.
         // Portrait has scarce width but plenty of height, so stacking two
@@ -975,6 +1026,12 @@ private fun FadingReadout(text: String, value: Float) {
 // the two gaps that group them, so the two rows read as one block. Derived
 // rather than written out as a number, so adding or resizing a button moves
 // the bar with it instead of quietly leaving it the wrong width.
+// The mini-map's side. Upstream's is 128 device pixels on a desktop; this is
+// a little larger in dp because a phone is held closer and the dots have to
+// stay hittable. Wide enough to line up with the chat column beneath it
+// (which caps at 260dp) without dominating the battlefield.
+private val kMiniMapSize = 180.dp
+
 private val kHudIconSize = 44.dp
 private val kHudIconSidePadding = 2.dp
 private val kHudGroupGap = 10.dp
@@ -1091,6 +1148,202 @@ private fun HudIconButton(
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(icon, contentDescription = description, modifier = Modifier.size(22.dp))
+        }
+    }
+}
+
+/**
+ * The mini-map: upstream's plan view (`GLWPlanView`), which this port has
+ * never had.
+ *
+ * Upstream keeps a 128x128 one permanently in the bottom-right of a desktop
+ * screen. Here it is toggled, sits under the session icons, and is the top
+ * item of that right-hand column so chat stacks below it rather than over it.
+ *
+ * Drawn in the same order upstream draws it, because the order is the design:
+ * the landscape, then the tanks, then the arena's buoys, then the camera
+ * arrow on top of everything. The picture behind it comes from
+ * MiniMapBuilder; everything here is the overlay that changes as the round
+ * goes on.
+ *
+ * Two coordinate facts worth keeping straight:
+ *  - the image's rows are in landscape order (row 0 is landscape y = 0) and
+ *    the screen's are not, so everything is flipped in y exactly once, here,
+ *    where the image and the markers can be flipped together;
+ *  - upstream letterboxes the arena into a square with a 10px inset, so a
+ *    non-square arena keeps its shape instead of being stretched. That is
+ *    reproduced rather than "fixed", because the scribbles in P4 ride on the
+ *    same box and a PC client expects them in it.
+ */
+@Composable
+private fun MiniMap(
+    state: GameHudState,
+    onLookAt: (Float, Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val info = state.miniMapInfo
+    val image = state.miniMapImage
+    if (info == null || image == null) return
+
+    // Upstream's own proportion: a 10px inset on a 128px widget.
+    val insetFraction = 10f / 128f
+    // Blink the tanks that still owe a move, at upstream's rate.
+    val flashOn = remember { mutableStateOf(true) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(300)
+            flashOn.value = !flashOn.value
+        }
+    }
+
+    Surface(
+        color = Color.Black.copy(alpha = 0.45f),
+        shape = RoundedCornerShape(8.dp),
+        modifier = modifier.size(kMiniMapSize),
+    ) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(info) {
+                    detectTapGestures { offset ->
+                        // The inverse of the draw transform below, which is
+                        // what upstream's mouseDown does with the same
+                        // numbers. Taps outside the arena are ignored rather
+                        // than clamped: the corners of a letterboxed map are
+                        // not part of the world.
+                        val side = size.width.toFloat()
+                        val inset = side * insetFraction
+                        val box = side - inset * 2f
+                        if (box <= 0f) return@detectTapGestures
+                        val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
+                        val u = (offset.x - inset) / box
+                        val v = (offset.y - inset) / box
+                        val lx = u * maxSpan + info.arenaX - (maxSpan - info.arenaWidth) / 2f
+                        // Screen y runs the other way from landscape y.
+                        val ly = (1f - v) * maxSpan + info.arenaY - (maxSpan - info.arenaHeight) / 2f
+                        if (lx < info.arenaX || lx > info.arenaX + info.arenaWidth) return@detectTapGestures
+                        if (ly < info.arenaY || ly > info.arenaY + info.arenaHeight) return@detectTapGestures
+                        onLookAt(lx, ly)
+                    }
+                },
+        ) {
+            val side = size.minDimension
+            val inset = side * insetFraction
+            val box = side - inset * 2f
+            if (box <= 0f) return@Canvas
+            val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
+            if (maxSpan <= 0f) return@Canvas
+            val scale = box / maxSpan
+
+            // Landscape (x, y) -> canvas pixels, y flipped.
+            fun px(x: Float): Float =
+                inset + (x - info.arenaX + (maxSpan - info.arenaWidth) / 2f) * scale
+            fun py(y: Float): Float =
+                inset + ((maxSpan - info.arenaHeight) / 2f + (info.arenaY + info.arenaHeight - y)) * scale
+
+            // 1. The landscape. The image spans the whole map, so the source
+            // rectangle crops it to the arena the way upstream's texture
+            // coordinates do.
+            val srcLeft = (info.arenaX / info.landWidth * image.width).toInt().coerceIn(0, image.width)
+            val srcRight = ((info.arenaX + info.arenaWidth) / info.landWidth * image.width)
+                .toInt().coerceIn(srcLeft + 1, image.width)
+            // Landscape y is up and image rows run the same way, so the top
+            // of the arena is the *last* row of it.
+            val srcBottom = (image.height - (info.arenaY / info.landHeight * image.height).toInt())
+                .coerceIn(1, image.height)
+            val srcTop = (image.height -
+                ((info.arenaY + info.arenaHeight) / info.landHeight * image.height).toInt())
+                .coerceIn(0, srcBottom - 1)
+
+            withTransform({
+                // One flip for the image, since its rows are bottom-up
+                // relative to the screen.
+                scale(1f, -1f, pivot = Offset(size.width / 2f, size.height / 2f))
+            }) {
+                drawImage(
+                    image = image,
+                    srcOffset = IntOffset(srcLeft, image.height - srcBottom),
+                    srcSize = IntSize(srcRight - srcLeft, srcBottom - srcTop),
+                    dstOffset = IntOffset(
+                        (inset + (maxSpan - info.arenaWidth) / 2f * scale).toInt(),
+                        (inset + (maxSpan - info.arenaHeight) / 2f * scale).toInt(),
+                    ),
+                    dstSize = IntSize(
+                        (info.arenaWidth * scale).toInt().coerceAtLeast(1),
+                        (info.arenaHeight * scale).toInt().coerceAtLeast(1),
+                    ),
+                    filterQuality = FilterQuality.Low,
+                )
+            }
+
+            // 2. The arena's edge. Upstream drops a ring every 32 world units
+            // along all four sides and hides them when the wall is "none".
+            if (info.hasWall) {
+                val wall = Color(info.wallArgb)
+                val step = 32f
+                val dots = mutableListOf<Offset>()
+                var x = info.arenaX
+                while (x <= info.arenaX + info.arenaWidth) {
+                    dots += Offset(px(x), py(info.arenaY))
+                    dots += Offset(px(x), py(info.arenaY + info.arenaHeight))
+                    x += step
+                }
+                var y = info.arenaY + step
+                while (y < info.arenaY + info.arenaHeight) {
+                    dots += Offset(px(info.arenaX), py(y))
+                    dots += Offset(px(info.arenaX + info.arenaWidth), py(y))
+                    y += step
+                }
+                dots.forEach { drawCircle(wall, radius = 1.2.dp.toPx(), center = it, alpha = 0.9f) }
+            }
+
+            // 3. The tanks. Upstream's dot is 16 world units across, so it
+            // scales with the arena rather than being a fixed size - a dot on
+            // a small map really is bigger.
+            val dotRadius = (8f * scale).coerceIn(2.5.dp.toPx(), 7.dp.toPx())
+            state.miniMapTanks.forEach { tank ->
+                if (tank.flash && !flashOn.value) return@forEach
+                val centre = Offset(px(tank.x), py(tank.y))
+                drawCircle(Color(tank.colorArgb), radius = dotRadius, center = centre)
+                // Ours, not upstream's: at this size a ring around your own
+                // dot is the difference between reading the map at a glance
+                // and hunting for yourself on it.
+                if (tank.isMe) {
+                    drawCircle(
+                        Color.White,
+                        radius = dotRadius + 2.dp.toPx(),
+                        center = centre,
+                        style = Stroke(width = 1.5.dp.toPx()),
+                    )
+                }
+            }
+
+            // 4. Where the camera is looking, on top of everything.
+            val camera = state.miniMapCamera.split("|")
+            if (camera.size == 4) {
+                val lookX = camera[0].toFloatOrNull()
+                val lookY = camera[1].toFloatOrNull()
+                val dirX = camera[2].toFloatOrNull()
+                val dirY = camera[3].toFloatOrNull()
+                if (lookX != null && lookY != null && dirX != null && dirY != null) {
+                    val tip = Offset(px(lookX), py(lookY))
+                    // Landscape y is flipped on screen, so the direction's y
+                    // flips with it.
+                    val dx = dirX
+                    val dy = -dirY
+                    val len = 7.dp.toPx()
+                    val back = Offset(tip.x - dx * len, tip.y - dy * len)
+                    val perp = Offset(-dy, dx)
+                    val half = 4.dp.toPx()
+                    val path = Path().apply {
+                        moveTo(tip.x, tip.y)
+                        lineTo(back.x + perp.x * half, back.y + perp.y * half)
+                        lineTo(back.x - perp.x * half, back.y - perp.y * half)
+                        close()
+                    }
+                    drawPath(path, Color.White, alpha = 0.8f)
+                }
+            }
         }
     }
 }

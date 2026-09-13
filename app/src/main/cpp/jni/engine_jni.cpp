@@ -2067,6 +2067,98 @@ Java_com_rm_scorchdroid_NativeBridge_getPlayerList(JNIEnv *env, jobject /* this 
     return result;
 }
 
+// The mini-map's fixed facts, as
+// "arenaX|arenaY|arenaWidth|arenaHeight|landWidth|landHeight|wallType|wallArgb".
+//
+// The arena is the playable rectangle and is not always the whole landscape;
+// upstream's plan view crops its texture to exactly this and letterboxes it,
+// which is why both rectangles are reported rather than just the map size.
+//
+// The wall is upstream's too: OptionsTransient carries the type and colour
+// because they are per round, and wallNone (3) means there is nothing to draw.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getMiniMapInfo(JNIEnv *env, jobject /* this */) {
+    std::ostringstream out;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        if (!ctx) return env->NewStringUTF("");
+
+        GroundMaps &maps = ctx->getLandscapeMaps().getGroundMaps();
+        Vector &wall = ctx->getOptionsTransient().getWallColor();
+        out << maps.getArenaX() << "|"
+            << maps.getArenaY() << "|"
+            << maps.getArenaWidth() << "|"
+            << maps.getArenaHeight() << "|"
+            << maps.getLandscapeWidth() << "|"
+            << maps.getLandscapeHeight() << "|"
+            << (int) ctx->getOptionsTransient().getWallType() << "|"
+            << (int) (wall[0] * 255.0f) << ","
+            << (int) (wall[1] * 255.0f) << ","
+            << (int) (wall[2] * 255.0f);
+    }
+    return env->NewStringUTF(out.str().c_str());
+}
+
+// The dots on the mini-map, as "x|y|r,g,b|flash|isMe" per tank.
+//
+// Upstream's GLWPlanView::drawTanks, field for field:
+//  - only sNormal and sBuying are drawn, so the dead and spectators are
+//    simply absent from the map rather than greyed out;
+//  - the colour is Tank::getColor(), which is the *team's* colour in a team
+//    game and the player's own otherwise;
+//  - "flash" is getShotInfo().getMoveId() != 0, meaning this tank still owes
+//    a move - upstream blinks those at about three times a second, and its
+//    own tooltip explains the blink as exactly that.
+//
+// isMe is ours: upstream draws every tank identically, which is fine at a
+// desk and not on a phone, where finding yourself on a thumbnail is the first
+// thing you try to do.
+//
+// A separate call from getPlayerList rather than more fields on it: that one
+// is the scoreboard's, is parsed against an exact field count, and has no
+// business growing positions it never asked for.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getMiniMapTanks(JNIEnv *env, jobject /* this */) {
+    std::vector<std::string> rows;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        if (ctx) {
+            Tank *myTank = findMyTank();
+            const unsigned int myId = myTank ? myTank->getPlayerId() : 0;
+
+            std::map<unsigned int, Tank *> &tanks = ctx->getTargetContainer().getTanks();
+            for (auto &entry : tanks) {
+                Tank *tank = entry.second;
+                if (!tank) continue;
+                const TankState::State state = tank->getState().getState();
+                if (state != TankState::sNormal && state != TankState::sBuying) continue;
+
+                Vector position;
+                tank->getLife().getTargetPosition().asVector(position);
+                Vector &colour = tank->getColor();
+
+                std::ostringstream row;
+                row << position[0] << "|"
+                    << position[1] << "|"
+                    << (int) (colour[0] * 255.0f) << ","
+                    << (int) (colour[1] * 255.0f) << ","
+                    << (int) (colour[2] * 255.0f) << "|"
+                    << (tank->getShotInfo().getMoveId() != 0 ? 1 : 0) << "|"
+                    << (tank->getPlayerId() == myId ? 1 : 0);
+                rows.push_back(row.str());
+            }
+        }
+    }
+
+    jobjectArray result = env->NewObjectArray((jsize) rows.size(), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < rows.size(); i++) {
+        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(rows[i].c_str()));
+    }
+    return result;
+}
+
 // The round/turn counters the score dialog heads itself with, as
 // "round|totalRounds|turn|totalTurns". Upstream reads exactly these four off
 // OptionsTransient and OptionsGame (see ScoreDialog.cpp).

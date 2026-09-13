@@ -1,15 +1,18 @@
 package com.rm.scorchdroid
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -17,12 +20,11 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Collections
-import androidx.appcompat.app.AppCompatActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -338,6 +340,9 @@ class MainActivity : AppCompatActivity() {
                 onAdmin = { showAdminMenu() },
                 onAimGesture = { axis, active -> playAimSound(axis, active) },
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
+                onLookAt = { x, y ->
+                    if (::gameRenderer.isInitialized) gameRenderer.nativeCameraLookAt(x, y)
+                },
                 )
             }
             // A game that fails to load has to be able to say so from the
@@ -1328,6 +1333,39 @@ class MainActivity : AppCompatActivity() {
             // thread last frame; this just picks up the result.
             hudState.tankOverlays = parseTankOverlays(gameRenderer.nativeGetTankOverlays())
             hudState.floatingLabels = parseFloatingLabels(gameRenderer.nativeGetFloatingLabels())
+
+            // The mini-map. Nothing here runs unless it is actually on
+            // screen: it is off by default, and a map nobody is looking at
+            // should not cost a tank sweep and a JNI string every tick.
+            //
+            // The picture itself is fetched only when the renderer says it
+            // changed - a handful of times a round, against the ten times a
+            // second this loop runs - so the usual tick copies nothing.
+            if (hudState.miniMapVisible) {
+                val version = gameRenderer.nativeMiniMapVersion()
+                if (version != hudState.miniMapVersion) {
+                    hudState.miniMapVersion = version
+                    val pixels = withContext(Dispatchers.Default) {
+                        gameRenderer.nativeMiniMapImage()
+                    }
+                    val side = kotlin.math.sqrt(pixels.size.toDouble()).toInt()
+                    hudState.miniMapImage = if (side > 0 && side * side == pixels.size) {
+                        Bitmap.createBitmap(pixels, side, side, Bitmap.Config.ARGB_8888)
+                            .asImageBitmap()
+                    } else {
+                        // Empty between landscapes, which is the renderer
+                        // saying "no map yet" rather than a failure.
+                        null
+                    }
+                    hudState.miniMapInfo = parseMiniMapInfo(
+                        withContext(Dispatchers.Default) { NativeBridge.getMiniMapInfo() }
+                    )
+                }
+                hudState.miniMapTanks = parseMiniMapTanks(
+                    withContext(Dispatchers.Default) { NativeBridge.getMiniMapTanks() }
+                )
+                hudState.miniMapCamera = gameRenderer.nativeCameraPlanInfo()
+            }
 
             // M6 parity: the scoreboard between rounds. Upstream puts it up
             // by itself and holds the game there for RoundScoreTime (5s), or
