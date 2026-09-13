@@ -66,6 +66,7 @@
 #include <weapons/WeaponRoller.hpp>
 #include <3dsparse/ModelStore.hpp>
 #include <LandscapeTextureBuilder.hpp>
+#include <MiniMapBuilder.hpp>
 #include <image/ImageFactory.hpp>
 #include <3dsparse/ModelStore.hpp>
 #include <3dsparse/Model.hpp>
@@ -1379,6 +1380,105 @@ namespace
 					"nearly every breaker starts at the waterline");
 				check(sets[0] > 0 && sets[1] > 0,
 					"the breakers are dealt between both sprite sets");
+			}
+
+			// The mini-map picture (MiniMapBuilder) - our reimplementation
+			// of what upstream's Landscape::generate does for its plan view:
+			// box-downsample the very same ground texture, then turn the
+			// water into alpha rather than colour. GL-free for the same
+			// reason the ground texture is, so the alpha rule can be pinned
+			// down here instead of by squinting at a phone.
+			{
+				MiniMapBuilder::Heights heights =
+					MiniMapBuilder::captureHeights(server->getContext());
+				check(heights.valid(), "the mini-map captured the engine's heightmap");
+
+				const float water = MiniMapBuilder::waterHeight(server->getContext());
+
+				MiniMapBuilder::Image plan =
+					MiniMapBuilder::build(ground, heights, water, 64);
+				check(plan.valid() && plan.size == 64,
+					  "the mini-map image builds at the size asked for");
+
+				if (plan.valid() && heights.valid())
+				{
+					// Upstream's rule, at the three heights that matter:
+					// above the water opaque, inside the 0.3 band below it
+					// half, below that a hole. Asserted by finding a texel
+					// of each kind rather than by re-deriving the rule,
+					// which would only be testing the test.
+					int solid = 0, shore = 0, hole = 0, other = 0;
+					for (size_t i = 0; i < plan.argb.size(); i++)
+					{
+						switch (plan.argb[i] >> 24)
+						{
+						case 255: solid++; break;
+						case 128: shore++; break;
+						case 0:   hole++;  break;
+						default:  other++; break;
+						}
+					}
+					check(other == 0, "every mini-map texel is land, shore or water - no other alpha");
+					check(solid > 0, "the mini-map has solid land");
+
+					// This landscape has a sea, so it must have a coastline
+					// and open water. Without this the alpha rule could be
+					// stuck at 255 everywhere and the two checks above would
+					// still pass.
+					check(water > -50.0f, "the test landscape has water at all");
+					check(hole > 0, "the mini-map punches the sea out to transparent");
+					check(shore > 0, "the mini-map has a half-alpha shoreline band");
+
+					// The colours are the ground texture's own, averaged.
+					// A texel covering a uniform block of the source must
+					// come back as that exact colour - this is what catches
+					// a channel swap or an off-by-one in the box filter.
+					{
+						MiniMapBuilder::Image same =
+							MiniMapBuilder::build(ground, heights, water, ground.width);
+						check(same.valid(), "the mini-map builds at 1:1 with the ground texture");
+						if (same.valid())
+						{
+							long matched = 0, compared = 0;
+							for (int y = 0; y < same.size; y += 7)
+							{
+								for (int x = 0; x < same.size; x += 7)
+								{
+									const unsigned char *src =
+										&ground.rgb[((size_t) y * ground.width + x) * 3];
+									const uint32_t texel = same.argb[(size_t) y * same.size + x];
+									compared++;
+									if (((texel >> 16) & 0xFF) == src[0] &&
+										((texel >> 8)  & 0xFF) == src[1] &&
+										( texel        & 0xFF) == src[2]) matched++;
+								}
+							}
+							check(compared > 0 && matched == compared,
+								  "at 1:1 the mini-map's colours are the ground texture's, channel for channel");
+						}
+					}
+
+					// Deformation moves the waterline and nothing else -
+					// upstream re-runs only its water pass on the deform
+					// timer, never regenerating the colours. Flooding the
+					// whole map must therefore change every alpha to 0 and
+					// leave every RGB untouched.
+					{
+						MiniMapBuilder::Image flooded = plan;
+						std::vector<uint32_t> colourBefore = flooded.argb;
+						MiniMapBuilder::updateWater(flooded, heights, 100000.0f);
+
+						bool allWater = true, colourHeld = true;
+						for (size_t i = 0; i < flooded.argb.size(); i++)
+						{
+							if ((flooded.argb[i] >> 24) != 0) allWater = false;
+							if ((flooded.argb[i] & 0x00FFFFFFu) !=
+								(colourBefore[i] & 0x00FFFFFFu)) colourHeld = false;
+						}
+						check(allWater, "raising the water over everything turns the whole mini-map to sea");
+						check(colourHeld, "...and changes only the alpha, never the colours");
+					}
+				}
 			}
 
 			// M6 scorch marks - the other half of terrain destruction, and

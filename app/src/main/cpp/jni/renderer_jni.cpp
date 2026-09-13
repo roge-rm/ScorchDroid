@@ -65,6 +65,7 @@
 #include <RenderState.hpp>
 #include <Mat4.hpp>
 #include <LandscapeTextureBuilder.hpp>
+#include <MiniMapBuilder.hpp>
 #include <MovementStore.h>
 #include <TargetModelStore.h>
 #include <SkyDescription.hpp>
@@ -162,6 +163,25 @@ namespace
 	// every earlier one - marks accumulate over a round the way upstream's
 	// do. Re-reading it back off the GPU each time would be far worse.
 	LandscapeTextureBuilder::Texture groundTextureData;
+	// The mini-map's picture, built from the texture directly above it -
+	// upstream's plan view is a downsample of the same image, so this costs
+	// one pass over a buffer that is already in memory rather than a second
+	// landscape build (see MiniMapBuilder).
+	//
+	// The version is what the UI polls: rebuilding the Android Bitmap every
+	// frame for an image that changes a handful of times a round would be
+	// pure waste, so Kotlin fetches the pixels only when this number moves.
+	MiniMapBuilder::Image miniMap;
+	std::atomic<int> miniMapVersion{0};
+	std::mutex miniMapMutex;          // the UI thread reads the pixels
+	// A crater at the waterline opens the sea into it, which is the one
+	// thing deformation changes on the plan view (upstream re-runs only its
+	// water pass on a timer, never regenerating the colours). Coalesced the
+	// same way the breakers are: a sustained weapon deforms every step, and
+	// re-deriving 16k alphas per step for a map the size of a thumbnail
+	// would be silly.
+	bool   miniMapWaterDirty = false;
+	double miniMapWaterAt = 0.0;
 	// G1: the ground texture is built on a worker thread. The GL thread
 	// captures the builder's inputs under the engine lock, hands them to
 	// the worker, and adopts the result when it is done - so the game does
@@ -2074,6 +2094,16 @@ namespace
 			if (groundTexture) glDeleteTextures(1, &groundTexture);
 			terrainVao = terrainVbo = terrainIbo = groundTexture = 0;
 			groundTextureData = LandscapeTextureBuilder::Texture();
+			// The plan view is a view of that texture, so it goes too -
+			// and the version still moves, so the UI drops the old
+			// landscape's picture rather than showing it over the new one
+			// until the rebuild lands.
+			{
+				std::lock_guard<std::mutex> lock(miniMapMutex);
+				miniMap = MiniMapBuilder::Image();
+			}
+			miniMapVersion++;
+			miniMapWaterDirty = false;
 			terrainBuilt = false;
 			groundTextureBuilt = false;
 			groundLightBaked = false;
@@ -2387,6 +2417,26 @@ namespace
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 		applyAnisotropy();
 		LOGI("Ground texture built: %dx%d", ground.width, ground.height);
+
+		// The plan view's picture, from the very same buffer. Built here
+		// rather than on the worker because the heights have to be read
+		// under the engine lock, which this frame holds, and the downsample
+		// itself is a few milliseconds over an image already in cache.
+		{
+			MiniMapBuilder::Heights heights = MiniMapBuilder::captureHeights(ctx);
+			const float water = MiniMapBuilder::waterHeight(ctx);
+			MiniMapBuilder::Image built = MiniMapBuilder::build(ground, heights, water);
+			if (built.valid()) {
+				{
+					std::lock_guard<std::mutex> lock(miniMapMutex);
+					miniMap = std::move(built);
+				}
+				miniMapVersion++;
+				LOGI("Mini-map built: %dx%d, water at %.1f", miniMap.size, miniMap.size, water);
+			} else {
+				LOGE("Mini-map build failed - the map stays empty");
+			}
+		}
 
 		// G2: the detail image, mipmapped and repeating (upstream's
 		// detailTexture_.replace(bitmapDetail, true)).
@@ -3698,6 +3748,8 @@ namespace
 		// it (W10c). Rebuilt lazily by the water draw, at most twice a
 		// second, since a sustained weapon deforms every step.
 		breakersDirty = true;
+		// ...and it moves the plan view's coastline for the same reason.
+		miniMapWaterDirty = true;
 
 		HeightMap &heightMap = ctx.getLandscapeMaps().getGroundMaps().getHeightMap();
 		const int w = heightMap.getMapWidth();
@@ -5151,6 +5203,35 @@ namespace
 	// (DeformTextures::deformLandscape, client-only), and so do we - into
 	// the CPU-side copy, so marks accumulate on top of each other across a
 	// round, then re-upload only the affected rectangles.
+	// Re-derives the plan view's coastline after the terrain has been
+	// blasted about, at most twice a second.
+	//
+	// Only the alpha changes, which is exactly what upstream re-does on its
+	// own deform timer - `Landscape::simulate()` calls `updatePlanATexture()`
+	// and never regenerates the colours, so a crater above the waterline
+	// leaves the plan view alone and one below it lets the sea in.
+	void refreshMiniMapWaterIfNeeded(ScorchedContext &ctx)
+	{
+		if (!miniMapWaterDirty) return;
+
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		const double seconds = now.tv_sec + now.tv_nsec / 1e9;
+		if (seconds - miniMapWaterAt < 0.5) return;
+		miniMapWaterAt = seconds;
+		miniMapWaterDirty = false;
+
+		MiniMapBuilder::Heights heights = MiniMapBuilder::captureHeights(ctx);
+		if (!heights.valid()) return;
+		const float water = MiniMapBuilder::waterHeight(ctx);
+		{
+			std::lock_guard<std::mutex> lock(miniMapMutex);
+			if (!miniMap.valid()) return;
+			MiniMapBuilder::updateWater(miniMap, heights, water);
+		}
+		miniMapVersion++;
+	}
+
 	void applyScorchMarks(ScorchedContext &ctx)
 	{
 		if (!groundTextureBuilt || groundTexture == 0 || !groundTextureData.valid()) return;
@@ -6197,6 +6278,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	buildCloudsIfNeeded(*ctx);
 	applyTerrainDeformations(*ctx);
 	applyScorchMarks(*ctx);
+	refreshMiniMapWaterIfNeeded(*ctx);
 	syncMovementOverlay();
 
 	// M6 effects. Real elapsed time rather than a fixed step, so particles
@@ -8934,6 +9016,97 @@ Java_com_rm_scorchdroid_GameRenderer_nativeSetCameraPreset(JNIEnv *, jobject, ji
 	// the wrong icon.
 	if (g_camera.preset == OrbitCamera::pFree) g_camera.followMode = false;
 	if (g_camera.preset == OrbitCamera::pFollow) g_camera.followMode = true;
+}
+
+// The mini-map's picture. Two calls rather than one because the image
+// changes a handful of times a round and the UI asks every tick: the version
+// is an atomic read, and the pixels - 64KB of them - are only fetched when it
+// has moved.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeMiniMapVersion(JNIEnv *, jobject) {
+	return (jint) miniMapVersion.load();
+}
+
+// ARGB_8888 in the order Android's Bitmap.createBitmap(int[], ...) wants,
+// which is the same order MiniMapBuilder packs. Rows are in landscape order
+// (row 0 is landscape y = 0); the flip to screen order happens once, in the
+// composable that draws it, together with the one the markers need.
+//
+// Empty when there is no landscape yet, or between landscapes - the caller
+// shows nothing rather than the previous map.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeMiniMapImage(JNIEnv *env, jobject) {
+	std::lock_guard<std::mutex> lock(miniMapMutex);
+	if (!miniMap.valid()) return env->NewIntArray(0);
+
+	const jsize count = (jsize) miniMap.argb.size();
+	jintArray out = env->NewIntArray(count);
+	if (!out) return nullptr;
+	env->SetIntArrayRegion(out, 0, count,
+						   reinterpret_cast<const jint *>(miniMap.argb.data()));
+	return out;
+}
+
+// Where the camera is looking and which way, in landscape coordinates, for
+// the plan view's arrow: "lookX|lookY|dirX|dirY" with the direction
+// normalised. Upstream's GLWPlanView::drawCameraPointer does the same sum
+// from MainCamera's position and look-at.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeCameraPlanInfo(JNIEnv *env, jobject) {
+	float lookX = 0.0f, lookY = 0.0f, dirX = 0.0f, dirY = 1.0f;
+	{
+		std::lock_guard<std::mutex> lock(g_cameraMutex);
+		// World (x, height, z) back to landscape (x, y) through the
+		// renderer's own helper, rather than repeating the subtraction -
+		// getting that flip wrong is one of the two conventions the README
+		// warns about.
+		lookX = g_camera.targetX;
+		lookY = engineYFromWorldZ(g_camera.targetZ);
+
+		// The camera sits on its orbit at (yaw, pitch); the direction it
+		// looks is the opposite of the way it is offset from the target.
+		const float eyeX = std::cos(g_camera.pitch) * std::sin(g_camera.yaw);
+		const float eyeZ = std::cos(g_camera.pitch) * std::cos(g_camera.yaw);
+		// Negated for "from the eye towards the target", and the z flip is
+		// the same landscape-y flip as above.
+		float vx = -eyeX, vy = eyeZ;
+		const float len = std::sqrt(vx * vx + vy * vy);
+		if (len > 0.0001f) { dirX = vx / len; dirY = vy / len; }
+	}
+
+	char buffer[128];
+	snprintf(buffer, sizeof(buffer), "%.2f|%.2f|%.4f|%.4f", lookX, lookY, dirX, dirY);
+	return env->NewStringUTF(buffer);
+}
+
+// Point the camera at a spot on the map, which is what tapping the plan view
+// does - upstream's GLWPlanView::mouseDown for the left button, which sets
+// CamFree and moves the look-at there for exactly the same reason: a fixed
+// framing of your own tank is not what someone asking to look somewhere else
+// wants.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeCameraLookAt(
+		JNIEnv *, jobject, jfloat landscapeX, jfloat landscapeY) {
+	float height = 0.0f;
+	{
+		std::lock_guard<std::mutex> lock(g_engineMutex);
+		ScorchedContext *ctx = engineActiveContext();
+		if (ctx) {
+			HeightMap &hmap = ctx->getLandscapeMaps().getGroundMaps().getHeightMap();
+			const int hx = std::max(0, std::min(hmap.getMapWidth(),  (int) landscapeX));
+			const int hy = std::max(0, std::min(hmap.getMapHeight(), (int) landscapeY));
+			height = hmap.getHeight(hx, hy).asFloat();
+		}
+	}
+
+	std::lock_guard<std::mutex> lock(g_cameraMutex);
+	g_camera.targetX = landscapeX;
+	g_camera.targetY = height;
+	g_camera.targetZ = worldZFromEngineY(landscapeY);
+	// Free look, or the target would be overwritten by "my tank"'s position
+	// on the very next frame and the tap would do nothing.
+	g_camera.followMode = false;
+	g_camera.preset = OrbitCamera::pFree;
 }
 
 // M6: the short-lived world-anchored labels - floating damage numbers and

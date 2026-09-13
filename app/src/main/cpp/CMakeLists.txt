@@ -155,6 +155,7 @@ add_library(scorched_common STATIC
     porting/ClientSync.cpp
     porting/ClientContext.cpp
     porting/NetBridge.cpp
+    porting/MiniMapBuilder.cpp
     porting/LandscapeTextureBuilder.cpp
 )
 

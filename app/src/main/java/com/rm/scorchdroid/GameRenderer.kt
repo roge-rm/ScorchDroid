@@ -72,6 +72,35 @@ class GameRenderer : GLSurfaceView.Renderer {
     external fun nativeSetCameraPreset(preset: Int)
 
     /**
+     * The mini-map's picture, which is upstream's plan view: the landscape's
+     * own ground texture downsampled, with the sea turned into transparency
+     * rather than colour.
+     *
+     * Two calls because the image changes a handful of times a round while
+     * the HUD asks every tick. [nativeMiniMapVersion] is an atomic read;
+     * [nativeMiniMapImage] copies 64KB and is only worth calling when the
+     * version has moved. Empty between landscapes, so the old map is dropped
+     * rather than left over the new one.
+     */
+    external fun nativeMiniMapVersion(): Int
+
+    /** ARGB_8888 rows in landscape order - see [nativeMiniMapVersion]. */
+    external fun nativeMiniMapImage(): IntArray
+
+    /**
+     * "lookX|lookY|dirX|dirY" in landscape coordinates, for the plan view's
+     * camera arrow (upstream's GLWPlanView::drawCameraPointer).
+     */
+    external fun nativeCameraPlanInfo(): String
+
+    /**
+     * Points the camera at a spot on the landscape, and drops into free look
+     * so that it stays there - what tapping the mini-map does, and what
+     * upstream does on a left-click in its plan view.
+     */
+    external fun nativeCameraLookAt(landscapeX: Float, landscapeY: Float)
+
+    /**
      * M6: short-lived labels anchored to a world position - floating damage
      * numbers and speech bubbles - already projected to screen space. See
      * [parseFloatingLabels].

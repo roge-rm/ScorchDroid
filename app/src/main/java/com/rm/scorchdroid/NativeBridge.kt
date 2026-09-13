@@ -230,6 +230,23 @@ object NativeBridge {
     external fun getRoundInfo(): String
 
     /**
+     * The mini-map's fixed facts:
+     * "arenaX|arenaY|arenaWidth|arenaHeight|landWidth|landHeight|wallType|r,g,b".
+     *
+     * Both rectangles, because the playable arena is not always the whole
+     * landscape and upstream's plan view crops to the arena. See
+     * [parseMiniMapInfo].
+     */
+    external fun getMiniMapInfo(): String
+
+    /**
+     * One row per tank the mini-map should draw, "x|y|r,g,b|flash|isMe".
+     * Dead tanks and spectators are absent rather than listed, as upstream's
+     * plan view has them. See [parseMiniMapTanks].
+     */
+    external fun getMiniMapTanks(): Array<String>
+
+    /**
      * Whether the engine has the end-of-round scoreboard up: 0 no, 1 the
      * round score, 2 the final score of the match. Upstream raises this by
      * itself at the end of every round and holds play there while it shows
@@ -648,6 +665,82 @@ fun parsePlayerList(rows: Array<String>): List<PlayerEntry> = rows.mapNotNull { 
             (rgb[2].toIntOrNull() ?: 255),
         isMe = parts[11] == "1",
         avatar = parts[12],
+    )
+}
+
+/**
+ * The mini-map's fixed facts for this landscape - see
+ * [NativeBridge.getMiniMapInfo].
+ *
+ * [arena] is the playable rectangle, which the map crops to; [landWidth] and
+ * [landHeight] are the whole landscape the picture spans, so the arena is a
+ * sub-rect of the image.
+ */
+data class MiniMapInfo(
+    val arenaX: Float,
+    val arenaY: Float,
+    val arenaWidth: Float,
+    val arenaHeight: Float,
+    val landWidth: Float,
+    val landHeight: Float,
+    /** Upstream's OptionsTransient::WallType; 3 is wallNone - draw nothing. */
+    val wallType: Int,
+    val wallArgb: Int,
+) {
+    val hasWall: Boolean get() = wallType != kWallNone
+
+    companion object {
+        const val kWallNone = 3
+    }
+}
+
+fun parseMiniMapInfo(row: String): MiniMapInfo? {
+    val parts = row.split("|")
+    if (parts.size != 8) return null
+    val rgb = parts[7].split(",")
+    if (rgb.size != 3) return null
+    return MiniMapInfo(
+        arenaX = parts[0].toFloatOrNull() ?: return null,
+        arenaY = parts[1].toFloatOrNull() ?: return null,
+        arenaWidth = parts[2].toFloatOrNull() ?: return null,
+        arenaHeight = parts[3].toFloatOrNull() ?: return null,
+        landWidth = parts[4].toFloatOrNull() ?: return null,
+        landHeight = parts[5].toFloatOrNull() ?: return null,
+        wallType = parts[6].toIntOrNull() ?: return null,
+        wallArgb = (0xFF shl 24) or
+            ((rgb[0].toIntOrNull() ?: 255) shl 16) or
+            ((rgb[1].toIntOrNull() ?: 255) shl 8) or
+            (rgb[2].toIntOrNull() ?: 255),
+    )
+}
+
+/**
+ * One dot on the mini-map. [x] and [y] are landscape coordinates, not screen
+ * ones. [flash] means this tank still owes a move this round, which upstream
+ * shows by blinking it.
+ */
+data class MiniMapTank(
+    val x: Float,
+    val y: Float,
+    val colorArgb: Int,
+    val flash: Boolean,
+    val isMe: Boolean,
+)
+
+fun parseMiniMapTanks(rows: Array<String>): List<MiniMapTank> = rows.mapNotNull { row ->
+    val parts = row.split("|")
+    if (parts.size != 5) return@mapNotNull null
+    val rgb = parts[2].split(",")
+    if (rgb.size != 3) return@mapNotNull null
+    MiniMapTank(
+        x = parts[0].toFloatOrNull() ?: return@mapNotNull null,
+        y = parts[1].toFloatOrNull() ?: return@mapNotNull null,
+        colorArgb = (0xFF shl 24) or
+            ((rgb[0].toIntOrNull() ?: 255) shl 16) or
+            ((rgb[1].toIntOrNull() ?: 255) shl 8) or
+            (rgb[2].toIntOrNull() ?: 255),
+        flash = parts[3] == "1",
+        isMe = parts[4] == "1",
     )
 }
 
