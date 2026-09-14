@@ -1,0 +1,59 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: give the host its own copy of a drawn plan line
+
+ServerLinesHandler is where a client's ComsLinesMessage arrives and is
+relayed to the sender's team. On a desktop the host is a separate process
+with no map of its own, so upstream has no reason to keep a copy; here the
+host is a player, and without this the person hosting is the one player who
+cannot see what anyone else draws.
+
+It has to be a call inside this handler rather than a second handler
+registered for the type: ComsMessageHandler keeps exactly one handler per
+message id (`recvHandlers_[id] = handler`), so registering would replace this
+relay outright and nobody would receive anything.
+
+Placed after every check the handler makes - the 150-point cap, the
+provably-from-that-tank destination test and the mute gate - so a message
+that is rejected is as invisible to the host as it is to everyone else. No
+game logic; the work is in porting/PlanLineStore.cpp.
+
+---
+diff --git a/src/server/server/ServerLinesHandler.cpp b/src/server/server/ServerLinesHandler.cpp
+index 86e75427..b059bf4c 100644
+--- a/src/server/server/ServerLinesHandler.cpp
++++ b/src/server/server/ServerLinesHandler.cpp
+@@ -29,6 +29,12 @@
+ #include <tank/TankState.hpp>
+ #include <common/Logger.hpp>
+ #include <set>
++// Android build: the host's own copy of a line a client drew. There is no
++// socket to yourself and so no client-side handler to run, and a second
++// handler cannot simply be registered for the type - ComsMessageHandler keeps
++// one per message id, so registering would replace this relay rather than sit
++// beside it. See PlanLineStore.h and the porting plan.
++#include <PlanLineStore.h>
+ 
+ ServerLinesHandler::ServerLinesHandler(ComsMessageHandler &comsMessageHandler)
+ {
+@@ -63,6 +69,21 @@ bool ServerLinesHandler::processMessage(
+ 	// If this tank has been muted also don't allow lines
+ 	if (tank->getState().getMuted()) return true;
+ 
++	// Android build: the host is a player too, and every check that decides
++	// whether this message is allowed at all has just passed. Placed here
++	// rather than at the top so a rejected message is as invisible to the
++	// host as it is to everyone else.
++	{
++		std::vector<float> points;
++		points.reserve(message.getLines().size() * 2);
++		for (Vector &point : message.getLines())
++		{
++			points.push_back(point[0]);
++			points.push_back(point[1]);
++		}
++		ScorchDroidPlanLines::pushStroke(playerId, points);
++	}
++
+ 	// Get destinationinfo for this tank
+ 	ServerDestination *destinationInfo =
+ 		ScorchedServer::instance()->getServerDestinations().getDestination(netMessage.getDestinationId());

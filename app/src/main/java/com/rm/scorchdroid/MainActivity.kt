@@ -191,6 +191,8 @@ class MainActivity : AppCompatActivity() {
     // about, so a message it is already timing is never restarted.
     private var lastChatVersion = 0
     private var lastChatLineId = 0
+    private var lastMapLineVersion = 0
+    private var lastMapLineId = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -342,6 +344,18 @@ class MainActivity : AppCompatActivity() {
                 onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
                 onLookAt = { x, y ->
                     if (::gameRenderer.isInitialized) gameRenderer.nativeCameraLookAt(x, y)
+                },
+                // Onto the wire as upstream's ComsLinesMessage. The engine
+                // decides who may see it - the sender's team, which in a
+                // free-for-all is everyone - and a solo game simply has
+                // nobody to send to, so this costs a no-op there.
+                onDrawLine = { line ->
+                    val arena = hudState.miniMapInfo
+                    if (arena != null) {
+                        val (ax, ay) = landscapeToPlanFraction(line.ax, line.ay, arena)
+                        val (bx, by) = landscapeToPlanFraction(line.bx, line.by, arena)
+                        sendMapLineAsync(ax, ay, bx, by)
+                    }
                 },
                 )
             }
@@ -1365,6 +1379,37 @@ class MainActivity : AppCompatActivity() {
                     withContext(Dispatchers.Default) { NativeBridge.getMiniMapTanks() }
                 )
                 hudState.miniMapCamera = gameRenderer.nativeCameraPlanInfo()
+
+                // Lines other players have drawn. The version check keeps
+                // this to one cheap int on the overwhelming majority of
+                // ticks, the way the chat poll does.
+                val mapLineVersion =
+                    withContext(Dispatchers.Default) { NativeBridge.getMapLinesVersion() }
+                if (mapLineVersion != lastMapLineVersion) {
+                    lastMapLineVersion = mapLineVersion
+                    val arena = hudState.miniMapInfo
+                    val fresh = withContext(Dispatchers.Default) {
+                        parseMapLines(NativeBridge.getMapLines(lastMapLineId))
+                    }
+                    if (fresh.isNotEmpty() && arena != null) {
+                        lastMapLineId = fresh.last().id
+                        // Stamped on arrival, which is upstream's own rule
+                        // (simulateLine stamps with the receiver's clock):
+                        // a line fades from when you saw it, not from when
+                        // it was drawn on someone else's phone.
+                        val now = System.currentTimeMillis()
+                        hudState.mapLines = hudState.mapLines + fresh.map { line ->
+                            val (ax, ay) = planFractionToLandscape(line.ax, line.ay, arena)
+                            val (bx, by) = planFractionToLandscape(line.bx, line.by, arena)
+                            MapLine(ax, ay, bx, by, line.colorArgb, now)
+                        }
+                    } else if (fresh.isNotEmpty()) {
+                        // No arena to convert against yet; drop them rather
+                        // than placing them wrongly, and do not advance the
+                        // cursor past what was never shown.
+                        lastMapLineVersion = 0
+                    }
+                }
             }
 
             // M6 parity: the scoreboard between rounds. Upstream puts it up
@@ -2077,6 +2122,16 @@ class MainActivity : AppCompatActivity() {
 
     // Chat send. Off the main thread because it takes the engine mutex, which
     // the simulation tick holds for the duration of a step.
+    // Failure is deliberately silent, unlike chat's. There is nothing the
+    // player can do about it, the line is already on their own map, and a
+    // solo game - where there is nobody to send to at all - would otherwise
+    // complain every time anyone drew anything.
+    private fun sendMapLineAsync(ax: Float, ay: Float, bx: Float, by: Float) {
+        CoroutineScope(Dispatchers.Main).launch {
+            withContext(Dispatchers.Default) { NativeBridge.sendMapLine(ax, ay, bx, by) }
+        }
+    }
+
     private fun sendChatAsync(channel: String, text: String) {
         CoroutineScope(Dispatchers.Main).launch {
             val sent = withContext(Dispatchers.Default) { NativeBridge.sendChat(channel, text) }

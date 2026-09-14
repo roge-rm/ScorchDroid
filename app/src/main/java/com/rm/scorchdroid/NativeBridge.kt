@@ -247,6 +247,26 @@ object NativeBridge {
     external fun getMiniMapTanks(): Array<String>
 
     /**
+     * Sends one drawn line as upstream's `ComsLinesMessage` - two points and
+     * a pen-up. Coordinates are fractions of the plan widget in upstream's
+     * convention (x rightwards, y *upwards*); see
+     * [landscapeToPlanFraction], which is the only thing that should build
+     * them. False if there is no tank yet, or nothing to send to.
+     */
+    external fun sendMapLine(ax: Float, ay: Float, bx: Float, by: Float): Boolean
+
+    /**
+     * Lines *other* players have drawn, newer than [afterId], as
+     * "id|playerId|ax|ay|bx|by|r,g,b". The local player's own lines never
+     * come back through here - they are shown the moment they are finished,
+     * and the host's relay never echoes to the sender.
+     */
+    external fun getMapLines(afterId: Int): Array<String>
+
+    /** Bumped on every arriving line, so the HUD can poll one integer. */
+    external fun getMapLinesVersion(): Int
+
+    /**
      * Whether the engine has the end-of-round scoreboard up: 0 no, 1 the
      * round score, 2 the final score of the match. Upstream raises this by
      * itself at the end of every round and holds play there while it shows
@@ -741,6 +761,37 @@ fun parseMiniMapTanks(rows: Array<String>): List<MiniMapTank> = rows.mapNotNull 
             (rgb[2].toIntOrNull() ?: 255),
         flash = parts[3] == "1",
         isMe = parts[4] == "1",
+    )
+}
+
+/**
+ * One line off the wire, still in upstream's plan-widget fractions. The
+ * caller turns it into a [MapLine] once it has the arena to convert against.
+ */
+data class IncomingMapLine(
+    val id: Int,
+    val ax: Float,
+    val ay: Float,
+    val bx: Float,
+    val by: Float,
+    val colorArgb: Int,
+)
+
+fun parseMapLines(rows: Array<String>): List<IncomingMapLine> = rows.mapNotNull { row ->
+    val parts = row.split("|")
+    if (parts.size != 7) return@mapNotNull null
+    val rgb = parts[6].split(",")
+    if (rgb.size != 3) return@mapNotNull null
+    IncomingMapLine(
+        id = parts[0].toIntOrNull() ?: return@mapNotNull null,
+        ax = parts[2].toFloatOrNull() ?: return@mapNotNull null,
+        ay = parts[3].toFloatOrNull() ?: return@mapNotNull null,
+        bx = parts[4].toFloatOrNull() ?: return@mapNotNull null,
+        by = parts[5].toFloatOrNull() ?: return@mapNotNull null,
+        colorArgb = (0xFF shl 24) or
+            ((rgb[0].toIntOrNull() ?: 255) shl 16) or
+            ((rgb[1].toIntOrNull() ?: 255) shl 8) or
+            (rgb[2].toIntOrNull() ?: 255),
     )
 }
 

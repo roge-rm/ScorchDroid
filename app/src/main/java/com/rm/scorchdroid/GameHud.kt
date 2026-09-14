@@ -373,6 +373,7 @@ fun GameHud(
     onSendChat: (String) -> Unit,
     /** Point the camera at a spot on the map - tapping the mini-map. */
     onLookAt: (Float, Float) -> Unit,
+    onDrawLine: (MapLine) -> Unit,
 ) {
     // M6 parity: upstream's HUD_ITEMS toggle. Everything goes except one
     // button to bring it back - a keyboard can rebind the same key to
@@ -541,7 +542,7 @@ fun GameHud(
                 .padding(top = mapTopPadding),
         ) {
             if (state.miniMapVisible) {
-                MiniMap(state = state, onLookAt = onLookAt)
+                MiniMap(state = state, onLookAt = onLookAt, onDrawLine = onDrawLine)
                 Spacer(Modifier.height(8.dp))
             }
             // Chat, directly under. Transient by design: it is a glance, not
@@ -1243,6 +1244,7 @@ private fun HudIconButton(
 private fun MiniMap(
     state: GameHudState,
     onLookAt: (Float, Float) -> Unit,
+    onDrawLine: (MapLine) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val info = state.miniMapInfo
@@ -1376,7 +1378,14 @@ private fun MiniMap(
                                             System.currentTimeMillis(),
                                         )
                                         state.mapPending = pending
-                                        if (line != null) state.mapLines = state.mapLines + line
+                                        if (line != null) {
+                                            // Shown at once rather than
+                                            // waiting for the host to relay
+                                            // it back, which it never does -
+                                            // the relay skips the sender.
+                                            state.mapLines = state.mapLines + line
+                                            onDrawLine(line)
+                                        }
                                     }
                                 } else {
                                     val now = System.currentTimeMillis()

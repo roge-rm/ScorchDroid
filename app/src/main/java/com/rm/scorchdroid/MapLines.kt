@@ -102,3 +102,52 @@ fun expireMapLines(lines: List<MapLine>, nowMillis: Long): List<MapLine> =
 /** The pending dot if it is still alive, or null once it has aged out. */
 fun expireMapPoint(pending: MapPoint?, nowMillis: Long): MapPoint? =
     pending?.takeIf { nowMillis - it.atMillis < kMapLineLifeMillis }
+
+/**
+ * Upstream's own inset: a 10px border on a 128px plan view, which the map is
+ * drawn inside. Line coordinates are fractions of the **whole** widget, not
+ * of the inset box, because that is what `GLWPlanView::mouseDown` produces.
+ */
+const val kPlanInsetFraction = 10f / 128f
+
+/**
+ * Landscape coordinates to the 0-1 pair `ComsLinesMessage` carries.
+ *
+ * Two conventions have to line up for a PC client to render what this sends:
+ *
+ *  - the fraction spans the whole widget including its inset border, which
+ *    is what upstream divides by (`(x - x_) / w_`), not the letterboxed box
+ *    the map itself is drawn in;
+ *  - **y runs the other way.** Upstream's widgets sit in a GL ortho with y
+ *    increasing upwards, and `drawMap` maps landscape y straight onto it
+ *    with no flip. A Compose canvas has y increasing downwards, and the map
+ *    flips once when it draws. So what goes on the wire is the unflipped
+ *    one.
+ *
+ * The result is deliberately not clamped: a point outside the arena is a
+ * fraction outside 0-1, and upstream drops exactly those when drawing
+ * (`v[0] >= 0 && v[0] <= 1 ...`) rather than pulling them to the edge.
+ */
+fun landscapeToPlanFraction(x: Float, y: Float, info: MiniMapInfo): Pair<Float, Float> {
+    val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
+    if (maxSpan <= 0f) return 0f to 0f
+    val f = kPlanInsetFraction
+    val span = 1f - f * 2f
+    val u = f + span * (x - info.arenaX + (maxSpan - info.arenaWidth) / 2f) / maxSpan
+    val down = f + span *
+        ((maxSpan - info.arenaHeight) / 2f + (info.arenaY + info.arenaHeight - y)) / maxSpan
+    return u to (1f - down)
+}
+
+/** The inverse of [landscapeToPlanFraction], for lines arriving off the wire. */
+fun planFractionToLandscape(u: Float, v: Float, info: MiniMapInfo): Pair<Float, Float> {
+    val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
+    if (maxSpan <= 0f) return 0f to 0f
+    val f = kPlanInsetFraction
+    val span = 1f - f * 2f
+    val x = (u - f) / span * maxSpan + info.arenaX - (maxSpan - info.arenaWidth) / 2f
+    val down = 1f - v
+    val y = info.arenaY + info.arenaHeight + (maxSpan - info.arenaHeight) / 2f -
+        (down - f) / span * maxSpan
+    return x to y
+}
