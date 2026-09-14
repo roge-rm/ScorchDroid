@@ -80,50 +80,46 @@ future date". The reasoning, for whoever picks it up:
 - It cannot be verified on one device. Two phones on the same team are the
   minimum to test anything past "my own stroke appears", so the natural time
   to build it is when there is a team game to test it in.
-**Update 2026-09-14: the local half is built** (see below); what is left is
-the networking, and it needs two decisions first.
+**Update 2026-09-14: the local half is built, and it is wire-compatible.**
+What is left is the networking itself.
 
 The interaction dan specified, and what is now in the app: the enlarged map
 *is* draw mode. A tap places the first point of a line and shows it as a
-hollow dot; a second tap completes a straight line in your tank colour; a
-long press on a line deletes it, and a long press on bare ground abandons a
-half-drawn one. Tap no longer looks the camera anywhere while enlarged - the
-small map keeps that. Shrinking moved to the chevron because two quick taps
-on the enlarged map are a short line, not a double tap.
+hollow dot; a second tap completes a straight line in your tank colour. Tap
+no longer looks the camera anywhere while enlarged - the small map keeps
+that. Shrinking is the chevron's job, because two quick taps on the enlarged
+map are a short line, not a double tap.
 
-This is **not upstream's plan drawing any more**, and the divergence is the
-point rather than an accident:
+The gesture is ours, because a phone has no second mouse button. **Everything
+the wire can see is upstream's**, at dan's instruction - "I want to preserve
+cross compatability":
 
-- Upstream is a freehand drag decimated at 5px; this is two taps and a
-  straight line, because a phone has no second mouse button and no hand to
-  spare mid-round.
-- Upstream's strokes **fade three seconds after they arrive**, clocked by
-  each receiver. These stay until deleted - which is what "tap and hold
-  deletes it" presupposes, since a line that removes itself needs no delete.
+- a line is two points and a pen-up, exactly what `GLWPlanView` produces for
+  the shortest possible drag, so a PC client renders what this sends;
+- lines **expire three seconds after they are drawn** and fade as they go, on
+  upstream's own `1 - age/3`;
+- **there is no delete.** An earlier draft had a long press remove a line;
+  it is gone, because `ComsLinesMessage` is append-only and cannot express
+  one - a delete would either desync the two maps or need a message upstream
+  does not have. A stroke that removes itself does not need removing.
 
-Both are allowed by the port's own rule - gameplay is upstream's, UI and
-rendering are ours - and cross-play was dropped as a goal, so no PC client
-has to understand any of it.
+The three seconds run from when the line was *completed*, not from its first
+tap, and that is the faithful reading rather than a shortcut: upstream's
+receivers stamp points with their own arrival time (`simulateLine` sets
+`first[2] = totalTime_`), so a whole stroke appears at once at the far end
+and fades together. It is what a teammate sees anyway, and it stops a line
+that took a moment to place from being born half faded. A half-drawn line
+abandons itself on the same clock, which is what replaced the long press.
 
-**The two open decisions, both about the wire:**
-
-1. **Does a line still expire?** They persist locally now. Over a network,
-   a stroke that never expires is a stroke that is still on your teammate's
-   map next round unless something clears it. Round end is the obvious
-   sweep, and `reset()` already does it locally.
-2. **Delete cannot be expressed.** `ComsLinesMessage` is append-only: a list
-   of points with null vectors between strokes, expired by time at the far
-   end. There is no "remove that one". So a delete either stays local - and
-   the two players see different maps, which for a *pointing* tool is the
-   one thing it must not do - or the port carries its own message beside
-   upstream's. The latter, almost certainly, given cross-play is gone; but
-   it is a new message type on the wire and worth saying out loud before
-   it is built.
-
-The relay itself needs no new thinking: `ServerLinesHandler` already drops
-anything over 150 points, checks the sender's destination, honours the mute
-gate and fans out to the sender's team alone, and `common/coms` and
-`server/server` are both compiled into this port already.
+**What the networking still needs**, none of it a design question any more:
+a JNI send on line completion, a `ClientLinesHandler` equivalent to receive,
+and the points converted between landscape coordinates and upstream's
+widget-normalised 0-1 at the boundary. The relay needs no new thinking -
+`ServerLinesHandler` already drops anything over 150 points, checks the
+sender's destination, honours the mute gate and fans out to the sender's
+team alone - and `common/coms` and `server/server` are both compiled into
+this port already. It cannot be verified on one device, so it wants two
+phones on the same team.
 
 - ~~The open design question is the gesture, not the code.~~ **Answered**,
   by dan, and built in cc1eb37: a double tap enlarges the map and another
