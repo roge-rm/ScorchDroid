@@ -238,12 +238,38 @@ fade are all in, and the texture loads - but the Lightning weapon is
 `<armslevel>10</armslevel> `and does not appear in a Target Practice shop, so
 there was no way to fire one. It wants a game whose arms level reaches it.
 
-### V5 – Shield textures
+### V5 – Shield textures — **done 2026-09-14**
 
 - `shield.bmp`/`shielda.bmp` alpha sphere, the `grid2` and `grid22` wire
   textures for the two shield sizes, `shield2.bmp` for magnetic shields;
   hemisphere for half shields. Geometry exists; add the textures and
   upstream's colours.
+
+Two things in that note were wrong. **`grid2` is not one of two sizes** - it
+is the wire mesh every non-magnetic shield wears, round, half and square
+alike. **`grid22` is never drawn**: upstream loads it into a static beside
+the others and no branch ever uses it, so this port does not load it either.
+
+What `drawShield` actually does, and what is now here:
+
+- the sphere, the half shield's hemisphere and the square shield's box all
+  wear `grid2.bmp` (its own mask), tinted with the shield's colour at
+  `0.5 + shieldHit` - where this port had a flat 0.35 wash and no texture.
+- a round shield with `<glow>` adds an additive billboard of `shield.bmp`
+  with `shielda.bmp` as its alpha, at 0.95 of the radius.
+- a **magnetic** round shield has no mesh at all. It is three spirals 120
+  apart, `shield2.bmp`, additive at 0.4, each five pi of turn in pi/6 steps
+  with radius and height growing 0.05 a step, scaled by radius/3, lifted a
+  unit and turning at 800 degrees a second.
+
+The shapes are uploaded once as position/uv/white and tinted per draw through
+a `uTint` uniform added to the shared textured-quad program, so nothing is
+rebuilt per frame. `shieldHit` is not tracked per tank here, so the alpha is
+upstream's 0.5 base without the hit boost - the one piece of this left.
+
+Verified on the emulator: a Shield draws as a textured mesh sphere where it
+used to be a flat wash, and a Mag Deflect draws as turning spirals with no
+sphere at all.
 
 ### V6 – Second cloud layer on a dome
 
