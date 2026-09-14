@@ -136,6 +136,7 @@ add_library(scorched_common STATIC
     porting/SDL_thread_compat.cpp
     porting/Keyboard_stub.cpp
     porting/SoundEventQueue.cpp
+    porting/PlanLineStore.cpp
     porting/DeformEventQueue.cpp
     porting/EffectEventQueue.cpp
     porting/TracerStore.cpp

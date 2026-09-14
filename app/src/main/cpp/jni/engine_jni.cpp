@@ -22,6 +22,10 @@ std::mutex g_engineMutex;
 #include <server/ServerAdminCommon.hpp>
 #include <server/ServerAdminSessions.hpp>
 #include <server/ServerHandlers.hpp>
+#include <coms/ComsLinesMessage.hpp>
+#include <coms/ComsMessageSender.hpp>
+#include "PlanLineStore.h"
+#include <set>
 #include <server/ServerDestinations.hpp>
 #include <target/TargetContainer.hpp>
 #include <engine/Simulator.hpp>
@@ -2215,6 +2219,8 @@ Java_com_rm_scorchdroid_NativeBridge_stopGame(JNIEnv *env, jobject /* this */) {
     g_lastChatMessageId = 0;
 
     ScorchDroidChat::clear();
+    // The lines pointed at a landscape that is about to go.
+    ScorchDroidPlanLines::clear();
     ScorchDroidTracer::clearAll();
     ScorchDroidMovement::clear();
     ScorchDroidTargets::clear();
@@ -2656,6 +2662,123 @@ Java_com_rm_scorchdroid_NativeBridge_sendChat(
         return JNI_TRUE;
     }
     return JNI_FALSE;
+}
+
+// One plan line, drawn on the mini-map, as upstream's ComsLinesMessage.
+//
+// The coordinates are upstream's own: fractions of the plan widget, x
+// rightwards and y *upwards*, converted from landscape coordinates in Kotlin
+// beside the inverse that reads them back, so the two cannot drift.
+//
+// A line goes on the wire as two points and a pen-up, which is exactly what
+// GLWPlanView produces for the shortest drag it can record - so a PC client
+// renders this without knowing it came from a phone.
+//
+// Every point's z is sent as 0, and that is deliberate rather than lazy:
+// upstream's receiver promotes a point only while z is zero and stamps it
+// with its own arrival time (`simulateLine`: `if (first[2] > 0.0f) break;`).
+// Sending anything else would leave the stroke stuck in the receive queue,
+// never drawn. Upstream's own sender fills z with its batching timer and
+// appears to have that bug; this port sends what the receiver actually wants.
+//
+// Host and client take different routes for the same reason sendChat does -
+// a host has no socket to itself:
+//  - joined, it is a ComsLinesMessage to the host, which relays it;
+//  - hosting, the relay *is* this process, so the fan-out ServerLinesHandler
+//    would have done is done here directly. Its rule is upstream's: the
+//    sender's team, plus any admin, once per destination, never back to the
+//    sender. In a free-for-all every tank's team is 0, so that same rule
+//    sends to everyone - which is why this is worth having outside team
+//    games too.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_sendMapLine(
+        JNIEnv *env, jobject /* this */,
+        jfloat ax, jfloat ay, jfloat bx, jfloat by) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    Tank *myTank = findMyTank();
+    if (!myTank) return JNI_FALSE;
+
+    ComsLinesMessage message(myTank->getPlayerId());
+    message.getLines().push_back(Vector(ax, ay, 0.0f));
+    message.getLines().push_back(Vector(bx, by, 0.0f));
+    // Upstream's pen-up, so the strip ends here rather than joining the next
+    // line someone draws.
+    message.getLines().push_back(Vector::getNullVector());
+
+    if (g_mode == EngineMode::kClient && g_clientContext) {
+        return g_clientContext->sendGameMessage(message) ? JNI_TRUE : JNI_FALSE;
+    }
+
+    if (g_mode == EngineMode::kHost) {
+        if (!ScorchedServer::serverStarted()) return JNI_FALSE;
+        ServerDestination *destinationInfo =
+            ScorchedServer::instance()->getServerDestinations().getDestination(
+                myTank->getDestinationId());
+        const bool admin = destinationInfo && destinationInfo->getAdmin();
+
+        std::set<unsigned int> doneDests;
+        doneDests.insert(myTank->getDestinationId());
+        std::map<unsigned int, Tank *> &tanks =
+            ScorchedServer::instance()->getTargetContainer().getTanks();
+        for (auto &entry : tanks) {
+            Tank *other = entry.second;
+            if (!other) continue;
+            if (myTank->getTeam() != other->getTeam() && !admin) continue;
+            if (doneDests.find(other->getDestinationId()) != doneDests.end()) continue;
+            doneDests.insert(other->getDestinationId());
+            ComsMessageSender::sendToSingleClient(message, other->getDestinationId());
+        }
+        return JNI_TRUE;
+    }
+    return JNI_FALSE;
+}
+
+// Plan lines other players have drawn, newer than an id already seen, as
+// "id|playerId|ax|ay|bx|by|r,g,b". Nothing the local player drew comes back
+// here: their own line is shown the moment they finish it, and upstream's
+// relay never echoes to the sender.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getMapLines(
+        JNIEnv *env, jobject /* this */, jint afterId) {
+    std::vector<ScorchDroidPlanLines::Line> lines =
+        ScorchDroidPlanLines::since((unsigned int) std::max(afterId, 0));
+
+    std::vector<std::string> rows;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        for (const ScorchDroidPlanLines::Line &line : lines) {
+            // Upstream drops a line whose tank has gone rather than drawing
+            // it in no colour (drawLine clears the points and returns).
+            Tank *tank = ctx ? ctx->getTargetContainer().getTankById(line.playerId) : nullptr;
+            if (!tank) continue;
+            Vector &colour = tank->getColor();
+
+            std::ostringstream row;
+            row << line.id << "|"
+                << line.playerId << "|"
+                << line.ax << "|" << line.ay << "|"
+                << line.bx << "|" << line.by << "|"
+                << (int) (colour[0] * 255.0f) << ","
+                << (int) (colour[1] * 255.0f) << ","
+                << (int) (colour[2] * 255.0f);
+            rows.push_back(row.str());
+        }
+    }
+
+    jobjectArray result = env->NewObjectArray(
+        (jsize) rows.size(), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < rows.size(); i++) {
+        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(rows[i].c_str()));
+    }
+    return result;
+}
+
+// Bumped on every arriving line, so the HUD polls one integer rather than
+// rebuilding a list to discover nothing changed.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getMapLinesVersion(JNIEnv *env, jobject /* this */) {
+    return (jint) ScorchDroidPlanLines::version();
 }
 
 // The chat log, oldest first, as "id|channel|who|text". Text is last so it

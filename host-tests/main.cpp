@@ -67,6 +67,7 @@
 #include <3dsparse/ModelStore.hpp>
 #include <LandscapeTextureBuilder.hpp>
 #include <MiniMapBuilder.hpp>
+#include <PlanLineStore.h>
 #include <image/ImageFactory.hpp>
 #include <3dsparse/ModelStore.hpp>
 #include <3dsparse/Model.hpp>
@@ -4567,6 +4568,76 @@ static void testPlayerProfile()
 	ScorchDroidProfile::setName("Player");
 }
 
+// The plan-line store's only real decision: turning upstream's point list
+// into whole lines. A ComsLinesMessage is a polyline with a null vector
+// between strokes, so a PC client's freehand scribble arrives as one long
+// run of points and has to come out as the segments between them - not as
+// one line from the first point to the last, and not joined across the
+// pen-up to whatever was drawn next.
+//
+// Worth testing here rather than on a phone because it is pure list
+// arithmetic, and because the interesting inputs (an empty stroke, a lone
+// point, a pen-up at either end) are exactly the ones a real game rarely
+// produces and a hostile or buggy peer easily can.
+static void testPlanLineStore()
+{
+	ScorchDroidPlanLines::clear();
+	check(ScorchDroidPlanLines::since(0).empty(), "the line store starts empty");
+
+	// Two points and a pen-up: what this port sends for one drawn line.
+	ScorchDroidPlanLines::pushStroke(7, {0.1f, 0.2f, 0.3f, 0.4f, 0.0f, 0.0f});
+	std::vector<ScorchDroidPlanLines::Line> lines = ScorchDroidPlanLines::since(0);
+	check(lines.size() == 1, "two points and a pen-up make exactly one line");
+	check(lines[0].playerId == 7, "the line remembers whose it is");
+	check(fabsf(lines[0].ax - 0.1f) < 1e-5f && fabsf(lines[0].ay - 0.2f) < 1e-5f &&
+		fabsf(lines[0].bx - 0.3f) < 1e-5f && fabsf(lines[0].by - 0.4f) < 1e-5f,
+		"the endpoints survive unchanged");
+
+	// A freehand scribble: four points is three segments, not one.
+	ScorchDroidPlanLines::clear();
+	ScorchDroidPlanLines::pushStroke(1, {0.1f, 0.1f, 0.2f, 0.2f, 0.3f, 0.3f, 0.4f, 0.4f});
+	check(ScorchDroidPlanLines::since(0).size() == 3,
+		"a four-point stroke becomes the three segments between them");
+
+	// A pen-up separates two strokes and must not join them.
+	ScorchDroidPlanLines::clear();
+	ScorchDroidPlanLines::pushStroke(1,
+		{0.1f, 0.1f, 0.2f, 0.2f, 0.0f, 0.0f, 0.8f, 0.8f, 0.9f, 0.9f});
+	lines = ScorchDroidPlanLines::since(0);
+	check(lines.size() == 2, "a pen-up splits a message into two strokes");
+	check(fabsf(lines[1].ax - 0.8f) < 1e-5f,
+		"the second stroke starts where it was drawn, not where the first ended");
+
+	// Degenerate input a peer could send.
+	ScorchDroidPlanLines::clear();
+	ScorchDroidPlanLines::pushStroke(1, {});
+	ScorchDroidPlanLines::pushStroke(1, {0.5f, 0.5f});
+	ScorchDroidPlanLines::pushStroke(1, {0.0f, 0.0f, 0.0f, 0.0f});
+	check(ScorchDroidPlanLines::since(0).empty(),
+		"an empty stroke, a lone point and bare pen-ups draw nothing");
+
+	// A line with no player is nobody's and cannot be coloured.
+	ScorchDroidPlanLines::pushStroke(0, {0.1f, 0.1f, 0.2f, 0.2f});
+	check(ScorchDroidPlanLines::since(0).empty(), "a line with no player id is dropped");
+
+	// since() is a cursor, which is what stops a line being re-shown and
+	// re-faded every poll.
+	ScorchDroidPlanLines::clear();
+	ScorchDroidPlanLines::pushStroke(1, {0.1f, 0.1f, 0.2f, 0.2f});
+	lines = ScorchDroidPlanLines::since(0);
+	check(lines.size() == 1, "one line waiting");
+	check(ScorchDroidPlanLines::since(lines[0].id).empty(),
+		"nothing is newer than the line just taken");
+	const unsigned int versionBefore = ScorchDroidPlanLines::version();
+	ScorchDroidPlanLines::pushStroke(1, {0.5f, 0.5f, 0.6f, 0.6f});
+	check(ScorchDroidPlanLines::version() != versionBefore,
+		"the version moves when a line arrives");
+	check(ScorchDroidPlanLines::since(lines[0].id).size() == 1,
+		"and only the new one comes back");
+
+	ScorchDroidPlanLines::clear();
+}
+
 int main(int argc, char **argv)
 {
 	// Upstream's own generic main() bootstrap (common/main.hpp) does this
@@ -4606,6 +4677,7 @@ int main(int argc, char **argv)
 	setenv("HOME", "/tmp/scorchdroid-host-tests-home", 1);
 	S3D::setSettingsDir("scorchdroid-host-tests");
 
+	testPlanLineStore();
 	testFixedPointMath();
 	testRealAccessoryDataLoads();
 	testHumanTankHasNoAI();

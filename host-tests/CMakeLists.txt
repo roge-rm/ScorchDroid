@@ -125,6 +125,7 @@ add_library(scorched_common STATIC
     ${ANDROID_PORTING_DIR}/NetBridge.cpp
     ${ANDROID_PORTING_DIR}/LandscapeTextureBuilder.cpp
     ${ANDROID_PORTING_DIR}/MiniMapBuilder.cpp
+    ${ANDROID_PORTING_DIR}/PlanLineStore.cpp
 )
 
 set_source_files_properties(

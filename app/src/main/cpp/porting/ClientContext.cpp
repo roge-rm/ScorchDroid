@@ -27,6 +27,8 @@
 #include <coms/ComsLevelLoadedMessage.hpp>
 #include <coms/ComsChannelMessage.hpp>
 #include <coms/ComsChannelTextMessage.hpp>
+#include <coms/ComsLinesMessage.hpp>
+#include "PlanLineStore.h"
 #include <lang/LangString.hpp>
 #include <ChatStore.h>
 #include <coms/ComsSimulateMessage.hpp>
@@ -108,6 +110,12 @@ bool ClientContext::connectToServer(const char *host, int port, NetInterface *ne
 	// stops receiving everything else - which is exactly what happened, and
 	// what the host-tests' "client sees every tank" check caught.
 	getComsMessageHandler().addHandler(ComsChannelMessage::ComsChannelMessageType, this);
+
+	// Plan lines another player drew, relayed by the host. Unlike chat this
+	// needs no subscription - ServerLinesHandler fans a line out to the
+	// sender's team without being asked - but like chat it is simply never
+	// delivered without a handler registered for the type.
+	getComsMessageHandler().addHandler(ComsLinesMessage::ComsLinesMessageType, this);
 
 	if (!netInterface->connect(host, port))
 	{
@@ -387,6 +395,27 @@ bool ClientContext::processMessage(NetMessage &message, const char *messageType,
 		// on is fixed - but it must be read and accepted, not left unhandled.
 		ComsChannelMessage channelMessage;
 		channelMessage.readMessage(reader);
+		return true;
+	}
+
+	if (0 == strcmp(messageType, ComsLinesMessage::ComsLinesMessageType.getName().c_str()))
+	{
+		// A line drawn on someone else's plan view. The host has already
+		// decided this is allowed and that this destination should see it
+		// (ServerLinesHandler: not muted, provably from that tank, on the
+		// sender's team, and never echoed back to the sender), so there is
+		// nothing left to check here.
+		ComsLinesMessage linesMessage;
+		if (!linesMessage.readMessage(reader)) return true;
+
+		std::vector<float> points;
+		points.reserve(linesMessage.getLines().size() * 2);
+		for (Vector &point : linesMessage.getLines())
+		{
+			points.push_back(point[0]);
+			points.push_back(point[1]);
+		}
+		ScorchDroidPlanLines::pushStroke(linesMessage.getPlayerId(), points);
 		return true;
 	}
 

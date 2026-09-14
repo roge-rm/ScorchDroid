@@ -111,15 +111,36 @@ and fades together. It is what a teammate sees anyway, and it stops a line
 that took a moment to place from being born half faded. A half-drawn line
 abandons itself on the same clock, which is what replaced the long press.
 
-**What the networking still needs**, none of it a design question any more:
-a JNI send on line completion, a `ClientLinesHandler` equivalent to receive,
-and the points converted between landscape coordinates and upstream's
-widget-normalised 0-1 at the boundary. The relay needs no new thinking -
-`ServerLinesHandler` already drops anything over 150 points, checks the
-sender's destination, honours the mute gate and fans out to the sender's
-team alone - and `common/coms` and `server/server` are both compiled into
-this port already. It cannot be verified on one device, so it wants two
-phones on the same team.
+**The networking is built too.** A finished line goes out as a
+`ComsLinesMessage` - two points and a pen-up - and arriving ones are polled
+into the HUD beside the chat log, stamped with the receiver's own clock so
+they fade from when you saw them.
+
+Three things in it were not obvious from the parity sweep:
+
+- **Every point's z goes out as 0**, which is what upstream's receiver
+  requires: `simulateLine` promotes a point only while z is zero and stamps
+  it with its own arrival time (`if (first[2] > 0.0f) break;`). Upstream's
+  *sender* fills z with its batching timer, which by that reading would
+  leave the stroke stuck in the receive queue - so this port sends what the
+  receiver wants rather than what upstream's sender happens to emit.
+- **It is not team-only in a free-for-all.** `ServerLinesHandler` relays to
+  tanks whose `getTeam()` matches the sender's, and outside a team game
+  every tank's team is 0 - so the rule sends to everyone. Worth knowing:
+  the earlier note here that this is team-only was true of team games only.
+- **The host needs a patch** (0024). The host has no socket to itself and
+  so no client handler runs, and a second handler cannot be registered for
+  the type because `ComsMessageHandler` keeps one per message id and would
+  replace the relay outright. One call inside `ServerLinesHandler`, after
+  every check it makes, gives the hosting player their copy.
+
+Receiving is deliberately more general than sending: a stroke of n points
+becomes the n-1 segments between them, with pen-ups splitting it, so a PC
+client's freehand scribble renders here even though this port only ever
+sends two-point lines.
+
+Not yet run between two devices - the logic is covered by host-tests and
+JVM tests, but nothing has watched a line cross a real link.
 
 - ~~The open design question is the gesture, not the code.~~ **Answered**,
   by dan, and built in cc1eb37: a double tap enlarges the map and another
