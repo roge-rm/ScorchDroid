@@ -69,6 +69,31 @@ port handles the message.
 Depends on the minimap, which is already on the deferred list — the plan view
 *is* the minimap, so the two are one piece of work.
 
+**Deferred again 2026-09-14, by dan's choice**, after the mini-map landed in
+4f450a2 and removed the dependency: "leave the plan drawing for a potential
+future date". The reasoning, for whoever picks it up:
+
+- It is **team-only and multiplayer-only**. `ServerLinesHandler` relays a
+  message solely to tanks sharing the sender's team (plus admins), so in a
+  solo game against bots the feature does nothing at all. Its worth is tied
+  to how much team play actually happens over Wi-Fi Direct or Bluetooth.
+- It cannot be verified on one device. Two phones on the same team are the
+  minimum to test anything past "my own stroke appears", so the natural time
+  to build it is when there is a team game to test it in.
+- The open design question is the gesture, not the code. Upstream draws with
+  the **right** mouse button (left is the look-at the port already has);
+  there is no right button on a phone. Drag on the map is unclaimed, but
+  spending it on drawing forecloses pan/zoom of the map later.
+
+The mechanics, already read out of upstream so the next person need not:
+points are normalised 0–1 widget coordinates with a timestamp in `z`,
+decimated at 5px of movement, a null vector for pen-up; batched and sent
+every 2s; the server drops anything over 150 points, checks the sender's
+destination and honours the mute gate; the receiver stamps arrival time so
+the **3-second** fade is local, alpha is `1 − age/3` in the sender's tank
+colour, and the whole map dims to 0.2 and climbs back at 0.2/s when lines
+first arrive.
+
 ### Auto-defense selection — DONE 2026-09-10
 
 Corrected on implementing it: nothing is *automatic*, despite the name -
@@ -101,7 +126,8 @@ work; one feature, not two.
 
 ## Remaining
 
-Plan drawing (`ComsLinesMessage`), which is one job with the deferred minimap,
+Plan drawing (`ComsLinesMessage`) — no longer blocked by the minimap, which
+landed in 4f450a2, but deferred on its own merits 2026-09-14 (see above) —
 and tooltip settings, which is one job with the deferred tank tooltip.
 
 ## The structural finding

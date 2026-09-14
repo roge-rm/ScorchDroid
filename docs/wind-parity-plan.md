@@ -62,6 +62,9 @@ decimal that is always `.0`, a bearing in degrees upstream never shows, and
 an arrow quantised to 45°. Upstream's dialog is also its minimap, which the
 port plan lists as unscheduled work.
 
+*Not a gap to close - see the 2026-09-14 status below. The port's own
+indicator stays.*
+
 **4. Wind-blown things that do not exist yet.** Damaged tanks smoking
 (`TargetRendererImplTank`, one puff every 0.08-0.4 s scaled by remaining
 life), splash spray when a shot lands in water, and rain or snow on the three
@@ -82,6 +85,20 @@ and the setup options.
   live wind.
 - **X3 deferred**: the indicator work is tied to the minimap, which the port
   does not have yet; to be looked at with it.
+
+## Status (2026-09-14)
+
+- **X3 dropped, by dan's choice**, both halves: "we can ignore the wind
+  parity requirement, our own wind display works better for me". The port
+  keeps `Wind: 3.0 ↗ 45°` - speed to one decimal, a glyph arrow quantised
+  to 45°, and the bearing in degrees - instead of upstream's "Force 3" and
+  its continuously rotated `wind.ase` arrow over a plan of the map. The
+  mini-map landed in 4f450a2 without a wind arrow on it, and is not to grow
+  one. This is the same kind of call as X2: a deliberate deviation in the
+  port's own UI, which is ours, not in gameplay, which is not.
+
+With that, **the wind plan is closed**: X1 and X4 done, X2 and X3 decided
+against.
 
 ## Plan
 
@@ -123,7 +140,9 @@ new, to keep them apart from the water plan's W-numbers.
   and the sea does not flinch; the "Ocean tile uploaded" wind log line
   appears once per landscape rather than once per swing.
 
-### X3 - Upstream's indicator
+### X3 - Upstream's indicator (dropped 2026-09-14)
+
+Kept here for the reasoning only; neither half is to be built.
 
 X3a, small: the HUD line becomes upstream's text - "Wind: Force 3" or
 "No wind" - and the arrow becomes a Compose arrow icon rotated continuously
@@ -174,7 +193,7 @@ In the order upstream players meet them:
    round; separate commits.
 2. X3a with them, since it is the thing a player looks at to check X1.
 3. X4 as three small effect additions, damaged-tank smoke first.
-4. X3b when the minimap is scheduled.
+4. ~~X3b when the minimap is scheduled.~~ Dropped - see the 2026-09-14 status.
 
 No host-tests are possible for any of these - they are all renderer and HUD -
 so the checks are log lines and screenshots in a Gale round, and the build
