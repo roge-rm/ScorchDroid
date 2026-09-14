@@ -884,6 +884,18 @@ namespace
 		// The bearing the shot camera watches from. Held steady while a
 		// shot is in the air - see the preset block in nativeOnDrawFrame.
 		float shotYaw = 0.0f;
+		// V10: upstream's camera shake (GLCamera). `shake` is the budget an
+		// explosion adds to and the decay eats away; `offset` is the jitter
+		// it produces, added to the look-at - never to the eye, so the
+		// camera stays put and only its aim shudders, which is what
+		// GLCamera::draw does. `carry` is the leftover of upstream's fixed
+		// 0.03s step, which it runs instead of a per-frame decay
+		// specifically so the shake outlasts the same wall-clock time at
+		// any frame rate.
+		float shake = 0.0f;
+		float shakeOffset[3] = { 0.0f, 0.0f, 0.0f };
+		float shakeCarry = 0.0f;
+
 		// How much of the requested distance the terrain currently allows -
 		// see the occlusion pull-in in nativeOnDrawFrame. 1.0 is "nothing in
 		// the way". Kept between frames so the camera can ease back out
@@ -4465,6 +4477,15 @@ namespace
 
 			switch (event.type) {
 			case ScorchDroidEffects::eExplosion: {
+				// V10: upstream's GLCamera::addShake, which every explosion
+				// calls and almost none of them means - <explosionshake> is
+				// zero for all but the four biggest weapons in the shipped
+				// mod. It accumulates and pins at 5, which is what stops a
+				// cluster weapon like a Death's Head, that explodes many
+				// times over, from tearing the view apart.
+				if (event.shake > 0.0f) {
+					g_camera.shake = std::min(5.0f, g_camera.shake + event.shake);
+				}
 				// X4b: a splashing weapon that went off under the water.
 				// Water::explosion: the spray, its width the blast size
 				// less two, and the splash sound. The flag rides in value
@@ -4926,6 +4947,32 @@ namespace
 
 		for (int i = 0; i < 4; i++) {
 			if (wallFade[i] > 0.0f) wallFade[i] = std::max(0.0f, wallFade[i] - deltaSeconds);
+		}
+
+		// V10: the shake, decayed on upstream's own fixed 0.03s step rather
+		// than per frame - it says so out loud ("constant changes, regardless
+		// of framerate"), and it is why a Nuke's 4.0 lasts about two seconds
+		// on any device instead of twice as long at half the frame rate.
+		g_camera.shakeCarry += deltaSeconds;
+		while (g_camera.shakeCarry > 0.03f) {
+			g_camera.shakeCarry -= 0.03f;
+			g_camera.shake -= 0.06f;
+			if (g_camera.shake > 0.0f) {
+				// RAND is 0..1 upstream, not -1..1, so the look-at is only
+				// ever pushed the positive way on each axis: the view leans
+				// into one corner as it shudders rather than jittering about
+				// its centre. Lopsided, and reproduced rather than tidied -
+				// it is what its players have always seen.
+				for (int i = 0; i < 3; i++) {
+					g_camera.shakeOffset[i] =
+						((float) rand() / (float) RAND_MAX) * g_camera.shake;
+				}
+			} else {
+				g_camera.shake = 0.0f;
+				g_camera.shakeOffset[0] = 0.0f;
+				g_camera.shakeOffset[1] = 0.0f;
+				g_camera.shakeOffset[2] = 0.0f;
+			}
 		}
 
 		// V8: upstream fades a splash by frameTime/2, so two seconds.
@@ -7171,7 +7218,15 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	float aspect = (float) surfaceWidth / (float) surfaceHeight;
 	float farPlane = std::max(mapWidthUnits, mapHeightUnits) * 3.0f + 200.0f;
 	Mat4 proj = Mat4::perspective(kFovYRadians, aspect, 1.0f, farPlane);
-	Mat4 view = Mat4::lookAt(eyeX, eyeY, eyeZ, targetX, targetY, targetZ, 0.0f, 1.0f, 0.0f);
+	// V10: the shake rides on the look-at alone (GLCamera::draw adds shakeV_
+	// to `look` and leaves the position untouched), so the camera does not
+	// move - its aim wanders and the whole view shudders with it.
+	Mat4 view = Mat4::lookAt(
+		eyeX, eyeY, eyeZ,
+		targetX + g_camera.shakeOffset[0],
+		targetY + g_camera.shakeOffset[1],
+		targetZ + g_camera.shakeOffset[2],
+		0.0f, 1.0f, 0.0f);
 	Mat4 mvp = Mat4::multiply(proj, view);
 
 	{
