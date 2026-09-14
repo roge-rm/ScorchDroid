@@ -34,6 +34,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.OpenInFull
+import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.CenterFocusStrong
@@ -74,10 +76,12 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -244,6 +248,11 @@ class GameHudState {
     // room the corner of a phone screen does not have while the map is also
     // meant to stay out of the way.
     var miniMapEnlarged by mutableStateOf(false)
+    // Lines drawn on the enlarged map, and the first tap of one still waiting
+    // for its second. See MapLines.kt for why these are two-tap straight
+    // lines that stay rather than upstream's fading freehand scribble.
+    var mapLines by mutableStateOf<List<MapLine>>(emptyList())
+    var mapPending by mutableStateOf<MapPoint?>(null)
     // The picture, already an ImageBitmap - rebuilt only when the renderer's
     // version moves, which is a handful of times a round.
     var miniMapImage by mutableStateOf<ImageBitmap?>(null)
@@ -307,6 +316,9 @@ class GameHudState {
         // whole function exists to prevent.
         miniMapVisible = false
         miniMapEnlarged = false
+        // The lines point at places on a landscape that has just gone.
+        mapLines = emptyList()
+        mapPending = null
         miniMapImage = null
         miniMapVersion = -1
         miniMapInfo = null
@@ -1078,6 +1090,11 @@ private val kMiniMapSize = 180.dp
 private const val kMiniMapEnlargedMarginDp = 24
 private const val kMiniMapEnlargedHeadroomDp = 200
 
+// How far a long press may miss a drawn line and still delete it. A little
+// over half a finger: generous enough that a line is not a pixel hunt,
+// tight enough that two lines a finger apart are still separable.
+private val kMapLineTouchSlop = 22.dp
+
 private val kHudIconSize = 44.dp
 private val kHudIconSidePadding = 2.dp
 private val kHudGroupGap = 10.dp
@@ -1283,175 +1300,293 @@ private fun MiniMap(
         shape = RoundedCornerShape(8.dp),
         modifier = modifier.size(side),
     ) {
-        Canvas(
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(info) {
-                    // A double tap toggles the enlarged map; every tap,
-                    // including both halves of that double tap, still looks
-                    // where it landed.
-                    //
-                    // Deliberately not detectTapGestures' own onDoubleTap:
-                    // supplying it holds *every* single tap back by the
-                    // double-tap timeout before delivering it, and ~300ms of
-                    // dead air is the whole feel of a camera control. Looking
-                    // somewhere is idempotent and harmless, so the first tap
-                    // of a double tap can fire for real and the second can
-                    // enlarge on top of it - which frames the thing you are
-                    // about to inspect more closely, which is the point.
-                    var lastTapAt = 0L
-                    var lastTapPos = Offset.Zero
-                    detectTapGestures { offset ->
-                        val now = System.currentTimeMillis()
-                        val isDouble = now - lastTapAt < viewConfiguration.doubleTapTimeoutMillis &&
-                            (offset - lastTapPos).getDistance() < viewConfiguration.touchSlop * 3f
-                        if (isDouble) {
-                            state.miniMapEnlarged = !state.miniMapEnlarged
-                            // So a third tap starts a fresh pair rather than
-                            // toggling again off the back of the second.
-                            lastTapAt = 0L
-                        } else {
-                            lastTapAt = now
-                            lastTapPos = offset
+        Box(modifier = Modifier.fillMaxSize()) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(info) {
+                        // The inverse of the draw transform below, which is what
+                        // upstream's mouseDown does with the same numbers. Null
+                        // outside the arena rather than clamped: the corners of a
+                        // letterboxed map are not part of the world.
+                        fun toLandscape(offset: Offset): MapPoint? {
+                            val sidePx = size.width.toFloat()
+                            val inset = sidePx * insetFraction
+                            val box = sidePx - inset * 2f
+                            if (box <= 0f) return null
+                            val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
+                            val u = (offset.x - inset) / box
+                            val v = (offset.y - inset) / box
+                            val lx = u * maxSpan + info.arenaX - (maxSpan - info.arenaWidth) / 2f
+                            // Screen y runs the other way from landscape y.
+                            val ly = (1f - v) * maxSpan + info.arenaY - (maxSpan - info.arenaHeight) / 2f
+                            if (lx < info.arenaX || lx > info.arenaX + info.arenaWidth) return null
+                            if (ly < info.arenaY || ly > info.arenaY + info.arenaHeight) return null
+                            return MapPoint(lx, ly)
                         }
 
-                        // The inverse of the draw transform below, which is
-                        // what upstream's mouseDown does with the same
-                        // numbers. Taps outside the arena are ignored rather
-                        // than clamped: the corners of a letterboxed map are
-                        // not part of the world.
-                        val side = size.width.toFloat()
-                        val inset = side * insetFraction
-                        val box = side - inset * 2f
-                        if (box <= 0f) return@detectTapGestures
-                        val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
-                        val u = (offset.x - inset) / box
-                        val v = (offset.y - inset) / box
-                        val lx = u * maxSpan + info.arenaX - (maxSpan - info.arenaWidth) / 2f
-                        // Screen y runs the other way from landscape y.
-                        val ly = (1f - v) * maxSpan + info.arenaY - (maxSpan - info.arenaHeight) / 2f
-                        if (lx < info.arenaX || lx > info.arenaX + info.arenaWidth) return@detectTapGestures
-                        if (ly < info.arenaY || ly > info.arenaY + info.arenaHeight) return@detectTapGestures
-                        onLookAt(lx, ly)
+                        // How far a finger may miss a line and still mean it, in
+                        // landscape units, so the allowance is the same patch of
+                        // *screen* at either map size.
+                        fun deleteSlop(): Float {
+                            val sidePx = size.width.toFloat()
+                            val box = sidePx - sidePx * insetFraction * 2f
+                            if (box <= 0f) return 0f
+                            val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
+                            return kMapLineTouchSlop.toPx() * maxSpan / box
+                        }
+
+                        // A double tap enlarges the map - but only while it is
+                        // small. Enlarged, a tap is the first or second point of
+                        // a line, so two quick taps are a *short line*, not a
+                        // request to shrink; that is what the chevron is for.
+                        //
+                        // Deliberately not detectTapGestures' own onDoubleTap
+                        // either: supplying it holds every single tap back by the
+                        // double-tap timeout before delivering it, and ~300ms of
+                        // dead air is the whole feel of a camera control. Looking
+                        // somewhere is idempotent and harmless, so the first tap
+                        // of a double tap fires for real and the second enlarges
+                        // on top of it - framing the thing you are about to
+                        // inspect, which is the point.
+                        var lastTapAt = 0L
+                        var lastTapPos = Offset.Zero
+
+                        detectTapGestures(
+                            onLongPress = { offset ->
+                                if (state.miniMapEnlarged) {
+                                    val point = toLandscape(offset)
+                                    if (point != null) {
+                                        val hit = hitTestMapLine(
+                                            state.mapLines, point.x, point.y, deleteSlop(),
+                                        )
+                                        if (hit >= 0) {
+                                            state.mapLines =
+                                                state.mapLines.filterIndexed { i, _ -> i != hit }
+                                        } else {
+                                            // A press on bare ground abandons a
+                                            // half-drawn line. Without it the
+                                            // only way out of a mis-tapped first
+                                            // point is to finish a line you did
+                                            // not want and then delete it.
+                                            state.mapPending = null
+                                        }
+                                    }
+                                }
+                            },
+                            onTap = { offset ->
+                                val point = toLandscape(offset)
+                                if (state.miniMapEnlarged) {
+                                    if (point != null) {
+                                        val myColour = state.miniMapTanks
+                                            .firstOrNull { it.isMe }?.colorArgb
+                                            ?: Color.White.toArgb()
+                                        val (pending, line) = placeMapPoint(
+                                            state.mapPending, point.x, point.y, myColour,
+                                        )
+                                        state.mapPending = pending
+                                        if (line != null) state.mapLines = state.mapLines + line
+                                    }
+                                } else {
+                                    val now = System.currentTimeMillis()
+                                    val isDouble =
+                                        now - lastTapAt < viewConfiguration.doubleTapTimeoutMillis &&
+                                            (offset - lastTapPos).getDistance() <
+                                            viewConfiguration.touchSlop * 3f
+                                    if (isDouble) {
+                                        state.miniMapEnlarged = true
+                                        // So a third tap starts a fresh pair
+                                        // rather than firing again off the second.
+                                        lastTapAt = 0L
+                                    } else {
+                                        lastTapAt = now
+                                        lastTapPos = offset
+                                    }
+                                    if (point != null) onLookAt(point.x, point.y)
+                                }
+                            },
+                        )
+                    },
+            ) {
+                val side = size.minDimension
+                val inset = side * insetFraction
+                val box = side - inset * 2f
+                if (box <= 0f) return@Canvas
+                val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
+                if (maxSpan <= 0f) return@Canvas
+                val scale = box / maxSpan
+
+                // Landscape (x, y) -> canvas pixels, y flipped.
+                fun px(x: Float): Float =
+                    inset + (x - info.arenaX + (maxSpan - info.arenaWidth) / 2f) * scale
+                fun py(y: Float): Float =
+                    inset + ((maxSpan - info.arenaHeight) / 2f + (info.arenaY + info.arenaHeight - y)) * scale
+
+                // 1. The landscape. The image spans the whole map, so the source
+                // rectangle crops it to the arena the way upstream's texture
+                // coordinates do.
+                val srcLeft = (info.arenaX / info.landWidth * image.width).toInt().coerceIn(0, image.width)
+                val srcRight = ((info.arenaX + info.arenaWidth) / info.landWidth * image.width)
+                    .toInt().coerceIn(srcLeft + 1, image.width)
+                // Landscape y is up and image rows run the same way, so the top
+                // of the arena is the *last* row of it.
+                val srcBottom = (image.height - (info.arenaY / info.landHeight * image.height).toInt())
+                    .coerceIn(1, image.height)
+                val srcTop = (image.height -
+                    ((info.arenaY + info.arenaHeight) / info.landHeight * image.height).toInt())
+                    .coerceIn(0, srcBottom - 1)
+
+                withTransform({
+                    // One flip for the image, since its rows are bottom-up
+                    // relative to the screen.
+                    scale(1f, -1f, pivot = Offset(size.width / 2f, size.height / 2f))
+                }) {
+                    drawImage(
+                        image = image,
+                        srcOffset = IntOffset(srcLeft, image.height - srcBottom),
+                        srcSize = IntSize(srcRight - srcLeft, srcBottom - srcTop),
+                        dstOffset = IntOffset(
+                            (inset + (maxSpan - info.arenaWidth) / 2f * scale).toInt(),
+                            (inset + (maxSpan - info.arenaHeight) / 2f * scale).toInt(),
+                        ),
+                        dstSize = IntSize(
+                            (info.arenaWidth * scale).toInt().coerceAtLeast(1),
+                            (info.arenaHeight * scale).toInt().coerceAtLeast(1),
+                        ),
+                        filterQuality = FilterQuality.Low,
+                    )
+                }
+
+                // 2. The arena's edge. Upstream drops a ring every 32 world units
+                // along all four sides and hides them when the wall is "none".
+                if (info.hasWall) {
+                    val wall = Color(info.wallArgb)
+                    val step = 32f
+                    val dots = mutableListOf<Offset>()
+                    var x = info.arenaX
+                    while (x <= info.arenaX + info.arenaWidth) {
+                        dots += Offset(px(x), py(info.arenaY))
+                        dots += Offset(px(x), py(info.arenaY + info.arenaHeight))
+                        x += step
                     }
-                },
-        ) {
-            val side = size.minDimension
-            val inset = side * insetFraction
-            val box = side - inset * 2f
-            if (box <= 0f) return@Canvas
-            val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
-            if (maxSpan <= 0f) return@Canvas
-            val scale = box / maxSpan
-
-            // Landscape (x, y) -> canvas pixels, y flipped.
-            fun px(x: Float): Float =
-                inset + (x - info.arenaX + (maxSpan - info.arenaWidth) / 2f) * scale
-            fun py(y: Float): Float =
-                inset + ((maxSpan - info.arenaHeight) / 2f + (info.arenaY + info.arenaHeight - y)) * scale
-
-            // 1. The landscape. The image spans the whole map, so the source
-            // rectangle crops it to the arena the way upstream's texture
-            // coordinates do.
-            val srcLeft = (info.arenaX / info.landWidth * image.width).toInt().coerceIn(0, image.width)
-            val srcRight = ((info.arenaX + info.arenaWidth) / info.landWidth * image.width)
-                .toInt().coerceIn(srcLeft + 1, image.width)
-            // Landscape y is up and image rows run the same way, so the top
-            // of the arena is the *last* row of it.
-            val srcBottom = (image.height - (info.arenaY / info.landHeight * image.height).toInt())
-                .coerceIn(1, image.height)
-            val srcTop = (image.height -
-                ((info.arenaY + info.arenaHeight) / info.landHeight * image.height).toInt())
-                .coerceIn(0, srcBottom - 1)
-
-            withTransform({
-                // One flip for the image, since its rows are bottom-up
-                // relative to the screen.
-                scale(1f, -1f, pivot = Offset(size.width / 2f, size.height / 2f))
-            }) {
-                drawImage(
-                    image = image,
-                    srcOffset = IntOffset(srcLeft, image.height - srcBottom),
-                    srcSize = IntSize(srcRight - srcLeft, srcBottom - srcTop),
-                    dstOffset = IntOffset(
-                        (inset + (maxSpan - info.arenaWidth) / 2f * scale).toInt(),
-                        (inset + (maxSpan - info.arenaHeight) / 2f * scale).toInt(),
-                    ),
-                    dstSize = IntSize(
-                        (info.arenaWidth * scale).toInt().coerceAtLeast(1),
-                        (info.arenaHeight * scale).toInt().coerceAtLeast(1),
-                    ),
-                    filterQuality = FilterQuality.Low,
-                )
-            }
-
-            // 2. The arena's edge. Upstream drops a ring every 32 world units
-            // along all four sides and hides them when the wall is "none".
-            if (info.hasWall) {
-                val wall = Color(info.wallArgb)
-                val step = 32f
-                val dots = mutableListOf<Offset>()
-                var x = info.arenaX
-                while (x <= info.arenaX + info.arenaWidth) {
-                    dots += Offset(px(x), py(info.arenaY))
-                    dots += Offset(px(x), py(info.arenaY + info.arenaHeight))
-                    x += step
+                    var y = info.arenaY + step
+                    while (y < info.arenaY + info.arenaHeight) {
+                        dots += Offset(px(info.arenaX), py(y))
+                        dots += Offset(px(info.arenaX + info.arenaWidth), py(y))
+                        y += step
+                    }
+                    dots.forEach { drawCircle(wall, radius = 1.2.dp.toPx(), center = it, alpha = 0.9f) }
                 }
-                var y = info.arenaY + step
-                while (y < info.arenaY + info.arenaHeight) {
-                    dots += Offset(px(info.arenaX), py(y))
-                    dots += Offset(px(info.arenaX + info.arenaWidth), py(y))
-                    y += step
-                }
-                dots.forEach { drawCircle(wall, radius = 1.2.dp.toPx(), center = it, alpha = 0.9f) }
-            }
 
-            // 3. The tanks. Upstream's dot is 16 world units across, so it
-            // scales with the arena rather than being a fixed size - a dot on
-            // a small map really is bigger.
-            val dotRadius = (8f * scale).coerceIn(2.5.dp.toPx(), 7.dp.toPx())
-            state.miniMapTanks.forEach { tank ->
-                if (tank.flash && !flashOn.value) return@forEach
-                val centre = Offset(px(tank.x), py(tank.y))
-                drawCircle(Color(tank.colorArgb), radius = dotRadius, center = centre)
-                // Ours, not upstream's: at this size a ring around your own
-                // dot is the difference between reading the map at a glance
-                // and hunting for yourself on it.
-                if (tank.isMe) {
+                // 3. The tanks. Upstream's dot is 16 world units across, so it
+                // scales with the arena rather than being a fixed size - a dot on
+                // a small map really is bigger.
+                val dotRadius = (8f * scale).coerceIn(2.5.dp.toPx(), 7.dp.toPx())
+                state.miniMapTanks.forEach { tank ->
+                    if (tank.flash && !flashOn.value) return@forEach
+                    val centre = Offset(px(tank.x), py(tank.y))
+                    drawCircle(Color(tank.colorArgb), radius = dotRadius, center = centre)
+                    // Ours, not upstream's: at this size a ring around your own
+                    // dot is the difference between reading the map at a glance
+                    // and hunting for yourself on it.
+                    if (tank.isMe) {
+                        drawCircle(
+                            Color.White,
+                            radius = dotRadius + 2.dp.toPx(),
+                            center = centre,
+                            style = Stroke(width = 1.5.dp.toPx()),
+                        )
+                    }
+                }
+
+                // 4. Where the camera is looking, on top of everything.
+                val camera = state.miniMapCamera.split("|")
+                if (camera.size == 4) {
+                    val lookX = camera[0].toFloatOrNull()
+                    val lookY = camera[1].toFloatOrNull()
+                    val dirX = camera[2].toFloatOrNull()
+                    val dirY = camera[3].toFloatOrNull()
+                    if (lookX != null && lookY != null && dirX != null && dirY != null) {
+                        val tip = Offset(px(lookX), py(lookY))
+                        // Landscape y is flipped on screen, so the direction's y
+                        // flips with it.
+                        val dx = dirX
+                        val dy = -dirY
+                        val len = 7.dp.toPx()
+                        val back = Offset(tip.x - dx * len, tip.y - dy * len)
+                        val perp = Offset(-dy, dx)
+                        val half = 4.dp.toPx()
+                        val path = Path().apply {
+                            moveTo(tip.x, tip.y)
+                            lineTo(back.x + perp.x * half, back.y + perp.y * half)
+                            lineTo(back.x - perp.x * half, back.y - perp.y * half)
+                            close()
+                        }
+                        drawPath(path, Color.White, alpha = 0.8f)
+                    }
+                }
+
+                // 5. The drawn lines, last and over everything - upstream's own
+                // order, which calls drawLines() after the map transform has
+                // been popped. They are an annotation on the picture rather than
+                // part of it, and a line that disappeared under a tank dot would
+                // be pointing at the one thing you most wanted to point at.
+                state.mapLines.forEach { line ->
+                    drawLine(
+                        color = Color(line.colorArgb),
+                        start = Offset(px(line.ax), py(line.ay)),
+                        end = Offset(px(line.bx), py(line.by)),
+                        strokeWidth = 2.5.dp.toPx(),
+                        cap = StrokeCap.Round,
+                    )
+                }
+                // The half-drawn line's first point. Hollow, so it reads as
+                // "waiting for the other end" rather than as a tank dot.
+                state.mapPending?.let { pending ->
+                    val centre = Offset(px(pending.x), py(pending.y))
+                    val myColour = state.miniMapTanks.firstOrNull { it.isMe }?.colorArgb
+                        ?: Color.White.toArgb()
+                    drawCircle(Color(myColour), radius = 3.dp.toPx(), center = centre)
                     drawCircle(
-                        Color.White,
-                        radius = dotRadius + 2.dp.toPx(),
+                        Color(myColour),
+                        radius = 6.dp.toPx(),
                         center = centre,
                         style = Stroke(width = 1.5.dp.toPx()),
                     )
                 }
             }
 
-            // 4. Where the camera is looking, on top of everything.
-            val camera = state.miniMapCamera.split("|")
-            if (camera.size == 4) {
-                val lookX = camera[0].toFloatOrNull()
-                val lookY = camera[1].toFloatOrNull()
-                val dirX = camera[2].toFloatOrNull()
-                val dirY = camera[3].toFloatOrNull()
-                if (lookX != null && lookY != null && dirX != null && dirY != null) {
-                    val tip = Offset(px(lookX), py(lookY))
-                    // Landscape y is flipped on screen, so the direction's y
-                    // flips with it.
-                    val dx = dirX
-                    val dy = -dirY
-                    val len = 7.dp.toPx()
-                    val back = Offset(tip.x - dx * len, tip.y - dy * len)
-                    val perp = Offset(-dy, dx)
-                    val half = 4.dp.toPx()
-                    val path = Path().apply {
-                        moveTo(tip.x, tip.y)
-                        lineTo(back.x + perp.x * half, back.y + perp.y * half)
-                        lineTo(back.x - perp.x * half, back.y - perp.y * half)
-                        close()
-                    }
-                    drawPath(path, Color.White, alpha = 0.8f)
-                }
+            // The chevron, in a corner the letterbox has already made dead
+            // space. It says the map resizes at all - a double tap is the
+            // convention for zooming a map, but a convention is not a label,
+            // and this HUD's rule is to say the gesture out loud.
+            //
+            // It also has to exist rather than being decoration: shrinking
+            // cannot be a double tap once the enlarged map is drawing points,
+            // because two quick taps there are a short line. So the chevron is
+            // the way out, and the only one.
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(3.dp)
+                    .size(26.dp)
+                    .clickable { state.miniMapEnlarged = !state.miniMapEnlarged },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (state.miniMapEnlarged) {
+                        Icons.Filled.CloseFullscreen
+                    } else {
+                        Icons.Filled.OpenInFull
+                    },
+                    contentDescription = if (state.miniMapEnlarged) {
+                        "Shrink the map and stop drawing"
+                    } else {
+                        "Enlarge the map to draw on it"
+                    },
+                    tint = Color.White.copy(alpha = 0.8f),
+                    modifier = Modifier.size(15.dp),
+                )
             }
         }
     }
