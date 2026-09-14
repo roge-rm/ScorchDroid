@@ -212,9 +212,9 @@ work; one feature, not two.
 
 ## Remaining
 
-Plan drawing (`ComsLinesMessage`) — no longer blocked by the minimap, which
-landed in 4f450a2, but deferred on its own merits 2026-09-14 (see above) —
-and tooltip settings, which is one job with the deferred tank tooltip.
+Tooltip settings, which is one job with the deferred tank tooltip. That is
+the whole list: plan drawing was the other entry and it shipped on
+2026-09-14 (a47b1a0), verified between two devices.
 
 ## The structural finding
 
