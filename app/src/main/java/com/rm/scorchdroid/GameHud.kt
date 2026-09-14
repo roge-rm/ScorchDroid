@@ -5,6 +5,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -79,6 +80,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.FilterQuality
@@ -281,6 +283,11 @@ class GameHudState {
     // reaching for preferences mid-composition. Set from GameSettings.
     var showNamePlates by mutableStateOf(true)
     var showHealthBars by mutableStateOf(true)
+    var showTankArrows by mutableStateOf(true)
+    // V9: upstream's arrow over a tank (data/images/arrow.bmp), loaded once
+    // and tinted per tank. Null until it is read off disk, and if that ever
+    // fails the arrow is simply absent rather than a placeholder.
+    var tankArrowImage by mutableStateOf<ImageBitmap?>(null)
     var chatToastMillis by mutableStateOf(CHAT_TOAST_MILLIS)
     var leftHandMode by mutableStateOf(false)
     var controlOpacity by mutableFloatStateOf(1.0f)
@@ -753,7 +760,12 @@ fun GameHud(
 
         // Name plates and health bars, positioned from the renderer's own
         // projection. Drawn before the dialog host so a modal covers them.
-        TankPlates(state.tankOverlays, state.showNamePlates, state.showHealthBars)
+        TankPlates(
+            state.tankOverlays,
+            state.showNamePlates,
+            state.showHealthBars,
+            if (state.showTankArrows) state.tankArrowImage else null,
+        )
         FloatingLabels(state.floatingLabels)
 
         HudDialogHost(state.dialog)
@@ -800,8 +812,13 @@ private fun wrapDegrees(degrees: Float): Float = ((degrees % 360f) + 360f) % 360
  * life bar, so that is what this does.
  */
 @Composable
-private fun TankPlates(overlays: List<TankOverlay>, showNames: Boolean, showHealth: Boolean) {
-    if (overlays.isEmpty() || (!showNames && !showHealth)) return
+private fun TankPlates(
+    overlays: List<TankOverlay>,
+    showNames: Boolean,
+    showHealth: Boolean,
+    arrow: ImageBitmap?,
+) {
+    if (overlays.isEmpty() || (!showNames && !showHealth && arrow == null)) return
     val density = LocalDensity.current
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -828,6 +845,22 @@ private fun TankPlates(overlays: List<TankOverlay>, showNames: Boolean, showHeal
                         style = MaterialTheme.typography.labelMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                // V9: upstream's arrow, between the name and the bars -
+                // which is how its own screen reads, name on top, then the
+                // arrow, then the health. It lives in this column rather
+                // than in GL for exactly that reason: the plates are placed
+                // at a pixel offset from the tank, so an arrow at a fixed
+                // world height would ride above the name at one camera
+                // distance and below the bar at another.
+                if (arrow != null) {
+                    Spacer(Modifier.height(1.dp))
+                    Image(
+                        bitmap = arrow,
+                        contentDescription = null,
+                        colorFilter = ColorFilter.tint(overlay.color),
+                        modifier = Modifier.size(width = 12.dp, height = 16.dp),
                     )
                 }
                 // Bars only while alive - a destroyed tank has no health to

@@ -256,10 +256,51 @@ here.** Both came from testing entirely inside the buying phase:
 **For checking anything about how tanks are drawn, start a Target Practice
 game**: it begins immediately, with no buying phase to sit through.
 
-### V8 – Arena wall
+### V8 – Arena wall — **done 2026-09-14**
 
 - The `grid.bmp` texture on the wall quad, scrolling by `int(fade·75) % 2`,
   in the wall colour with alpha = fade; and `hit.bmp` at the impact point.
+
+"Scrolling" overstates it. Upstream's `rot` is commented out and pinned to
+zero (`int rot = 0;//int(fade * 75) % 2;`); what survives is `pos`, which
+flips between 0 and 5 as the fade counts down and is added to **only the two
+top corners**, so the grid shears back and forth rather than sliding. At
+`int(fade * 75) % 2` that alternates about 37 times a second over the two
+seconds a panel lasts - a shimmer, not a scroll. The asymmetry is upstream's
+and is reproduced; the commented-out block above it says plainly that it was
+being experimented with.
+
+Both textures load with the file as **its own mask**, which is how upstream
+builds them (`Wall`'s `ImageID` and `WallActionRenderer::init` each pass the
+path twice), so the alpha is the image's own luminance.
+
+The panel also **stopped being additive**. This port had it on
+`GL_SRC_ALPHA, GL_ONE` with the fade multiplied into the colour, where
+upstream leaves `GLSetup`'s ordinary `GL_SRC_ALPHA,
+GL_ONE_MINUS_SRC_ALPHA` alone and puts the fade in the alpha - so a
+concrete-grey wall was glowing rather than tinting.
+
+The splash is upstream's own: a 40-unit square lying in the wall's plane,
+centred on the impact, drawn twice - a little either side of the plane, with
+the winding and the texture reversed between them - so it reads from both
+directions without fighting the panel for depth. Its offset walks 0.1 to 0.4
+in steps of 0.02 per hit and wraps, as upstream's static does, so two
+splashes near each other do not land in the same plane. It fades over two
+seconds (`frameTime / 2`). Upstream's texture coordinates put `u` on the
+*height* and `v` on the horizontal, turning the splash a quarter turn;
+reproduced rather than tidied.
+
+All three of these now share one textured-quad program with V9's arrow, since
+each is a flat tinted picture standing in the world.
+
+**Verified as far as the emulator allows.** Forcing the fade on shows the
+grid over the whole upper view where an unforced frame has clean sky, and
+both passes build the right geometry - 24 vertices for four panels, 12 for
+the splash drawn twice. What has *not* been seen is a real in-game wall hit:
+getting a shot to reach the arena boundary through canyon terrain defeated a
+dozen attempts, and from inside the arena the splash is a 40-unit square
+several hundred units away. The event path itself is unchanged from the
+flash this port already had.
 
 ### V9 – Tank arrow — **done 2026-09-14**
 
