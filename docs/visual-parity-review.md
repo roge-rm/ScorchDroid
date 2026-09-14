@@ -221,28 +221,40 @@ after the upload's axis remap, so the sign flips with it. The trigger is the
 `#else` this port already owns in `PlayMovesSimAction::tankFired`, exactly
 where upstream calls `renderer->fired()`.
 
-**The problem is the magnitude, not the work.** `fireOffSet_` is in *model*
-units, applied inside the tank's own scale, next to `gunOffset_`. Measured on
-the device: a model uploading at scale 0.093 turns 0.25 model units into
-**0.023 world units**. A tank is a few world units long, so upstream's recoil
-is well under one percent of the tank's own length - sub-pixel at any normal
-camera distance. Implementing it faithfully changes nothing anyone can see.
+**The problem is the magnitude, and it is upstream's own.** `fireOffSet_` is
+a fixed value in *model* units, applied inside the tank's own scale beside
+`gunOffset_` - but tank models differ enormously in what a model unit means.
+`uploadModel` normalises every model to a 2.2-unit diagonal (`scale = 2.2 /
+size`, upstream's `ModelRendererTank::setup` rule), so the recoil as a
+fraction of the tank is simply `0.25 / rawSize`. Measured across the three
+tank models in one game:
 
-Two things fell out of the spike that matter more than V7 itself:
+| uploaded scale | raw diagonal | recoil as a fraction of the tank |
+|---|---|---|
+| 0.114 | 19 | 1.3% |
+| 0.006 | 367 | 0.07% |
+| 0.004 | 550 | 0.05% |
 
-- **The hull/turret/gun split has never been observed working.** Every
-  `Model uploaded` line seen so far reports `turret 0, gun 0 tris` - all
-  geometry lands in the hull. The classifier matches mesh names beginning
-  `"Turret`/`"turret` and `"Gun`/`"gun`, and the MilkShape tank models do
-  contain meshes named exactly `"turret"` and `"gun"`, so it ought to fire.
-  If it does not, the turret is not turning independently of the hull
-  either, which is a far larger parity gap than recoil.
-- **Tanks rendered no model at all** in three consecutive single-player
-  Quick Games on the emulator: name plates floated over the terrain with no
-  tank beneath them, no tank model ever uploaded, and the status line read
-  `0 targets`. They drew normally in the two-device game an hour earlier, so
-  this is situational rather than constant - but it wants chasing before any
-  more work goes into how tanks look.
+So on one tank it is a pixel or two at a normal camera distance, and on the
+next it is nothing at all - a thirty-fold spread nobody chose, because a
+constant in model units is meaningless across models whose coordinates
+differ by that much. Faithfully reproducing it reproduces the inconsistency.
+If recoil is ever wanted, it should be a fraction of the model's own size
+rather than upstream's constant, and that is a deliberate deviation to
+decide rather than a port of V7.
+
+**Two claims in the first version of this note were wrong, and are corrected
+here.** Both came from testing entirely inside the buying phase:
+
+- Tanks upload no model while the buying period is on, so "tanks rendered no
+  model at all" was the buying phase behaving normally, not a bug.
+- Consequently every `Model uploaded` line seen was an arena marker, a ship
+  or a missile, none of which has a turret. The hull/turret/gun split **does**
+  work on real tanks - the same game reports `turret 48, gun 120`,
+  `turret 12, gun 1608` and `turret 100, gun 316` once play starts.
+
+**For checking anything about how tanks are drawn, start a Target Practice
+game**: it begins immediately, with no buying phase to sit through.
 
 ### V8 – Arena wall
 
