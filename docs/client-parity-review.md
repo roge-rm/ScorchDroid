@@ -80,10 +80,16 @@ future date". The reasoning, for whoever picks it up:
 - It cannot be verified on one device. Two phones on the same team are the
   minimum to test anything past "my own stroke appears", so the natural time
   to build it is when there is a team game to test it in.
-- The open design question is the gesture, not the code. Upstream draws with
-  the **right** mouse button (left is the look-at the port already has);
-  there is no right button on a phone. Drag on the map is unclaimed, but
-  spending it on drawing forecloses pan/zoom of the map later.
+- ~~The open design question is the gesture, not the code.~~ **Answered**,
+  by dan, and built in cc1eb37: a double tap enlarges the map and another
+  shrinks it. Drawing becomes drag *inside* the enlarged state, so the map's
+  drag is not spent globally and a thumbnail-sized scribble - which would be
+  useless anyway - never arises. Upstream draws with the **right** mouse
+  button (left is the look-at the port already has), which a phone does not
+  have; a mode entered on purpose is the phone's answer to a second button.
+  What is left to decide is only what a *tap* does once drawing is live:
+  look-at, as it does now, or nothing, so a stray tap cannot jerk the camera
+  mid-scribble. The latter, probably.
 
 The mechanics, already read out of upstream so the next person need not:
 points are normalised 0–1 widget coordinates with a timestamp in `z`,
