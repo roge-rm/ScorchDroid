@@ -326,6 +326,14 @@ object NativeBridge {
     external fun setSightStyle(style: Int)
 
     /**
+     * V9: whether to draw upstream's arrow over a tank
+     * (TargetRendererImplTank::drawArrow). Its own switch beside the name
+     * plate's and the health bar's, because upstream keeps its three
+     * equivalents apart as well.
+     */
+    external fun setShowTankArrows(show: Boolean)
+
+    /**
      * M23: how finely the landscape is drawn, as the resolution of the mesh
      * grid. The default is the heightmap's own, which is what upstream draws;
      * lower is cheaper. Takes effect on the next landscape.

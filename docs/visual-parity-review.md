@@ -261,10 +261,49 @@ game**: it begins immediately, with no buying phase to sit through.
 - The `grid.bmp` texture on the wall quad, scrolling by `int(fade·75) % 2`,
   in the wall colour with alpha = fade; and `hit.bmp` at the impact point.
 
-### V9 – Tank arrow
+### V9 – Tank arrow — **done 2026-09-14**
 
 - `arrow.bmp` billboard from 4 to 7 units above a tank not in its normal
   state, in the player colour.
+
+That one-liner was half the story. `drawArrow()` is called from **two**
+places in `drawParticle`: once for a tank that is visible but not `sNormal`,
+which given `getVisible()` means a tank still shopping; and once during play
+for any tank that is not yours - and for yours too, once the camera is not
+one of `CamAim`/`CamShot`/`CamTank`/`CamAction`/`CamExplosion`, the five that
+already frame it. Both sit under `OptionsDisplay::getDrawPlayerColor()`.
+
+Drawn in GL rather than Compose, unlike the name plate and the health bar
+beside it: those are text, which the renderer has no font for, while this is
+a world-space textured billboard that upstream depth-tests. It keeps
+upstream's `glDepthMask(GL_FALSE)` with the test left on, so ground in front
+hides it and it occludes nothing itself.
+
+Three deviations, each marked in the code:
+
+- **Width is fixed at 1.4 units** rather than upstream's
+  `aspect * 0.8`. That factor is what a 16:9 desktop works out to; on a phone
+  held in portrait it would pinch the arrow to a third of the width
+  Scorched3D's own players see.
+- **Your own arrow appears from Free and Top only**, this port's two presets
+  that stand back, since its camera modes are its own rather than upstream's
+  five.
+- It is skipped for a tank that is not visible, which upstream gets for free
+  by bailing out of `drawParticle` before it ever reaches this.
+
+Settable: **Display → HUD → Tank arrows**, its own switch beside Name plates
+and Health bars. A switch rather than one slider folding all three together,
+because upstream keeps its three equivalents apart (`getDrawPlayerColor`,
+`getDrawPlayerName`, `getDrawPlayerHealth`) and the combinations are not an
+ordered scale - arrows without names is as reasonable as names without
+arrows.
+
+Two traps worth recording. `data/images/arrow.bmp` and its `arrowi.bmp` mask
+live in the **base data directory**, not under a mod, so they need
+`eDataLocation`; `loadSkyTexture` assumed `eModLocation` and silently found
+nothing. And every `Image` here is bottom-up, so `v = 0` belongs at the
+*bottom* of the quad - mapped the other way the arrow drew upside down,
+which is exactly what it did first time.
 
 ### V10 – Camera shake
 

@@ -430,9 +430,24 @@ namespace
 	int sightRingVertexCount = 0, sightBearingVertexCount = 0, sightBarrelVertexCount = 0;
 	// 0 = this port's own blade, 1 = upstream's arrangement.
 	std::atomic<int> g_sightStyle{0};
+	// V9: whether the arrow over a tank is drawn at all. Its own setting
+	// beside the name plate's and the health bar's, because upstream keeps
+	// the three apart too (getDrawPlayerColor, getDrawPlayerName,
+	// getDrawPlayerHealth) and anyone who wants a bare battlefield wants to
+	// say which parts of it go.
+	std::atomic<int> g_showTankArrows{1};
 	GLint  sightMvpLoc = -1, sightFogColorLoc = -1, sightFogDensityLoc = -1;
 
 	GLuint particleProgram = 0, particleVao = 0, particleVbo = 0;
+
+	// V9: upstream's arrow over a tank (TargetRendererImplTank::drawArrow).
+	// Its own tiny program rather than the particle one, whose sampler is
+	// the effect atlas' 2D array and whose layout has no room for a
+	// per-quad tint that is not a particle colour.
+	GLuint arrowProgram = 0, arrowVao = 0, arrowVbo = 0, arrowTexture = 0;
+	GLint  arrowMvpLoc = -1, arrowSamplerLoc = -1;
+	GLint  arrowFogColorLoc = -1, arrowFogDensityLoc = -1;
+
 	GLint  particleMvpLoc = -1, particleFogColorLoc = -1, particleFogDensityLoc = -1;
 	GLuint beamVao = 0, beamVbo = 0;
 
@@ -1967,6 +1982,46 @@ namespace
 	// Size and colour are per-vertex because a single explosion mixes both
 	// (a bright small core with dimmer larger debris), which a uniform
 	// could not express without a draw call each.
+	// V9. Position and colour are per vertex because the tint is the tank's
+	// own and several tanks go in one buffer; upstream sets it with
+	// glColor3fv per arrow, which is the same thing a draw call at a time.
+	const char *kArrowVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec2 aUv;
+		layout(location = 2) in vec3 aColor;
+		uniform mat4 uMVP;
+		out vec2 vUv;
+		out vec3 vColor;
+		out float vViewDepth;
+		void main() {
+			vUv = aUv;
+			vColor = aColor;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+			vViewDepth = gl_Position.w;
+		}
+	)";
+
+	const char *kArrowFragmentShader = R"(#version 300 es
+		precision highp float;
+		in vec2 vUv;
+		in vec3 vColor;
+		in float vViewDepth;
+		out vec4 fragColor;
+		uniform sampler2D uArrow;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
+		void main() {
+			// arrow.bmp carries the shape, arrowi.bmp its alpha - the same
+			// colour+mask pair the trees use. Upstream draws it GL_MODULATE
+			// against the tank colour with the same fixed-function EXP2 fog
+			// everything else here gets.
+			vec4 t = texture(uArrow, vUv);
+			float z = uFogDensity * vViewDepth;
+			vec3 colour = mix(uFogColor, t.rgb * vColor, exp(-z * z));
+			fragColor = vec4(colour, t.a);
+		}
+	)";
+
 	const char *kParticleVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
 		layout(location = 1) in vec2 aUv;
@@ -2486,15 +2541,20 @@ namespace
 	// Named for the sky because that is where it started, but nothing about
 	// it is sky-specific and the cavern roof uses it too; outW/outH are for
 	// callers that need to know how often the image tiles across the map.
+	// `location` is eModLocation for everything the landscape and its mod
+	// own, which is nearly all of this; the handful of images that live in
+	// the base data directory rather than under a mod (upstream loads them
+	// with eDataLocation) pass it explicitly.
 	GLuint loadSkyTexture(const std::string &file, const std::string &mask, bool repeat,
-						  int *outW = nullptr, int *outH = nullptr)
+						  int *outW = nullptr, int *outH = nullptr,
+						  S3D::FileLocation location = S3D::eModLocation)
 	{
 		if (file.empty()) return 0;
 		// toRGB: the roof and sky images of the storm set are greyscale
 		// JPEGs, which arrive with one channel; uploaded as GL_RGB they
 		// were rainbow noise (the cavern's ceiling on every phone).
 		Image image = LandscapeTextureBuilder::toRGB(
-			ImageFactory::loadImage(S3D::eModLocation, file, mask, false));
+			ImageFactory::loadImage(location, file, mask, false));
 		if (!image.getBits() || image.getWidth() <= 0) return 0;
 		if (outW) *outW = image.getWidth();
 		if (outH) *outH = image.getHeight();
@@ -6120,6 +6180,30 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	glEnableVertexAttribArray(3);
 	glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void *) (6 * sizeof(float)));
 
+	// V9: the arrow over a tank. 8 floats a vertex - position, uv, tint.
+	arrowProgram = linkProgram(kArrowVertexShader, kArrowFragmentShader);
+	arrowMvpLoc = glGetUniformLocation(arrowProgram, "uMVP");
+	arrowSamplerLoc = glGetUniformLocation(arrowProgram, "uArrow");
+	arrowFogColorLoc = glGetUniformLocation(arrowProgram, "uFogColor");
+	arrowFogDensityLoc = glGetUniformLocation(arrowProgram, "uFogDensity");
+	glGenVertexArrays(1, &arrowVao);
+	glBindVertexArray(arrowVao);
+	glGenBuffers(1, &arrowVbo);
+	glBindBuffer(GL_ARRAY_BUFFER, arrowVbo);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) 0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (3 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (5 * sizeof(float)));
+	// The same colour+mask pair the trees load through - but from the base
+	// data directory, not a mod: upstream's ExplosionTextures loads these
+	// two with eDataLocation, and under eModLocation they are simply not
+	// there.
+	arrowTexture = loadSkyTexture("data/images/arrow.bmp", "data/images/arrowi.bmp",
+								  false, nullptr, nullptr, S3D::eDataLocation);
+	LOGI("Tank arrow texture: %s", arrowTexture ? "loaded" : "FAILED");
+
 	// Beams reuse the sight program (position + rgb), so the layout must
 	// match what that shader declares.
 	glGenVertexArrays(1, &beamVao);
@@ -8530,6 +8614,87 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 	drawTanksPass(mvp, true);
 
+	// V9: upstream's arrow over a tank (TargetRendererImplTank::drawArrow),
+	// drawn after the tanks so the depth buffer already holds them.
+	//
+	// Upstream shows it over every tank but your own, and over yours too
+	// once the camera is not one of the five that already frame it
+	// (CamAim/CamShot/CamTank/CamAction/CamExplosion). This port's presets
+	// are its own, so the same intent maps onto them: yours appears only
+	// from the two that stand back, Free and Top.
+	//
+	// Two deliberate deviations, both marked:
+	//  - the width is fixed rather than upstream's `aspect * 0.8`, which on
+	//    a phone held in portrait would pinch the arrow to a third of the
+	//    width a desktop shows. 1.4 units is what upstream works out to at
+	//    16:9, so the shape is the one its players see.
+	//  - it is skipped for a tank that is not visible, which upstream gets
+	//    for free by bailing out of drawParticle before it ever calls this.
+	if (arrowProgram != 0 && arrowTexture != 0 && g_showTankArrows.load() != 0 &&
+		!tankInstances.empty()) {
+		const bool showMine = (g_camera.preset == OrbitCamera::pFree ||
+							   g_camera.preset == OrbitCamera::pTop);
+		// The camera's right vector, so the quad faces the viewer.
+		const float rX = g_pickCamera.rightX, rY = g_pickCamera.rightY, rZ = g_pickCamera.rightZ;
+		const float halfWidth = 0.7f;
+
+		std::vector<float> arrowVerts;
+		for (const TankInstance &inst : tankInstances) {
+			if (!inst.visible) continue;
+			if (inst.mine && !showMine) continue;
+
+			// Upstream's own heights: 4 to 7 units over the tank, measured
+			// from the ground if the tank has somehow sunk below it.
+			const float baseY = inst.y;
+			const float y0 = baseY + 4.0f, y1 = baseY + 7.0f;
+			const float lx = inst.x - rX * halfWidth, lz = inst.z - rZ * halfWidth;
+			const float rx = inst.x + rX * halfWidth, rz = inst.z + rZ * halfWidth;
+			const float ly0 = y0 - rY * halfWidth, ry0 = y0 + rY * halfWidth;
+			const float ly1 = y1 - rY * halfWidth, ry1 = y1 + rY * halfWidth;
+			const float cr = inst.colorR, cg = inst.colorG, cb = inst.colorB;
+
+			// v runs with world height, not against it: every Image in this
+			// port is bottom-up (row 0 is the bottom of the picture), so
+			// v = 0 belongs at the bottom of the quad. Mapped the other way
+			// the arrow draws upside down - which is exactly what it did.
+			const float quad[6][8] = {
+				{ lx, ly0, lz, 0.0f, 0.0f, cr, cg, cb },
+				{ rx, ry0, rz, 1.0f, 0.0f, cr, cg, cb },
+				{ rx, ry1, rz, 1.0f, 1.0f, cr, cg, cb },
+				{ lx, ly0, lz, 0.0f, 0.0f, cr, cg, cb },
+				{ rx, ry1, rz, 1.0f, 1.0f, cr, cg, cb },
+				{ lx, ly1, lz, 0.0f, 1.0f, cr, cg, cb },
+			};
+			for (int v = 0; v < 6; v++) {
+				for (int f = 0; f < 8; f++) arrowVerts.push_back(quad[v][f]);
+			}
+		}
+
+		if (!arrowVerts.empty()) {
+			glUseProgram(arrowProgram);
+			glBindVertexArray(arrowVao);
+			glBindBuffer(GL_ARRAY_BUFFER, arrowVbo);
+			glBufferData(GL_ARRAY_BUFFER, arrowVerts.size() * sizeof(float),
+						 arrowVerts.data(), GL_DYNAMIC_DRAW);
+			glUniformMatrix4fv(arrowMvpLoc, 1, GL_FALSE, mvp.m);
+			glUniform3f(arrowFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
+			glUniform1f(arrowFogDensityLoc, skyDescription.fogDensity);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, arrowTexture);
+			glUniform1i(arrowSamplerLoc, 0);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			// Upstream's glDepthMask(GL_FALSE) with the test left on: the
+			// ground in front still hides the arrow, but the arrow never
+			// occludes anything itself.
+			glEnable(GL_DEPTH_TEST);
+			glDepthMask(GL_FALSE);
+			glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (arrowVerts.size() / 8));
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+		}
+	}
+
 	if (haveSight && g_sightStyle.load() == 1) {
 		// M22: upstream's own arrangement - a protractor ring flat under the
 		// tank, a bearing marker on the ground, an arc for the elevation and
@@ -9192,6 +9357,12 @@ Java_com_rm_scorchdroid_NativeBridge_getTerrainDetailRange(JNIEnv *env, jobject)
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_setSightStyle(JNIEnv *env, jobject, jint style) {
     g_sightStyle.store(style == 1 ? 1 : 0);
+}
+
+// V9: whether to draw upstream's arrow over a tank.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setShowTankArrows(JNIEnv *env, jobject, jboolean show) {
+    g_showTankArrows.store(show ? 1 : 0);
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL
