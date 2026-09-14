@@ -7,6 +7,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -1358,12 +1360,27 @@ private fun MiniMap(
                         var lastTapAt = 0L
                         var lastTapPos = Offset.Zero
 
+                        // A tap acts; a drag does nothing at all.
+                        //
+                        // detectTapGestures is not enough on its own here: it
+                        // reports a tap for *any* press and release inside the
+                        // widget, however far the finger travelled in between.
+                        // On a map that is most of the screen that is a real
+                        // gesture people make, and it landed a point where they
+                        // let go - so the next tap they meant as a first point
+                        // silently finished a line from somewhere they never
+                        // chose. Hence the hand-rolled gesture: past the touch
+                        // slop the whole thing is abandoned.
+                        //
+                        // The movement is consumed as it is swallowed, so a
+                        // drag over the map cannot reach the camera handler on
+                        // the GL surface underneath either.
+                        //
                         // No long press: there is nothing to delete. A line
                         // goes three seconds after it is drawn, the way
                         // upstream's does, and a half-drawn one abandons
                         // itself on the same clock.
-                        detectTapGestures(
-                            onTap = { offset ->
+                        val onTap: (Offset) -> Unit = { offset ->
                                 val point = toLandscape(offset)
                                 if (state.miniMapEnlarged) {
                                     if (point != null) {
@@ -1404,8 +1421,31 @@ private fun MiniMap(
                                     }
                                     if (point != null) onLookAt(point.x, point.y)
                                 }
-                            },
-                        )
+                        }
+
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            var travelled = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id }
+                                // The pointer vanished mid-gesture (another
+                                // handler took it, or the window lost it):
+                                // nothing happened, as far as the map cares.
+                                if (change == null) break
+                                if ((change.position - down.position).getDistance() >
+                                    viewConfiguration.touchSlop
+                                ) {
+                                    travelled = true
+                                }
+                                if (!change.pressed) {
+                                    if (!travelled) onTap(change.position)
+                                    change.consume()
+                                    break
+                                }
+                                change.consume()
+                            }
+                        }
                     },
             ) {
                 val side = size.minDimension
