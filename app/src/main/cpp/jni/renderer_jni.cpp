@@ -447,7 +447,10 @@ namespace
 	// whose layout has no room for a tint that is not a particle colour.
 	GLuint texQuadProgram = 0, texQuadVao = 0, texQuadVbo = 0;
 	GLuint wallGridTexture = 0, wallHitTexture = 0, lightningTexture = 0;
-	GLint  texQuadMvpLoc = -1, texQuadSamplerLoc = -1;
+	GLuint shieldGridTexture = 0, shieldGlowTexture = 0, shieldMagTexture = 0;
+	// V5: how far the magnetic spirals have turned, at upstream's 800 deg/s.
+	float  shieldSpinSeconds = 0.0f;
+	GLint  texQuadMvpLoc = -1, texQuadSamplerLoc = -1, texQuadTintLoc = -1;
 	GLint  texQuadFogColorLoc = -1, texQuadFogDensityLoc = -1;
 
 	GLint  particleMvpLoc = -1, particleFogColorLoc = -1, particleFogDensityLoc = -1;
@@ -2050,6 +2053,11 @@ namespace
 		uniform sampler2D uArrow;
 		uniform vec3 uFogColor;
 		uniform float uFogDensity;
+		// Multiplied onto the per-vertex colour, so geometry that is
+		// uploaded once and tinted per draw - the shield bubbles - does not
+		// need its buffer rebuilt to change colour. White for everything
+		// that carries its colour per vertex.
+		uniform vec4 uTint;
 		void main() {
 			// arrow.bmp carries the shape, arrowi.bmp its alpha - the same
 			// colour+mask pair the trees use. Upstream draws it GL_MODULATE
@@ -2057,8 +2065,9 @@ namespace
 			// everything else here gets.
 			vec4 t = texture(uArrow, vUv);
 			float z = uFogDensity * vViewDepth;
-			vec3 colour = mix(uFogColor, t.rgb * vColor.rgb, exp(-z * z));
-			fragColor = vec4(colour, t.a * vColor.a);
+			vec4 tint = vColor * uTint;
+			vec3 colour = mix(uFogColor, t.rgb * tint.rgb, exp(-z * z));
+			fragColor = vec4(colour, t.a * tint.a);
 		}
 	)";
 
@@ -3942,7 +3951,28 @@ namespace
 
 	// A unit sphere as triangles. `startRow` at half the stacks yields the
 	// upper hemisphere, which is upstream's half-shield.
-	std::vector<float> buildSphere(int stacks, int slices, int startRow)
+	// V5: the same shapes as position, uv and a white per-vertex colour -
+	// the layout the shared textured-quad program takes, so a shield can be
+	// uploaded once and tinted per draw through uTint. Upstream textures its
+	// sphere with gluQuadricTexture (u round the slices, v down the stacks)
+	// and gives its cube an explicit 0..1 per face.
+	void uploadTexShape(GLuint &vao, GLuint &vbo, const std::vector<float> &data)
+	{
+		glGenVertexArrays(1, &vao);
+		glBindVertexArray(vao);
+		glGenBuffers(1, &vbo);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+		glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *) 0);
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *) (3 * sizeof(float)));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *) (5 * sizeof(float)));
+		glBindVertexArray(0);
+	}
+
+	std::vector<float> buildTexSphere(int stacks, int slices, int startRow)
 	{
 		std::vector<float> data;
 		auto point = [&](int stack, int slice) {
@@ -3950,8 +3980,11 @@ namespace
 			const float theta = 2.0f * (float) M_PI * (float) slice / (float) slices;
 			const float y = cosf(phi), r = sinf(phi);
 			const float x = r * cosf(theta), z = r * sinf(theta);
-			// Unit sphere, so the position doubles as the normal.
-			for (float v : { x, y, z, x, y, z }) data.push_back(v);
+			data.push_back(x); data.push_back(y); data.push_back(z);
+			data.push_back((float) slice / (float) slices);
+			data.push_back((float) stack / (float) stacks);
+			data.push_back(1.0f); data.push_back(1.0f);
+			data.push_back(1.0f); data.push_back(1.0f);
 		};
 		for (int stack = startRow; stack < stacks; stack++) {
 			for (int slice = 0; slice < slices; slice++) {
@@ -3962,23 +3995,26 @@ namespace
 		return data;
 	}
 
-	std::vector<float> buildCube()
+	std::vector<float> buildTexCube()
 	{
 		std::vector<float> data;
 		const float f[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
 		for (const auto &n : f) {
-			// Two in-plane axes for this face.
 			float a[3] = { n[1], n[2], n[0] };
 			float b[3] = { n[2], n[0], n[1] };
 			auto corner = [&](float sa, float sb) {
 				for (int i = 0; i < 3; i++) data.push_back(n[i] + a[i] * sa + b[i] * sb);
-				for (int i = 0; i < 3; i++) data.push_back(n[i]);
+				data.push_back((sa + 1.0f) * 0.5f);
+				data.push_back((sb + 1.0f) * 0.5f);
+				data.push_back(1.0f); data.push_back(1.0f);
+				data.push_back(1.0f); data.push_back(1.0f);
 			};
 			corner(-1,-1); corner(1,-1); corner(1,1);
 			corner(-1,-1); corner(1,1);  corner(-1,1);
 		}
 		return data;
 	}
+
 
 	// The canopy: a cone from an apex at y=3 down to a ring of radius 2 at
 	// y=2, matching upstream's triangle fan.
@@ -4979,6 +5015,9 @@ namespace
 		// than per frame - it says so out loud ("constant changes, regardless
 		// of framerate"), and it is why a Nuke's 4.0 lasts about two seconds
 		// on any device instead of twice as long at half the frame rate.
+		shieldSpinSeconds += deltaSeconds;
+		if (shieldSpinSeconds > 3600.0f) shieldSpinSeconds -= 3600.0f;
+
 		g_camera.shakeCarry += deltaSeconds;
 		while (g_camera.shakeCarry > 0.03f) {
 			g_camera.shakeCarry -= 0.03f;
@@ -5471,6 +5510,7 @@ namespace
 			if (!ribbonData.empty() && texQuadProgram != 0) {
 				glUseProgram(texQuadProgram);
 				glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, viewProjection.m);
+			glUniform4f(texQuadTintLoc, 1.0f, 1.0f, 1.0f, 1.0f);
 				setFixedFunctionFog(texQuadFogColorLoc, texQuadFogDensityLoc);
 				glActiveTexture(GL_TEXTURE0);
 				glBindTexture(GL_TEXTURE_2D, lightningTexture);
@@ -6497,6 +6537,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	texQuadProgram = linkProgram(kTexQuadVertexShader, kTexQuadFragmentShader);
 	texQuadMvpLoc = glGetUniformLocation(texQuadProgram, "uMVP");
 	texQuadSamplerLoc = glGetUniformLocation(texQuadProgram, "uArrow");
+	texQuadTintLoc = glGetUniformLocation(texQuadProgram, "uTint");
 	texQuadFogColorLoc = glGetUniformLocation(texQuadProgram, "uFogColor");
 	texQuadFogDensityLoc = glGetUniformLocation(texQuadProgram, "uFogDensity");
 	glGenVertexArrays(1, &texQuadVao);
@@ -6522,6 +6563,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	lightningTexture = loadSkyTexture("data/textures/lightning.bmp",
 									  "data/textures/lightning.bmp", false);
 	LOGI("Lightning texture: %s", lightningTexture ? "loaded" : "FAILED");
+
+	// V5: upstream's shield textures. grid2 is the wire mesh every
+	// non-magnetic shield wears - round, half and square alike, despite the
+	// review's note claiming grid2 and grid22 were the two sizes; grid22 is
+	// loaded by upstream and never drawn. shield.bmp with shielda.bmp as its
+	// alpha is the glow billboard a <glow> shield adds on top.
+	shieldGridTexture = loadSkyTexture("data/textures/bordershield/grid2.bmp",
+									   "data/textures/bordershield/grid2.bmp", true);
+	shieldGlowTexture = loadSkyTexture("data/textures/shield.bmp",
+									   "data/textures/shielda.bmp", false);
+	shieldMagTexture = loadSkyTexture("data/textures/shield2.bmp",
+									  "data/textures/shield2.bmp", false);
+	LOGI("Shield textures: grid %s, glow %s",
+		 shieldGridTexture ? "loaded" : "FAILED", shieldGlowTexture ? "loaded" : "FAILED");
 	LOGI("Wall textures: grid %s, hit %s",
 		 wallGridTexture ? "loaded" : "FAILED", wallHitTexture ? "loaded" : "FAILED");
 
@@ -6538,11 +6593,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	glBindVertexArray(0);
 
 	// Shield bubbles and parachutes - static shapes, uploaded once.
-	uploadPosNormal(sphereVao, sphereVbo, buildSphere(12, 16, 0));
+	uploadTexShape(sphereVao, sphereVbo, buildTexSphere(12, 16, 0));
 	sphereVertexCount = 12 * 16 * 6;
-	uploadPosNormal(hemiVao, hemiVbo, buildSphere(12, 16, 6));
+	uploadTexShape(hemiVao, hemiVbo, buildTexSphere(12, 16, 6));
 	hemiVertexCount = 6 * 16 * 6;
-	uploadPosNormal(cubeVao, cubeVbo, buildCube());
+	uploadTexShape(cubeVao, cubeVbo, buildTexCube());
 	cubeVertexCount = 36;
 	uploadPosNormal(chuteVao, chuteVbo, buildParachuteCanopy(12));
 	chuteVertexCount = 12 * 3;
@@ -6787,6 +6842,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		bool  hasShield;
 		bool  shieldRound;
 		bool  shieldHalf;
+		// V5: upstream's two extras on a round shield - <glow> adds an
+		// additive billboard over the bubble, and a magnetic one is drawn
+		// as three turning spirals instead of a mesh.
+		bool  shieldGlow;
+		bool  shieldMag;
 		float shieldRadius;                        // round shields
 		float shieldX, shieldY, shieldZ;           // square shields (half-extents)
 		float shieldR, shieldG, shieldB;
@@ -7047,6 +7107,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// accessory - upstream reads exactly these (getRound /
 		// getActualRadius / getHalfShield / getSize / getColor).
 		bool hasShield = false, shieldRound = true, shieldHalf = false;
+		bool shieldGlow = false, shieldMag = false;
 		float shieldRadius = 0.0f, shieldX = 0.0f, shieldY = 0.0f, shieldZ = 0.0f;
 		float shieldR = 1.0f, shieldG = 1.0f, shieldB = 1.0f;
 		if (Accessory *shieldAcc = tank->getShield().getCurrentShield()) {
@@ -7059,6 +7120,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					ShieldRound *roundShield = (ShieldRound *) shieldAction;
 					shieldRadius = roundShield->getActualRadius().asFloat();
 					shieldHalf = roundShield->getHalfShield();
+					shieldGlow = roundShield->getGlow();
+					shieldMag = (shieldAction->getShieldType() == Shield::ShieldTypeRoundMag);
 				} else {
 					FixedVector &size = ((ShieldSquare *) shieldAction)->getSize();
 					// Half-extents, not a position: the axes swap the same
@@ -7091,7 +7154,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			std::min(std::max(lifeFraction, 0.0f), 1.0f),
 			std::min(std::max(shieldFraction, 0.0f), 1.0f),
 			tankColor[0], tankColor[1], tankColor[2],
-			hasShield, shieldRound, shieldHalf,
+			hasShield, shieldRound, shieldHalf, shieldGlow, shieldMag,
 			shieldRadius, shieldX, shieldY, shieldZ,
 			shieldR, shieldG, shieldB,
 			parachuteOpen,
@@ -8631,6 +8694,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		if (!quads.empty()) {
 			glUseProgram(texQuadProgram);
 			glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, mvp.m);
+			glUniform4f(texQuadTintLoc, 1.0f, 1.0f, 1.0f, 1.0f);
 			setFixedFunctionFog(texQuadFogColorLoc, texQuadFogDensityLoc);
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, wallGridTexture);
@@ -8708,6 +8772,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		if (!quads.empty()) {
 			glUseProgram(texQuadProgram);
 			glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, mvp.m);
+			glUniform4f(texQuadTintLoc, 1.0f, 1.0f, 1.0f, 1.0f);
 			setFixedFunctionFog(texQuadFogColorLoc, texQuadFogDensityLoc);
 			glActiveTexture(GL_TEXTURE0);
 			glBindTexture(GL_TEXTURE_2D, wallHitTexture);
@@ -9113,14 +9178,54 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		for (TankInstance &inst : tankInstances) {
 			if (!inst.alive) continue;
 
-			if (inst.hasShield) {
+
+			if (inst.parachuteOpen) {
+				Mat4 model = Mat4::translate(inst.x, inst.y, inst.z);
+				glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
+				glUniform4f(meshColorLoc, 0.85f, 0.85f, 0.9f, 0.9f);
+				glBindVertexArray(chuteVao);
+				frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, chuteVertexCount);
+				glUniform4f(meshColorLoc, 1.0f, 1.0f, 1.0f, 0.9f);
+				glBindVertexArray(chuteCordVao);
+				frameDrawCalls++; glDrawArrays(GL_LINES, 0, chuteCordVertexCount);
+			}
+		}
+
+		// V5: the shield bubbles, in upstream's own wire mesh.
+		//
+		// Their own pass because they are textured where the parachutes
+		// beside them are flat: grid2.bmp over the sphere, the hemisphere of
+		// a half shield or the box of a square one, tinted with the shield's
+		// colour at upstream's 0.5 alpha - not the 0.35 flat wash this port
+		// had. The geometry is uploaded once and the colour arrives through
+		// uTint, so nothing is rebuilt per frame.
+		if (texQuadProgram != 0 && shieldGridTexture != 0) {
+			bool began = false;
+			for (TankInstance &inst : tankInstances) {
+				if (!inst.alive || !inst.hasShield) continue;
+				if (!began) {
+					began = true;
+					glUseProgram(texQuadProgram);
+					setFixedFunctionFog(texQuadFogColorLoc, texQuadFogDensityLoc);
+					glActiveTexture(GL_TEXTURE0);
+					glBindTexture(GL_TEXTURE_2D, shieldGridTexture);
+					glUniform1i(texQuadSamplerLoc, 0);
+					glEnable(GL_BLEND);
+					glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+					glDepthMask(GL_FALSE);
+					glDisable(GL_CULL_FACE);
+				}
 				// Upstream centres the bubble on the tank's own position.
 				Mat4 scale = inst.shieldRound
 					? Mat4::scale(inst.shieldRadius)
 					: Mat4::scale(inst.shieldX, inst.shieldY, inst.shieldZ);
 				Mat4 model = Mat4::multiply(Mat4::translate(inst.x, inst.y, inst.z), scale);
-				glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
-				glUniform4f(meshColorLoc, inst.shieldR, inst.shieldG, inst.shieldB, 0.35f);
+				glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
+				glUniform4f(texQuadTintLoc, inst.shieldR, inst.shieldG, inst.shieldB, 0.5f);
+
+				// A magnetic shield has no mesh at all - three turning
+				// spirals instead, drawn in the pass below.
+				if (inst.shieldRound && inst.shieldMag) continue;
 
 				if (!inst.shieldRound) {
 					glBindVertexArray(cubeVao);
@@ -9133,16 +9238,127 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 					frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
 				}
 			}
+			if (began) {
+				glEnable(GL_CULL_FACE);
+				glDepthMask(GL_TRUE);
+				glDisable(GL_BLEND);
+				glBindVertexArray(0);
+			}
+		}
 
-			if (inst.parachuteOpen) {
-				Mat4 model = Mat4::translate(inst.x, inst.y, inst.z);
-				glUniformMatrix4fv(meshMvpLoc, 1, GL_FALSE, Mat4::multiply(mvp, model).m);
-				glUniform4f(meshColorLoc, 0.85f, 0.85f, 0.9f, 0.9f);
-				glBindVertexArray(chuteVao);
-				frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, chuteVertexCount);
-				glUniform4f(meshColorLoc, 1.0f, 1.0f, 1.0f, 0.9f);
-				glBindVertexArray(chuteCordVao);
-				frameDrawCalls++; glDrawArrays(GL_LINES, 0, chuteCordVertexCount);
+		// V5: the glow a <glow> shield adds over its bubble, and the three
+		// spirals a magnetic one is drawn as instead of a mesh. Both are
+		// additive and both are built per frame, so they share one buffer.
+		if (texQuadProgram != 0) {
+			std::vector<float> glowVerts, magVerts;
+			for (TankInstance &inst : tankInstances) {
+				if (!inst.alive || !inst.hasShield || !inst.shieldRound) continue;
+
+				if (inst.shieldMag && shieldGlowTexture != 0) {
+					// Upstream's spiral: five pi of turn in pi/6 steps, the
+					// radius and height both growing 0.05 a step, the whole
+					// thing scaled by radius/3 and lifted a unit, turning at
+					// 800 degrees a second, three of them 120 apart.
+					const float scale = inst.shieldRadius / 3.0f;
+					const float spin = shieldSpinSeconds * 800.0f * 3.14159265f / 180.0f;
+					for (int copy = 0; copy < 3; copy++) {
+						const float base = spin + (float) copy * 2.0943951f;
+						float height = 0.0f, width = 0.0f;
+						float prev[2][3];
+						bool havePrev = false;
+						for (float a = 0.0f; a < 5.0f * 3.14159265f; a += 3.14159265f / 6.0f) {
+							height += 0.05f; width += 0.05f;
+							const float px = sinf(a + base) * width;
+							const float pz = cosf(a + base) * width;
+							const float top = height, bottom = height - 0.4f;
+							const float cur[2][3] = {
+								{ inst.x + px * scale, inst.y + 1.0f + top * scale, inst.z + pz * scale },
+								{ inst.x + px * scale, inst.y + 1.0f + bottom * scale, inst.z + pz * scale },
+							};
+							if (havePrev) {
+								const float quad[4][3] = {
+									{ prev[0][0], prev[0][1], prev[0][2] },
+									{ prev[1][0], prev[1][1], prev[1][2] },
+									{ cur[1][0], cur[1][1], cur[1][2] },
+									{ cur[0][0], cur[0][1], cur[0][2] },
+								};
+								const float uv[4][2] = { { 0, 0 }, { 0, 1 }, { 1, 1 }, { 1, 0 } };
+								const int tri[6] = { 0, 1, 2, 0, 2, 3 };
+								for (int k = 0; k < 6; k++) {
+									const int c = tri[k];
+									magVerts.push_back(quad[c][0]);
+									magVerts.push_back(quad[c][1]);
+									magVerts.push_back(quad[c][2]);
+									magVerts.push_back(uv[c][0]);
+									magVerts.push_back(uv[c][1]);
+									magVerts.push_back(inst.shieldR); magVerts.push_back(inst.shieldG);
+									magVerts.push_back(inst.shieldB); magVerts.push_back(0.4f);
+								}
+							}
+							for (int e = 0; e < 2; e++) {
+								for (int i = 0; i < 3; i++) prev[e][i] = cur[e][i];
+							}
+							havePrev = true;
+						}
+					}
+				} else if (inst.shieldGlow && shieldGlowTexture != 0) {
+					// A camera-facing billboard at 0.95 of the radius, which
+					// is upstream's own size for it.
+					const float half = inst.shieldRadius * 0.95f;
+					const float rx = g_pickCamera.rightX * half;
+					const float ry = g_pickCamera.rightY * half;
+					const float rz = g_pickCamera.rightZ * half;
+					const float ux = g_pickCamera.upX * half;
+					const float uy = g_pickCamera.upY * half;
+					const float uz = g_pickCamera.upZ * half;
+					const float sx[4] = { -1, 1, 1, -1 };
+					const float sy[4] = { -1, -1, 1, 1 };
+					const float uv[4][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
+					const int tri[6] = { 0, 1, 2, 0, 2, 3 };
+					for (int k = 0; k < 6; k++) {
+						const int c = tri[k];
+						glowVerts.push_back(inst.x + rx * sx[c] + ux * sy[c]);
+						glowVerts.push_back(inst.y + ry * sx[c] + uy * sy[c]);
+						glowVerts.push_back(inst.z + rz * sx[c] + uz * sy[c]);
+						glowVerts.push_back(uv[c][0]);
+						glowVerts.push_back(uv[c][1]);
+						glowVerts.push_back(inst.shieldR); glowVerts.push_back(inst.shieldG);
+						glowVerts.push_back(inst.shieldB); glowVerts.push_back(1.0f);
+					}
+				}
+			}
+
+			if (!glowVerts.empty() || !magVerts.empty()) {
+				glUseProgram(texQuadProgram);
+				setFixedFunctionFog(texQuadFogColorLoc, texQuadFogDensityLoc);
+				glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, mvp.m);
+				glUniform4f(texQuadTintLoc, 1.0f, 1.0f, 1.0f, 1.0f);
+				glActiveTexture(GL_TEXTURE0);
+				glUniform1i(texQuadSamplerLoc, 0);
+				glEnable(GL_BLEND);
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+				glDepthMask(GL_FALSE);
+				glDisable(GL_CULL_FACE);
+				glBindVertexArray(texQuadVao);
+				glBindBuffer(GL_ARRAY_BUFFER, texQuadVbo);
+				if (!glowVerts.empty()) {
+					glBindTexture(GL_TEXTURE_2D, shieldGlowTexture);
+					glBufferData(GL_ARRAY_BUFFER, glowVerts.size() * sizeof(float),
+								 glowVerts.data(), GL_DYNAMIC_DRAW);
+					frameDrawCalls++;
+					glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (glowVerts.size() / 9));
+				}
+				if (!magVerts.empty() && shieldMagTexture != 0) {
+					glBindTexture(GL_TEXTURE_2D, shieldMagTexture);
+					glBufferData(GL_ARRAY_BUFFER, magVerts.size() * sizeof(float),
+								 magVerts.data(), GL_DYNAMIC_DRAW);
+					frameDrawCalls++;
+					glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (magVerts.size() / 9));
+				}
+				glEnable(GL_CULL_FACE);
+				glDepthMask(GL_TRUE);
+				glDisable(GL_BLEND);
+				glBindVertexArray(0);
 			}
 		}
 
