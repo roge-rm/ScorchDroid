@@ -65,9 +65,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1090,11 +1092,6 @@ private val kMiniMapSize = 180.dp
 private const val kMiniMapEnlargedMarginDp = 24
 private const val kMiniMapEnlargedHeadroomDp = 200
 
-// How far a long press may miss a drawn line and still delete it. A little
-// over half a finger: generous enough that a line is not a pixel hunt,
-// tight enough that two lines a finger apart are still separable.
-private val kMapLineTouchSlop = 22.dp
-
 private val kHudIconSize = 44.dp
 private val kHudIconSidePadding = 2.dp
 private val kHudGroupGap = 10.dp
@@ -1263,6 +1260,24 @@ private fun MiniMap(
         }
     }
 
+    // The clock the drawn lines fade on. Per frame rather than on the blink's
+    // 300ms tick, because a three-second fade in ten steps is a stutter you
+    // can count - but only while there is something fading, so a map with no
+    // lines on it costs no frames at all.
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val fading = state.mapLines.isNotEmpty() || state.mapPending != null
+    LaunchedEffect(fading) {
+        while (fading) {
+            withFrameMillis { }
+            val now = System.currentTimeMillis()
+            nowMillis = now
+            // Expired here rather than while drawing: the draw pass reads
+            // state, it does not get to change it.
+            state.mapLines = expireMapLines(state.mapLines, now)
+            state.mapPending = expireMapPoint(state.mapPending, now)
+        }
+    }
+
     // See kMiniMapEnlargedMarginDp: the enlarged side is what the screen can
     // spare, not a multiple, and it is capped by the shorter of the two axes
     // so the square never overruns a landscape screen.
@@ -1309,7 +1324,7 @@ private fun MiniMap(
                         // upstream's mouseDown does with the same numbers. Null
                         // outside the arena rather than clamped: the corners of a
                         // letterboxed map are not part of the world.
-                        fun toLandscape(offset: Offset): MapPoint? {
+                        fun toLandscape(offset: Offset): Offset? {
                             val sidePx = size.width.toFloat()
                             val inset = sidePx * insetFraction
                             val box = sidePx - inset * 2f
@@ -1322,18 +1337,7 @@ private fun MiniMap(
                             val ly = (1f - v) * maxSpan + info.arenaY - (maxSpan - info.arenaHeight) / 2f
                             if (lx < info.arenaX || lx > info.arenaX + info.arenaWidth) return null
                             if (ly < info.arenaY || ly > info.arenaY + info.arenaHeight) return null
-                            return MapPoint(lx, ly)
-                        }
-
-                        // How far a finger may miss a line and still mean it, in
-                        // landscape units, so the allowance is the same patch of
-                        // *screen* at either map size.
-                        fun deleteSlop(): Float {
-                            val sidePx = size.width.toFloat()
-                            val box = sidePx - sidePx * insetFraction * 2f
-                            if (box <= 0f) return 0f
-                            val maxSpan = maxOf(info.arenaWidth, info.arenaHeight)
-                            return kMapLineTouchSlop.toPx() * maxSpan / box
+                            return Offset(lx, ly)
                         }
 
                         // A double tap enlarges the map - but only while it is
@@ -1352,28 +1356,11 @@ private fun MiniMap(
                         var lastTapAt = 0L
                         var lastTapPos = Offset.Zero
 
+                        // No long press: there is nothing to delete. A line
+                        // goes three seconds after it is drawn, the way
+                        // upstream's does, and a half-drawn one abandons
+                        // itself on the same clock.
                         detectTapGestures(
-                            onLongPress = { offset ->
-                                if (state.miniMapEnlarged) {
-                                    val point = toLandscape(offset)
-                                    if (point != null) {
-                                        val hit = hitTestMapLine(
-                                            state.mapLines, point.x, point.y, deleteSlop(),
-                                        )
-                                        if (hit >= 0) {
-                                            state.mapLines =
-                                                state.mapLines.filterIndexed { i, _ -> i != hit }
-                                        } else {
-                                            // A press on bare ground abandons a
-                                            // half-drawn line. Without it the
-                                            // only way out of a mis-tapped first
-                                            // point is to finish a line you did
-                                            // not want and then delete it.
-                                            state.mapPending = null
-                                        }
-                                    }
-                                }
-                            },
                             onTap = { offset ->
                                 val point = toLandscape(offset)
                                 if (state.miniMapEnlarged) {
@@ -1382,7 +1369,11 @@ private fun MiniMap(
                                             .firstOrNull { it.isMe }?.colorArgb
                                             ?: Color.White.toArgb()
                                         val (pending, line) = placeMapPoint(
-                                            state.mapPending, point.x, point.y, myColour,
+                                            state.mapPending,
+                                            point.x,
+                                            point.y,
+                                            myColour,
+                                            System.currentTimeMillis(),
                                         )
                                         state.mapPending = pending
                                         if (line != null) state.mapLines = state.mapLines + line
@@ -1538,6 +1529,7 @@ private fun MiniMap(
                         end = Offset(px(line.bx), py(line.by)),
                         strokeWidth = 2.5.dp.toPx(),
                         cap = StrokeCap.Round,
+                        alpha = mapLineAlpha(line.atMillis, nowMillis),
                     )
                 }
                 // The half-drawn line's first point. Hollow, so it reads as
@@ -1546,12 +1538,21 @@ private fun MiniMap(
                     val centre = Offset(px(pending.x), py(pending.y))
                     val myColour = state.miniMapTanks.firstOrNull { it.isMe }?.colorArgb
                         ?: Color.White.toArgb()
-                    drawCircle(Color(myColour), radius = 3.dp.toPx(), center = centre)
+                    // Fading on the same clock is what tells you the line you
+                    // started is running out, rather than it simply vanishing.
+                    val fade = mapLineAlpha(pending.atMillis, nowMillis)
+                    drawCircle(
+                        Color(myColour),
+                        radius = 3.dp.toPx(),
+                        center = centre,
+                        alpha = fade,
+                    )
                     drawCircle(
                         Color(myColour),
                         radius = 6.dp.toPx(),
                         center = centre,
                         style = Stroke(width = 1.5.dp.toPx()),
+                        alpha = fade,
                     )
                 }
             }

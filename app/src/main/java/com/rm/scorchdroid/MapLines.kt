@@ -1,31 +1,50 @@
 package com.rm.scorchdroid
 
-import kotlin.math.hypot
-
 /**
- * Lines drawn on the mini-map, and the geometry behind placing and removing
+ * Lines drawn on the mini-map, and the arithmetic behind placing and expiring
  * them.
  *
- * Ours, not upstream's. Upstream's plan drawing (`GLWPlanView`,
- * `ComsLinesMessage`) is a freehand scribble made by dragging the right mouse
- * button, decimated at 5px, which every receiver fades out three seconds
- * after it arrives. A phone has no second button, and a three-second
- * scribble is a gesture you make *while* talking - which is the desktop
- * game's context, not this one. So this is a two-tap straight line that stays
- * until it is deleted: the same job (pointing at a place on the map) done in
- * the way a touch screen can do it.
+ * The *gesture* is ours, because a phone has no second mouse button: upstream
+ * scribbles freehand by dragging the right one, where this sets one end of a
+ * straight line with a tap and the other with a second tap. Everything the
+ * wire can see is upstream's, deliberately, so a PC client on the other end
+ * of a `ComsLinesMessage` renders what this draws and this renders what it
+ * sends:
+ *
+ *  - a line is two points and a pen-up, which is exactly what upstream's
+ *    `GLWPlanView` produces for the shortest possible drag;
+ *  - lines **expire three seconds after they arrive**, and fade to nothing as
+ *    they go (`drawLine`'s `1 - age/3`), rather than staying until removed;
+ *  - there is no delete, because `ComsLinesMessage` is append-only and cannot
+ *    express one. A stroke that removes itself does not need removing.
+ *
+ * The three seconds are counted from when the line was *completed*, not from
+ * when its first point was tapped, and that is the faithful reading rather
+ * than a shortcut: upstream's receivers stamp points with their own arrival
+ * time (`simulateLine` sets `first[2] = totalTime_`), so a whole stroke
+ * appears at once at the far end and fades together. Stamping on completion
+ * is what a teammate would see anyway - and it stops a line that took a
+ * moment to place from being born half faded.
  *
  * Points are landscape coordinates, not widget ones - the same space the
- * tanks and the camera arrow are in - so a line stays pinned to the ground
- * when the map changes size underneath it.
+ * tanks and the camera arrow are in - so a line stays pinned to the ground it
+ * pointed at when the map changes size underneath it.
  *
  * These functions are free of Compose and of the engine on purpose: the
- * arithmetic that decides what your finger hit is the part worth testing
- * without a phone in the loop.
+ * arithmetic that decides what is on the map, and how faded, is the part
+ * worth testing without a phone in the loop.
  */
 
-/** One end of a half-drawn line: the first tap, waiting for its second. */
-data class MapPoint(val x: Float, val y: Float)
+/** Upstream's own lifetime for a drawn point: `GLWPlanView` uses 3 seconds. */
+const val kMapLineLifeMillis = 3000L
+
+/**
+ * The first tap of a line, waiting for its second. Not on the wire - nothing
+ * is sent until there is a line - but it expires on the same clock, which is
+ * also how a half-drawn line is abandoned now that there is no delete: leave
+ * it alone and it goes.
+ */
+data class MapPoint(val x: Float, val y: Float, val atMillis: Long)
 
 /** A finished line, in landscape coordinates, in its drawer's tank colour. */
 data class MapLine(
@@ -34,6 +53,7 @@ data class MapLine(
     val bx: Float,
     val by: Float,
     val colorArgb: Int,
+    val atMillis: Long,
 )
 
 /**
@@ -42,69 +62,43 @@ data class MapLine(
  * this tap and the line it finished, if any.
  *
  * Two taps in the same spot make a zero-length line, which draws as a dot and
- * deletes like any other. That is deliberate: a marker on one place is a
- * thing people want, and special-casing it would mean picking a distance
- * below which a line "wasn't meant", which is not a judgement this can make.
+ * fades like any other. That is deliberate: a marker on one place is a thing
+ * people want, and special-casing it would mean picking a distance below
+ * which a line "wasn't meant", which is not a judgement this can make.
  */
 fun placeMapPoint(
     pending: MapPoint?,
     x: Float,
     y: Float,
     colorArgb: Int,
+    nowMillis: Long,
 ): Pair<MapPoint?, MapLine?> =
     if (pending == null) {
-        MapPoint(x, y) to null
+        MapPoint(x, y, nowMillis) to null
     } else {
-        null to MapLine(pending.x, pending.y, x, y, colorArgb)
+        null to MapLine(pending.x, pending.y, x, y, colorArgb, nowMillis)
     }
 
 /**
- * Shortest distance from a point to the segment a-b (not to the infinite line
- * through them: a finger near the *extension* of a line has not touched it).
+ * How solid a line is now: upstream's `1 - age/3`, clamped. Reaches zero
+ * exactly when [expireMapLines] drops it, so a line never blinks out while
+ * still visible.
  */
-fun distanceToSegment(
-    px: Float,
-    py: Float,
-    ax: Float,
-    ay: Float,
-    bx: Float,
-    by: Float,
-): Float {
-    val dx = bx - ax
-    val dy = by - ay
-    val lengthSq = dx * dx + dy * dy
-    // A zero-length line is a dot, and the nearest point on it is itself.
-    val t = if (lengthSq <= 0f) {
-        0f
-    } else {
-        (((px - ax) * dx + (py - ay) * dy) / lengthSq).coerceIn(0f, 1f)
-    }
-    return hypot(px - (ax + t * dx), py - (ay + t * dy))
+fun mapLineAlpha(atMillis: Long, nowMillis: Long): Float {
+    val age = (nowMillis - atMillis).toFloat() / kMapLineLifeMillis.toFloat()
+    return (1f - age).coerceIn(0f, 1f)
 }
 
-/**
- * The line a long press at (x, y) means, or -1 if it missed everything.
- * [threshold] is in landscape units, so callers convert a touch target's
- * worth of screen into ground distance and the miss allowed is the same at
- * either map size.
- *
- * Ties go to the newest line, because two lines crossing under one fingertip
- * is exactly when you are undoing the one you just drew.
- */
-fun hitTestMapLine(
-    lines: List<MapLine>,
-    x: Float,
-    y: Float,
-    threshold: Float,
-): Int {
-    var best = -1
-    var bestDistance = threshold
-    lines.forEachIndexed { index, line ->
-        val distance = distanceToSegment(x, y, line.ax, line.ay, line.bx, line.by)
-        if (distance <= bestDistance) {
-            bestDistance = distance
-            best = index
-        }
+/** The lines still worth drawing. Upstream pops them off the front the same way. */
+fun expireMapLines(lines: List<MapLine>, nowMillis: Long): List<MapLine> =
+    if (lines.none { nowMillis - it.atMillis >= kMapLineLifeMillis }) {
+        // The common case by far, and worth not rebuilding the list for:
+        // this runs every frame a line is on screen.
+        lines
+    } else {
+        lines.filter { nowMillis - it.atMillis < kMapLineLifeMillis }
     }
-    return best
-}
+
+/** The pending dot if it is still alive, or null once it has aged out. */
+fun expireMapPoint(pending: MapPoint?, nowMillis: Long): MapPoint? =
+    pending?.takeIf { nowMillis - it.atMillis < kMapLineLifeMillis }
