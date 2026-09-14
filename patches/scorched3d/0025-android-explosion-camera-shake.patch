@@ -1,0 +1,33 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: carry the weapon's camera shake on the explosion event
+
+Upstream ends Explosion's client body with
+MainCamera::instance()->getCamera().addShake(params_->getShake()), which this
+build does not compile - the camera here belongs to the renderer under
+porting/, not to a MainCamera singleton. So the value travels with the
+explosion instead of being a call.
+
+Its own field rather than the existing `value`, which explosions already
+spend on patch 0019's splash flag.
+
+Zero for nearly every weapon: only Nuke, Baby Nuke, Death's Head and Funky
+Bomb set <explosionshake> in the shipped mod, so this is inert for ordinary
+fire. No game logic - the accumulation, the cap at 5 and the decay are all on
+the renderer's side.
+
+---
+diff --git a/src/common/actions/Explosion.cpp b/src/common/actions/Explosion.cpp
+--- a/src/common/actions/Explosion.cpp
++++ b/src/common/actions/Explosion.cpp
+@@ -100,6 +100,11 @@
+ 		// splash sound, in the client body below). The renderer decides if
+ 		// the blast is actually under the water, as Water::explosion does.
+ 		effect.value = params_->getCreateSplash() ? 1.0f : 0.0f;
++		// V10: how hard this blast shakes the camera. Upstream calls
++		// MainCamera's addShake with it at the end of this same client body;
++		// here the camera belongs to the renderer, so the value travels with
++		// the explosion rather than as a call.
++		effect.shake = params_->getShake().asFloat();
+ 		// V1: what the client body's emitters would draw with - the
+ 		// weapon's texture set and whether it animates, the particle life
+ 		// range, additive or not (<luminance>), wind, and the explosion

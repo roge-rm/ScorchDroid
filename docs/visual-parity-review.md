@@ -346,11 +346,54 @@ nothing. And every `Image` here is bottom-up, so `v = 0` belongs at the
 *bottom* of the quad - mapped the other way the arrow drew upside down,
 which is exactly what it did first time.
 
-### V10 – Camera shake
+### V10 – Camera shake — **done 2026-09-14**
 
 - `addShake(<shake>)` from explosions: a random offset of up to `shake_`
   each frame, `shake_` decaying by 0.06 per frame and capped at 5. Ten
   lines in the camera.
+
+**Every explosion asks; almost none gets it.** `addShake` is the last line of
+Explosion's client body, so it runs for every blast - but `shake_` defaults
+to 0 and comes only from a weapon's `<explosionshake>`, which appears five
+times in the shipped mod and once as `0.0`:
+
+| Weapon | `<explosionshake>` |
+|---|---|
+| Nuke | 4.0 |
+| Baby Nuke | 2.0 |
+| Death's Head | 2.0 |
+| Funky Bomb | 1.0 |
+| Baby Ring | 0.0 |
+
+So four weapons shake the screen and nothing else does - a reward for the
+expensive ordnance rather than ambient feedback. It accumulates and pins at
+5, which is what stops a cluster weapon like a Death's Head, exploding many
+times over, from tearing the view apart.
+
+Three details reproduced rather than tidied:
+
+- **The decay is not per frame.** Upstream runs it inside a fixed 0.03s
+  accumulator, commented "constant changes, regardless of framerate", losing
+  0.06 a step - 2.0 a second, so a Nuke shakes for about two seconds at any
+  frame rate.
+- **The offset rides on the look-at only**, never the eye
+  (`GLCamera::draw` adds `shakeV_` to `look`), so the camera stays put and
+  its aim shudders.
+- **`RAND` is 0..1, not -1..1**, so the offset is one-sided: the view leans
+  into one corner as it shakes rather than jittering about its centre.
+  Lopsided, and easy to "fix" by accident, so it is called out in the code.
+
+The value reaches the renderer on the explosion event (patch 0025) in its own
+field, since explosions already spend `value` on patch 0019's splash flag.
+
+Verified on the emulator with a Nuke: the budget arrives as 4.0 and decays,
+the offsets are all positive as upstream's are, and consecutive frames of a
+**land-only** crop - static geometry, no sky or water to animate - differ
+3.6x more during the shake than at rest. One caveat, and it is this port's
+not upstream's: `delta` is clamped to 0.1s a frame, so on a frame heavier
+than that the shake decays in frame-time rather than wall-clock. A nuke on
+the software renderer drops well below 10fps and stretched a two-second
+shake to about six. At 60fps nothing clamps.
 
 ### Not planned
 

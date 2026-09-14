@@ -89,8 +89,15 @@ namespace ScorchDroidEffects
 		float size = 1.0f;
 
 		// Type-specific scalar: the damage amount for eDamage, the wall
-		// side for eWallHit. Unused by the rest.
+		// side for eWallHit, whether the weapon splashes for eExplosion.
+		// Unused by the rest.
 		float value = 0.0f;
+
+		// V10: the weapon's <explosionshake>, for eExplosion only. Its own
+		// field rather than riding in `value`, which explosions already
+		// spend on the splash flag. Zero for nearly every weapon - only the
+		// four biggest in the shipped mod ask for any.
+		float shake = 0.0f;
 
 		// 0..1 RGB. Explosions carry the weapon's own <explosioncolour>;
 		// the rest get a sensible constant from the pushing site.
