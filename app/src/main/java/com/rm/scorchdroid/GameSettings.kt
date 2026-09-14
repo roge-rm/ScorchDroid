@@ -187,6 +187,26 @@ class GameSettings(context: Context) {
         prefs.edit().putBoolean(KEY_HEALTH, value).apply()
     }
 
+    /**
+     * V9: upstream's arrow over a tank. Its own switch rather than a level
+     * folded in with the two above, because upstream keeps the three apart
+     * (getDrawPlayerColor, getDrawPlayerName, getDrawPlayerHealth) and the
+     * useful combinations are not a single ordered scale - wanting arrows
+     * without names is as reasonable as the reverse.
+     *
+     * Unlike those two this one reaches the renderer rather than the HUD:
+     * the arrow is a world-space billboard in GL, where the name plate and
+     * the health bar are Compose over the top.
+     */
+    var showTankArrows by mutableStateOf(prefs.getBoolean(KEY_ARROWS, true))
+        private set
+
+    fun updateShowTankArrows(value: Boolean) {
+        showTankArrows = value
+        prefs.edit().putBoolean(KEY_ARROWS, value).apply()
+        NativeBridge.setShowTankArrows(value)
+    }
+
     /** How long a chat message stays on screen. Upstream has no equivalent. */
     var chatToastSeconds by mutableIntStateOf(prefs.getInt(KEY_TOAST, 5))
         private set
@@ -363,6 +383,7 @@ class GameSettings(context: Context) {
         shadowDetail = value.coerceIn(0, 2)
         prefs.edit().putInt(KEY_SHADOWS, shadowDetail).apply()
         NativeBridge.setShadowDetail(shadowDetail)
+        NativeBridge.setShowTankArrows(showTankArrows)
     }
 
     var showFog by mutableStateOf(prefs.getBoolean(KEY_FOG, true))
@@ -407,6 +428,7 @@ class GameSettings(context: Context) {
         const val KEY_AMBIENT = "sound.ambient"
         const val KEY_PLATES = "hud.namePlates"
         const val KEY_HEALTH = "hud.healthBars"
+        const val KEY_ARROWS = "hud.tankArrows"
         const val KEY_TOAST = "hud.chatToastSeconds"
         const val KEY_INVERT = "controls.invertDrag"
         const val KEY_TAP_AIM = "controls.tapToAim"
