@@ -1,5 +1,6 @@
 package com.rm.scorchdroid
 
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -81,6 +82,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -90,6 +92,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
@@ -235,6 +238,12 @@ class GameHudState {
     // permanent 180dp square over the battlefield is a real cost to anyone
     // who does not want it.
     var miniMapVisible by mutableStateOf(false)
+    // Enlarged by a double tap on the map, back again by another. The
+    // thumbnail is readable at a glance but not precise - picking one tank
+    // out of a cluster, or (when plan drawing lands) scribbling on it, needs
+    // room the corner of a phone screen does not have while the map is also
+    // meant to stay out of the way.
+    var miniMapEnlarged by mutableStateOf(false)
     // The picture, already an ImageBitmap - rebuilt only when the renderer's
     // version moves, which is a handful of times a round.
     var miniMapImage by mutableStateOf<ImageBitmap?>(null)
@@ -297,6 +306,7 @@ class GameHudState {
         // old one up over a new game is exactly the class of staleness this
         // whole function exists to prevent.
         miniMapVisible = false
+        miniMapEnlarged = false
         miniMapImage = null
         miniMapVersion = -1
         miniMapInfo = null
@@ -488,14 +498,33 @@ fun GameHud(
         // second magic offset that has to be kept in step with the map's
         // height. The compose box lives inside ChatOverlay, so it stacks
         // under the map for free along with the messages.
+        // Enlarged, the map is as wide as the screen allows, so it reaches
+        // across what at thumbnail size it never came near: the status text
+        // in the opposite corner. Drop it clear of that block rather than
+        // letting it ghost through a translucent map. The number is the
+        // status column's usual four short lines plus its padding - a fifth,
+        // which only the position-select prompt can add, can still touch the
+        // corner, and is worth less than plumbing a measured height through
+        // the whole HUD for.
+        val mapTopPadding by animateDpAsState(
+            targetValue = if (state.miniMapVisible && state.miniMapEnlarged) 136.dp else 72.dp,
+            animationSpec = tween(durationMillis = 180),
+            label = "miniMapTopPadding",
+        )
         Column(
             horizontalAlignment = Alignment.End,
             modifier = Modifier
                 .align(Alignment.TopEnd)
+                // Above the floating labels and name plates below, which are
+                // Compose too and are composed after this column. They are
+                // annotations on the world; this is the HUD over it, and an
+                // enlarged map is large enough that a name plate lands on it
+                // constantly rather than never.
+                .zIndex(1f)
                 .windowInsetsPadding(WindowInsets.displayCutout)
                 .padding(horizontal = 12.dp)
                 // Clear of the icon row above.
-                .padding(top = 72.dp),
+                .padding(top = mapTopPadding),
         ) {
             if (state.miniMapVisible) {
                 MiniMap(state = state, onLookAt = onLookAt)
@@ -1032,6 +1061,23 @@ private fun FadingReadout(text: String, value: Float) {
 // (which caps at 260dp) without dominating the battlefield.
 private val kMiniMapSize = 180.dp
 
+// What the map grows to on a double tap.
+//
+// Deliberately not a multiple of the small size. On a 1080x2340 phone at
+// 440dpi the screen is 393dp wide, so "2x" (360dp) already fills it and "3x"
+// would be half as wide again as the display: a multiplier would silently
+// clamp on nearly every device and mean a different thing on each. The
+// honest rule is "as much of the screen as there is room for", which lands
+// near 2x in portrait and shrinks itself where there is less to give.
+//
+// The width allowance is the column's own 12dp padding on each side. The
+// height allowance is the icon row above the map plus the bottom control
+// strip, so growing the map can never push either off the screen - which
+// binds in landscape, where a square simply has nowhere to go on a short
+// screen, and the map grows only a little.
+private const val kMiniMapEnlargedMarginDp = 24
+private const val kMiniMapEnlargedHeadroomDp = 200
+
 private val kHudIconSize = 44.dp
 private val kHudIconSidePadding = 2.dp
 private val kHudGroupGap = 10.dp
@@ -1160,6 +1206,10 @@ private fun HudIconButton(
  * screen. Here it is toggled, sits under the session icons, and is the top
  * item of that right-hand column so chat stacks below it rather than over it.
  *
+ * A double tap grows it to about as much of the screen as there is room for,
+ * and another shrinks it back. Ours, not upstream's, which has a whole
+ * desktop to spare and lets you drag its dialog to any size you like.
+ *
  * Drawn in the same order upstream draws it, because the order is the design:
  * the landscape, then the tanks, then the arena's buoys, then the camera
  * arrow on top of everything. The picture behind it comes from
@@ -1196,16 +1246,75 @@ private fun MiniMap(
         }
     }
 
+    // See kMiniMapEnlargedMarginDp: the enlarged side is what the screen can
+    // spare, not a multiple, and it is capped by the shorter of the two axes
+    // so the square never overruns a landscape screen.
+    val configuration = LocalConfiguration.current
+    val enlargedSide = minOf(
+        configuration.screenWidthDp - kMiniMapEnlargedMarginDp,
+        configuration.screenHeightDp - kMiniMapEnlargedHeadroomDp,
+    ).dp.coerceAtLeast(kMiniMapSize)
+    // Animated because the map carries position: a square that jumps size
+    // between two frames makes you re-find every dot on it, where one that
+    // grows lets you keep your eye on the one you were looking at.
+    val side by animateDpAsState(
+        targetValue = if (state.miniMapEnlarged) enlargedSide else kMiniMapSize,
+        animationSpec = tween(durationMillis = 180),
+        label = "miniMapSide",
+    )
+
+    // The backdrop the sea shows through. MiniMapBuilder turns water into
+    // alpha rather than colour, so this colour *is* the sea - and at
+    // thumbnail size letting the battlefield glimmer through it is the charm
+    // of the thing. Enlarged it stops being charm: the terrain, the trees and
+    // the shot flashes read straight through a third of the picture and the
+    // coastline stops being a coastline. So the hole gets darker as the map
+    // grows. The alpha rule in the builder does not change - the sea is still
+    // absence rather than a painted colour, just absence over something
+    // closer to black.
+    val backdropAlpha by animateFloatAsState(
+        targetValue = if (state.miniMapEnlarged) 0.82f else 0.45f,
+        animationSpec = tween(durationMillis = 180),
+        label = "miniMapBackdrop",
+    )
+
     Surface(
-        color = Color.Black.copy(alpha = 0.45f),
+        color = Color.Black.copy(alpha = backdropAlpha),
         shape = RoundedCornerShape(8.dp),
-        modifier = modifier.size(kMiniMapSize),
+        modifier = modifier.size(side),
     ) {
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(info) {
+                    // A double tap toggles the enlarged map; every tap,
+                    // including both halves of that double tap, still looks
+                    // where it landed.
+                    //
+                    // Deliberately not detectTapGestures' own onDoubleTap:
+                    // supplying it holds *every* single tap back by the
+                    // double-tap timeout before delivering it, and ~300ms of
+                    // dead air is the whole feel of a camera control. Looking
+                    // somewhere is idempotent and harmless, so the first tap
+                    // of a double tap can fire for real and the second can
+                    // enlarge on top of it - which frames the thing you are
+                    // about to inspect more closely, which is the point.
+                    var lastTapAt = 0L
+                    var lastTapPos = Offset.Zero
                     detectTapGestures { offset ->
+                        val now = System.currentTimeMillis()
+                        val isDouble = now - lastTapAt < viewConfiguration.doubleTapTimeoutMillis &&
+                            (offset - lastTapPos).getDistance() < viewConfiguration.touchSlop * 3f
+                        if (isDouble) {
+                            state.miniMapEnlarged = !state.miniMapEnlarged
+                            // So a third tap starts a fresh pair rather than
+                            // toggling again off the back of the second.
+                            lastTapAt = 0L
+                        } else {
+                            lastTapAt = now
+                            lastTapPos = offset
+                        }
+
                         // The inverse of the draw transform below, which is
                         // what upstream's mouseDown does with the same
                         // numbers. Taps outside the arena are ignored rather
