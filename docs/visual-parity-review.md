@@ -271,12 +271,43 @@ Verified on the emulator: a Shield draws as a textured mesh sphere where it
 used to be a flat wash, and a Mag Deflect draws as turning spirals with no
 sphere at all.
 
-### V6 – Second cloud layer on a dome
+### V6 – Second cloud layer on a dome — **done 2026-09-14**
 
 - Two cloud layers at upstream's two speeds (`xy_` and `xy_/1.5`), on a
   hemisphere (1980 radius, 210 and 170 tall) rather than a plane, so the
-  layer curves down to the horizon and fogs the way upstream's does. Tint
-  by the sun colour, alpha 0.7.
+  layer curves down to the horizon and fogs the way upstream's does. ~~Tint
+  by the sun colour~~, alpha 0.7.
+
+Upstream does **not** tint by the sun - `glColor4f(1, 1, 1, 0.7)`, plain
+white. The sun tint is this port's own, and it is **kept**: a night
+landscape's clouds would otherwise be lit as if it were noon, which upstream
+avoids by way of its own sky colours rather than by tinting. The alpha moved
+to upstream's 0.7, from the 0.75 this had drifted to.
+
+What the dome buys, beyond the shape: it is centred on the camera and drops
+15 below it (upstream translates to `pos[0], pos[1], -15` before drawing), so
+the sky travels with the view; and because it bends down to the horizon it
+takes the fog with it, which is what closes the sky over the world instead of
+hanging it above like a ceiling with an edge.
+
+**No uv attribute was needed.** Upstream's `eWidthTexture` mapping is a
+planar projection from straight above - `(x + radius) / 2*radius` - which is
+exactly what this port's cloud shader already computes from the position.
+Only the scale changed: one tile across the whole dome as upstream lays it,
+rather than the one-per-400-units repeat a flat plane needed.
+
+The second layer is upstream's own derivation rather than a second
+accumulator: the same scalar offset by 45.5 and divided by 1.5, on a bearing
+turned slightly off the first (`dir.x + dir.y*0.3`, `dir.y - dir.x*0.3`), on
+a shallower dome (170 against 210). That required keeping the scroll scalar
+and the direction apart - this port had only ever kept their product, which
+threw away what the second layer needs.
+
+The stars ride their own dome at upstream's 1990 by 215, just outside the
+clouds.
+
+Verified on the emulator: the cloud layer now curves down into the horizon
+and fades into the fog there, where the plane ended at a hard line.
 
 ### V7 – Recoil — spiked 2026-09-14, **not worth building**
 

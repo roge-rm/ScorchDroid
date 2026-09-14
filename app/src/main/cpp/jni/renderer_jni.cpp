@@ -233,12 +233,26 @@ namespace
 	GLuint starTexture = 0;
 
 	GLuint cloudProgram = 0, cloudVao = 0, cloudVbo = 0, cloudTexture = 0;
+	// V6: upstream's own dome sizes (SkyDome::drawBackdrop).
+	constexpr float kCloudDomeRadius = 1980.0f;
+	constexpr float kCloudDomeHeight1 = 210.0f;   // the near layer
+	constexpr float kCloudDomeHeight2 = 170.0f;   // the far, slower one
+	constexpr float kStarDomeRadius = 1990.0f;
+	constexpr float kStarDomeHeight = 215.0f;
+	// The dome sits at the camera horizontally and 15 below it, as upstream
+	// translates before drawing.
+	constexpr float kSkyDomeDrop = -15.0f;
 	GLint  cloudMvpLoc = -1, cloudScrollLoc = -1, cloudTexScaleLoc = -1;
 	GLint  cloudSamplerLoc = -1, cloudTintLoc = -1, cloudOpacityLoc = -1;
 	GLint  cloudFogColorLoc = -1, cloudFogDensityLoc = -1, cloudEyePosLoc = -1;
 	GLint  skyFogColorLoc = -1, skyFogDensityLoc = -1, skyEyeHeightLoc = -1;
 	bool   cloudsBuilt = false, cloudsVisible = false;
 	float  cloudScrollX = 0.0f, cloudScrollY = 0.0f;
+	// V6: upstream's xy_ and its cloud direction, kept apart so the slower
+	// second layer can be derived from them.
+	float  cloudScroll = 0.0f, cloudDirX = 0.8f, cloudDirY = 0.8f;
+	int    cloudDomeVertices = 0, starDomeVertices = 0;
+	GLuint starDomeVao = 0, starDomeVbo = 0;
 
 
 	GLuint shadowProgram = 0, shadowVao = 0, shadowVbo = 0;
@@ -2776,26 +2790,58 @@ namespace
 		// Sun or moon. Clamped, not tiled - it is one sprite.
 		sunTexture = loadSkyTexture(tex->suntexture, tex->suntexturemask, false);
 
-		// High enough to sit well above the tallest terrain and read as sky
-		// rather than as a ceiling, and wide enough that its edge is past
-		// the distance fade in the shader.
-		const float height = 220.0f;
-		const float reach = 1400.0f;
-		const float cx = mapWidthUnits * 0.5f, cz = mapHeightUnits * 0.5f;
-		const float quad[] = {
-			cx - reach, height, cz - reach,
-			cx - reach, height, cz + reach,
-			cx + reach, height, cz - reach,
-			cx + reach, height, cz - reach,
-			cx - reach, height, cz + reach,
-			cx + reach, height, cz + reach,
+		// V6: a dome, not a plane. Upstream hangs its clouds on an ellipsoid
+		// cap (Hemisphere::draw) of horizontal radius 1980 and a vertical
+		// semi-axis of 210 for the near layer and 170 for the far one, and
+		// centres it on the camera. The curve is the point: a plane's far
+		// edge arrives at a hard line, where a dome bends down to the
+		// horizon and takes the fog with it, which is what makes upstream's
+		// sky close over the world instead of hanging above it.
+		//
+		// No uv attribute, because upstream's own mapping (eWidthTexture) is
+		// a planar projection from straight above - (x + radius) / 2*radius
+		// - which is exactly what this shader already computes from the
+		// position. Only the scale changes: one tile across the whole dome,
+		// as upstream lays it, rather than the repeat a plane needed.
+		auto buildDome = [](float radius, float height, std::vector<float> &out) {
+			const int heightSlices = 10, rotationSlices = 24;
+			auto point = [&](int j, int i) {
+				const float theta = (float) j * (float) M_PI_2 / (float) heightSlices;
+				const float phi = (float) i * 2.0f * (float) M_PI / (float) rotationSlices;
+				out.push_back(radius * cosf(theta) * cosf(phi));
+				out.push_back(height * sinf(theta));
+				out.push_back(radius * cosf(theta) * sinf(phi));
+			};
+			for (int j = 0; j < heightSlices; j++) {
+				for (int i = 0; i < rotationSlices; i++) {
+					point(j, i);     point(j + 1, i); point(j, i + 1);
+					point(j, i + 1); point(j + 1, i); point(j + 1, i + 1);
+				}
+			}
 		};
 
+		std::vector<float> dome;
+		buildDome(kCloudDomeRadius, kCloudDomeHeight1, dome);
+		cloudDomeVertices = (int) (dome.size() / 3);
 		if (cloudVao == 0) glGenVertexArrays(1, &cloudVao);
 		if (cloudVbo == 0) glGenBuffers(1, &cloudVbo);
 		glBindVertexArray(cloudVao);
 		glBindBuffer(GL_ARRAY_BUFFER, cloudVbo);
-		glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+		glBufferData(GL_ARRAY_BUFFER, dome.size() * sizeof(float), dome.data(), GL_STATIC_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
+
+		// The stars ride their own, slightly larger dome - upstream's 1990
+		// by 215, just outside the clouds.
+		std::vector<float> starDome;
+		buildDome(kStarDomeRadius, kStarDomeHeight, starDome);
+		starDomeVertices = (int) (starDome.size() / 3);
+		if (starDomeVao == 0) glGenVertexArrays(1, &starDomeVao);
+		if (starDomeVbo == 0) glGenBuffers(1, &starDomeVbo);
+		glBindVertexArray(starDomeVao);
+		glBindBuffer(GL_ARRAY_BUFFER, starDomeVbo);
+		glBufferData(GL_ARRAY_BUFFER, starDome.size() * sizeof(float),
+					 starDome.data(), GL_STATIC_DRAW);
 		glEnableVertexAttribArray(0);
 		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void *) 0);
 		glBindVertexArray(0);
@@ -2827,10 +2873,16 @@ namespace
 		if (len < 0.0001f) { dx = 0.8f; dy = 0.8f; }
 		else { dx /= len; dy /= len; }
 
-		cloudScrollX += dx * deltaSeconds / period;
-		cloudScrollY += dy * deltaSeconds / period;
-		cloudScrollX = fmodf(cloudScrollX, 1.0f);
-		cloudScrollY = fmodf(cloudScrollY, 1.0f);
+		// V6: upstream keeps a single scalar (xy_) and multiplies it by the
+		// direction at draw time, because its *second* layer needs the same
+		// scalar put through a different formula. Keeping only the product,
+		// as this did, threw that away.
+		cloudScroll += deltaSeconds / period;
+		cloudScroll = fmodf(cloudScroll, 1000.0f);
+		cloudDirX = dx;
+		cloudDirY = dy;
+		cloudScrollX = fmodf(cloudScroll * dx, 1.0f);
+		cloudScrollY = fmodf(cloudScroll * dy, 1.0f);
 	}
 
 	// M6 sky: the landscape's own sky colours, read once per landscape.
@@ -7567,6 +7619,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, vp.m);
 			glUniform2f(cloudScrollLoc, 0.0f, 0.0f);
 			glUniform1f(cloudTexScaleLoc, 1.0f / 700.0f);
+			glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, Mat4::multiply(vp,
+				Mat4::translate(g_pickCamera.eyeX, kSkyDomeDrop, g_pickCamera.eyeZ)).m);
+			glUniform1f(cloudTexScaleLoc, 1.0f / (2.0f * kStarDomeRadius));
+			glUniform2f(cloudScrollLoc, 0.5f, 0.5f);
 			glUniform3f(cloudTintLoc, 1.0f, 1.0f, 1.0f);
 			glUniform1f(cloudOpacityLoc, 0.7f);
 			glUniform3f(cloudFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
@@ -7579,8 +7635,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glDepthMask(GL_FALSE);
 			glDisable(GL_CULL_FACE);
-			glBindVertexArray(cloudVao);
-			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
+			glBindVertexArray(starDomeVao);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, starDomeVertices);
 			glEnable(GL_CULL_FACE);
 			glDepthMask(GL_TRUE);
 			glDisable(GL_BLEND);
@@ -7596,17 +7652,21 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// is above the world but is not something you can hide behind.
 		if (cloudsVisible && cloudProgram != 0) {
 			glUseProgram(cloudProgram);
-			glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, vp.m);
-			glUniform2f(cloudScrollLoc, cloudScrollX, cloudScrollY);
-			// One tile per 400 units - big enough that the repeat isn't the
-			// first thing the eye finds.
-			glUniform1f(cloudTexScaleLoc, 1.0f / 400.0f);
-			// Tinted by the sun so a night map's clouds aren't daylit.
+			// One tile across the whole dome, which is upstream's own
+			// mapping - (x + radius) / 2*radius - rather than the repeat the
+			// old plane needed. The half tile of offset puts the dome's
+			// centre at the middle of the texture.
+			glUniform1f(cloudTexScaleLoc, 1.0f / (2.0f * kCloudDomeRadius));
+			// Kept from this port rather than upstream's plain white: a
+			// night landscape's clouds would otherwise be lit as if it were
+			// noon. Upstream gets away with white because its sky colours do
+			// the work; this reaches the same place by the shorter road.
 			glUniform3f(cloudTintLoc,
 						0.4f + skyDescription.sunColor[0] * 0.6f,
 						0.4f + skyDescription.sunColor[1] * 0.6f,
 						0.4f + skyDescription.sunColor[2] * 0.6f);
-			glUniform1f(cloudOpacityLoc, 0.75f);
+			// Upstream's own 0.7, where this had drifted to 0.75.
+			glUniform1f(cloudOpacityLoc, 0.7f);
 			glUniform3f(cloudFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
 			glUniform1f(cloudFogDensityLoc, g_showFog ? skyDescription.fogDensity : 0.0f);
 			glUniform3f(cloudEyePosLoc, g_pickCamera.eyeX, g_pickCamera.eyeY, g_pickCamera.eyeZ);
@@ -7618,7 +7678,30 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			glDepthMask(GL_FALSE);
 			glDisable(GL_CULL_FACE);
 			glBindVertexArray(cloudVao);
-			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, 6);
+
+			const Mat4 domeModel = Mat4::translate(
+				g_pickCamera.eyeX, kSkyDomeDrop, g_pickCamera.eyeZ);
+
+			// Layer 1, at the wind's own pace and bearing.
+			glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE,
+							   Mat4::multiply(vp, domeModel).m);
+			glUniform2f(cloudScrollLoc, 0.5f + cloudScrollX, 0.5f + cloudScrollY);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, cloudDomeVertices);
+
+			// Layer 2: upstream's slower, lower one - the same scalar
+			// offset by 45.5 and divided by 1.5, on a bearing turned a
+			// little off the first, so the two drift apart instead of
+			// sliding as one sheet. Its dome is shallower (170 against
+			// 210), which is what separates them in the sky.
+			const float slow = (cloudScroll + 45.5f) / 1.5f;
+			const float sx = fmodf(slow * (cloudDirX + cloudDirY * 0.3f), 1.0f);
+			const float sy = fmodf(slow * (cloudDirY - cloudDirX * 0.3f), 1.0f);
+			glUniformMatrix4fv(cloudMvpLoc, 1, GL_FALSE, Mat4::multiply(vp,
+				Mat4::multiply(domeModel,
+					Mat4::scale(1.0f, kCloudDomeHeight2 / kCloudDomeHeight1, 1.0f))).m);
+			glUniform2f(cloudScrollLoc, 0.5f + sx, 0.5f + sy);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, cloudDomeVertices);
+
 			glEnable(GL_CULL_FACE);
 			glDepthMask(GL_TRUE);
 			glDisable(GL_BLEND);
