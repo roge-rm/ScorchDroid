@@ -446,7 +446,7 @@ namespace
 	// the particle one, whose sampler is the effect atlas' 2D array and
 	// whose layout has no room for a tint that is not a particle colour.
 	GLuint texQuadProgram = 0, texQuadVao = 0, texQuadVbo = 0;
-	GLuint wallGridTexture = 0, wallHitTexture = 0;
+	GLuint wallGridTexture = 0, wallHitTexture = 0, lightningTexture = 0;
 	GLint  texQuadMvpLoc = -1, texQuadSamplerLoc = -1;
 	GLint  texQuadFogColorLoc = -1, texQuadFogDensityLoc = -1;
 
@@ -539,6 +539,15 @@ namespace
 		float x1, y1, z1, x2, y2, z2;  // render space
 		float r, g, b;
 		float age, life;
+		// V4: upstream draws these two quite differently, so which one this
+		// is decides the geometry rather than only the colour.
+		bool  laser = false;
+		// Laser: the weapon's hurt radius, which both tube radii are a
+		// fraction of. Lightning: this segment's own size, which its ribbon
+		// is 0.4 of.
+		float size = 1.0f;
+		// Laser only: <ringradius>, 0 for a weapon that wants no rings.
+		float ringRadius = 0.0f;
 	};
 
 	// A WeaponDeathAnimation's column (upstream's ExplosionLaserBeamRenderer)
@@ -4856,7 +4865,14 @@ namespace
 				// lightning for the bolt's; neither is carried on the event,
 				// so both use a short constant - long enough to read, short
 				// enough not to linger over the next shot.
-				beam.life = (event.type == ScorchDroidEffects::eLaser) ? 0.5f : 0.6f;
+				// The weapon's own time when it is supplied, which V4 added;
+				// the old short constants only as a fallback.
+				beam.life = event.life > 0.0f
+					? event.life
+					: ((event.type == ScorchDroidEffects::eLaser) ? 0.5f : 0.6f);
+				beam.laser = (event.type == ScorchDroidEffects::eLaser);
+				beam.size = event.size;
+				beam.ringRadius = beam.laser ? event.value : 0.0f;
 				beams.push_back(beam);
 				break;
 			}
@@ -5167,6 +5183,8 @@ namespace
 
 		{
 			std::vector<float> data;
+			std::vector<float> tubeData;
+			std::vector<float> ribbonData;
 			data.reserve(beams.size() * 12);
 			// X4c: rain, as upstream's ParticleRendererRain draws it - a
 			// streak 0.1 wide and (1 - |camera pitch| + 0.1) tall, so it
@@ -5194,19 +5212,71 @@ namespace
 					data.push_back(fade); data.push_back(fade); data.push_back(fade);
 				}
 			}
-			for (size_t i = 0; i < beams.size(); i++) {
-				const Beam &beam = beams[i];
-				// Same waterline rule as the particles above: a beam wholly
-				// under the surface has no reflection.
+
+			// V4: the laser's two tubes. Their own buffer, because the
+			// columns beside them are a wireframe cage drawn as lines and
+			// these are solid triangles - same program, different topology.
+			//
+			// Upstream builds them with gluCylinder: an inner one of
+			// 0.05/2 x hurtRadius with 3 sides in white, and an outer of
+			// 0.2/2 x hurtRadius with 5 sides in the weapon's own colour -
+			// so the beam is a bright core inside a coloured sheath, not a
+			// line. Alpha is (1 - age/life) * 0.5, which under additive
+			// blending is the same as dimming the colour by it.
+			for (const Beam &beam : beams) {
+				if (!beam.laser) continue;
 				if (beam.y1 < clipBelowY && beam.y2 < clipBelowY) continue;
-				// The beam shader carries no alpha, so fade by dimming the
-				// colour - which is the same thing under additive blending.
-				const float fade = 1.0f - beam.age / beam.life;
-				const float r = beam.r * fade, g = beam.g * fade, b = beam.b * fade;
-				data.push_back(beam.x1); data.push_back(beam.y1); data.push_back(beam.z1);
-				data.push_back(r); data.push_back(g); data.push_back(b);
-				data.push_back(beam.x2); data.push_back(beam.y2); data.push_back(beam.z2);
-				data.push_back(r); data.push_back(g); data.push_back(b);
+				const float fade = (1.0f - beam.age / beam.life) * 0.5f;
+				if (fade <= 0.0f) continue;
+
+				float ax = beam.x2 - beam.x1, ay = beam.y2 - beam.y1, az = beam.z2 - beam.z1;
+				const float len = sqrtf(ax * ax + ay * ay + az * az);
+				if (len < 1e-4f) continue;
+				ax /= len; ay /= len; az /= len;
+				// Any two vectors across the axis will do; pick the one that
+				// is not nearly parallel to it so the cross stays stable.
+				float upX = 0.0f, upY = 1.0f, upZ = 0.0f;
+				if (fabsf(ay) > 0.9f) { upX = 1.0f; upY = 0.0f; upZ = 0.0f; }
+				float ux = ay * upZ - az * upY;
+				float uy = az * upX - ax * upZ;
+				float uz = ax * upY - ay * upX;
+				const float ul = sqrtf(ux * ux + uy * uy + uz * uz);
+				if (ul < 1e-4f) continue;
+				ux /= ul; uy /= ul; uz /= ul;
+				const float vx = ay * uz - az * uy;
+				const float vy = az * ux - ax * uz;
+				const float vz = ax * uy - ay * ux;
+
+				struct Tube { float radius; int sides; float r, g, b; };
+				const Tube tubes[2] = {
+					{ 0.05f / 2.0f * beam.size, 3, 1.0f, 1.0f, 1.0f },
+					{ 0.2f / 2.0f * beam.size, 5, beam.r, beam.g, beam.b },
+				};
+				for (const Tube &tube : tubes) {
+					const float tr = tube.r * fade, tg = tube.g * fade, tb = tube.b * fade;
+					for (int side = 0; side < tube.sides; side++) {
+						const float a0 = 6.2831853f * (float) side / (float) tube.sides;
+						const float a1 = 6.2831853f * (float) (side + 1) / (float) tube.sides;
+						const float c0 = cosf(a0) * tube.radius, s0 = sinf(a0) * tube.radius;
+						const float c1 = cosf(a1) * tube.radius, s1 = sinf(a1) * tube.radius;
+						const float o0x = ux * c0 + vx * s0, o0y = uy * c0 + vy * s0, o0z = uz * c0 + vz * s0;
+						const float o1x = ux * c1 + vx * s1, o1y = uy * c1 + vy * s1, o1z = uz * c1 + vz * s1;
+						const float quad[4][3] = {
+							{ beam.x1 + o0x, beam.y1 + o0y, beam.z1 + o0z },
+							{ beam.x2 + o0x, beam.y2 + o0y, beam.z2 + o0z },
+							{ beam.x2 + o1x, beam.y2 + o1y, beam.z2 + o1z },
+							{ beam.x1 + o1x, beam.y1 + o1y, beam.z1 + o1z },
+						};
+						const int order[6] = { 0, 1, 2, 0, 2, 3 };
+						for (int k = 0; k < 6; k++) {
+							const int c = order[k];
+							tubeData.push_back(quad[c][0]);
+							tubeData.push_back(quad[c][1]);
+							tubeData.push_back(quad[c][2]);
+							tubeData.push_back(tr); tubeData.push_back(tg); tubeData.push_back(tb);
+						}
+					}
+				}
 			}
 
 			// The death columns, in the same line buffer as the beams.
@@ -5275,6 +5345,90 @@ namespace
 				// waterline cull above can drop some, and the old count would
 				// then have read past what was uploaded.
 				frameDrawCalls++; glDrawArrays(GL_LINES, 0, (GLsizei) (data.size() / 6));
+			}
+
+			// V4: lightning, as upstream's camera-facing textured ribbon
+			// rather than a line. Each event is one of its segments, so each
+			// becomes one quad: half a width of 0.4 x the segment's own
+			// size, laid across the segment and the direction of the eye, so
+			// the ribbon always presents its face. White and additive, as
+			// the client body draws it.
+			if (lightningTexture != 0) {
+				for (const Beam &beam : beams) {
+					if (beam.laser) continue;
+					if (beam.y1 < clipBelowY && beam.y2 < clipBelowY) continue;
+					const float fade = 1.0f - beam.age / beam.life;
+					if (fade <= 0.0f) continue;
+
+					float dx = beam.x2 - beam.x1, dy = beam.y2 - beam.y1, dz = beam.z2 - beam.z1;
+					const float dl = sqrtf(dx * dx + dy * dy + dz * dz);
+					if (dl < 1e-4f) continue;
+					dx /= dl; dy /= dl; dz /= dl;
+					float ex = beam.x1 - eyeX, ey = beam.y1 - eyeY, ez = beam.z1 - eyeZ;
+					const float el = sqrtf(ex * ex + ey * ey + ez * ez);
+					if (el < 1e-4f) continue;
+					ex /= el; ey /= el; ez /= el;
+					float ox = dy * ez - dz * ey;
+					float oy = dz * ex - dx * ez;
+					float oz = dx * ey - dy * ex;
+					const float ol = sqrtf(ox * ox + oy * oy + oz * oz);
+					if (ol < 1e-4f) continue;
+					const float half = 0.4f * beam.size / ol;
+					ox *= half; oy *= half; oz *= half;
+
+					const float corner[4][3] = {
+						{ beam.x1 + ox, beam.y1 + oy, beam.z1 + oz },
+						{ beam.x1 - ox, beam.y1 - oy, beam.z1 - oz },
+						{ beam.x2 - ox, beam.y2 - oy, beam.z2 - oz },
+						{ beam.x2 + ox, beam.y2 + oy, beam.z2 + oz },
+					};
+					const float uv[4][2] = { { 1, 0 }, { 0, 0 }, { 0, 1 }, { 1, 1 } };
+					const int order[6] = { 0, 1, 2, 0, 2, 3 };
+					for (int k = 0; k < 6; k++) {
+						const int c = order[k];
+						ribbonData.push_back(corner[c][0]);
+						ribbonData.push_back(corner[c][1]);
+						ribbonData.push_back(corner[c][2]);
+						ribbonData.push_back(uv[c][0]);
+						ribbonData.push_back(uv[c][1]);
+						ribbonData.push_back(beam.r); ribbonData.push_back(beam.g);
+						ribbonData.push_back(beam.b); ribbonData.push_back(fade);
+					}
+				}
+			}
+
+			if (!ribbonData.empty() && texQuadProgram != 0) {
+				glUseProgram(texQuadProgram);
+				glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, viewProjection.m);
+				setFixedFunctionFog(texQuadFogColorLoc, texQuadFogDensityLoc);
+				glActiveTexture(GL_TEXTURE0);
+				glBindTexture(GL_TEXTURE_2D, lightningTexture);
+				glUniform1i(texQuadSamplerLoc, 0);
+				glBindVertexArray(texQuadVao);
+				glBindBuffer(GL_ARRAY_BUFFER, texQuadVbo);
+				glBufferData(GL_ARRAY_BUFFER, ribbonData.size() * sizeof(float),
+							 ribbonData.data(), GL_DYNAMIC_DRAW);
+				glDisable(GL_CULL_FACE);
+				frameDrawCalls++;
+				glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (ribbonData.size() / 9));
+				glEnable(GL_CULL_FACE);
+				glBindVertexArray(0);
+			}
+
+			if (!tubeData.empty()) {
+				glUseProgram(sightProgram);
+				setFixedFunctionFog(sightFogColorLoc, sightFogDensityLoc);
+				glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, viewProjection.m);
+				glBindVertexArray(beamVao);
+				glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
+				glBufferData(GL_ARRAY_BUFFER, tubeData.size() * sizeof(float),
+							 tubeData.data(), GL_DYNAMIC_DRAW);
+				// Both faces: a tube is open at each end and the camera can
+				// be inside one.
+				glDisable(GL_CULL_FACE);
+				frameDrawCalls++;
+				glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (tubeData.size() / 6));
+				glEnable(GL_CULL_FACE);
 			}
 		}
 
@@ -6292,6 +6446,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 									 "data/textures/bordershield/grid.bmp", true);
 	wallHitTexture = loadSkyTexture("data/textures/bordershield/hit.bmp",
 									"data/textures/bordershield/hit.bmp", false);
+	// V4: upstream's lightning ribbon texture (WeaponLightning's default
+	// <texture>), loaded with the file as its own mask like the wall's.
+	lightningTexture = loadSkyTexture("data/textures/lightning.bmp",
+									  "data/textures/lightning.bmp", false);
+	LOGI("Lightning texture: %s", lightningTexture ? "loaded" : "FAILED");
 	LOGI("Wall textures: grid %s, hit %s",
 		 wallGridTexture ? "loaded" : "FAILED", wallHitTexture ? "loaded" : "FAILED");
 

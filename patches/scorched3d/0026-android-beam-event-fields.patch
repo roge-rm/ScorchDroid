@@ -1,0 +1,63 @@
+From: ScorchDroid <noreply@example.com>
+Subject: [PATCH] android: the beam events carry what the beams are drawn with
+
+The laser and lightning events (patch 0011) carried a position, an end and a
+size, and made their colours up - the port drew both as plain coloured lines,
+so nothing else was needed. V4 draws them as upstream does, which needs the
+rest of what the client bodies below read:
+
+- the laser's own <color>, which tints its outer tube. The constant here was
+  a pale pink; the shipped Laser is red, and nothing was showing that.
+- <ringradius>, the size of the textured rings threaded along the beam. Zero
+  for most weapons, which is how upstream switches them off. It rides in
+  `value`, which is free on a beam.
+- <totaltime> for both, which is what each fades over. Without it the
+  renderer used short constants and both were gone sooner than upstream
+  shows them.
+- lightning's colour becomes white, which is what its client body draws.
+
+Fields only; no game logic.
+
+---
+diff --git a/src/common/actions/Laser.cpp b/src/common/actions/Laser.cpp
+--- a/src/common/actions/Laser.cpp
++++ b/src/common/actions/Laser.cpp
+@@ -199,7 +199,20 @@
+ 		effect.endY = end[1].asFloat();
+ 		effect.endZ = end[2].asFloat();
+ 		effect.size = hurtRadius_.asFloat();
+-		effect.r = 1.0f; effect.g = 0.85f; effect.b = 0.85f;
++		// V4: the weapon's own colour, which is what the client body tints
++		// its outer tube with - the pale constant here was a stand-in from
++		// when the port drew the beam as a plain line. The shipped Laser is
++		// red; nothing was showing that.
++		effect.r = params_->getColor()[0];
++		effect.g = params_->getColor()[1];
++		effect.b = params_->getColor()[2];
++		// V4: <ringradius>, the size of the textured rings threaded along
++		// the beam every unit of its length. Zero for most weapons, which
++		// is how upstream switches them off. `value` is free on a beam.
++		effect.value = params_->getRingRadius();
++		// V4: the weapon's <totaltime>, which is what the client body below
++		// fades the beam over.
++		effect.life = laserTime_.asFloat();
+ 		ScorchDroidEffects::push(effect);
+ 	}
+ #endif
+diff --git a/src/common/actions/Lightning.cpp b/src/common/actions/Lightning.cpp
+--- a/src/common/actions/Lightning.cpp
++++ b/src/common/actions/Lightning.cpp
+@@ -160,7 +160,12 @@
+ 			effect.endY = segment.end[1].asFloat();
+ 			effect.endZ = segment.end[2].asFloat();
+ 			effect.size = segment.size.asFloat();
+-			effect.r = 0.75f; effect.g = 0.85f; effect.b = 1.0f;
++			// V4: white, as the client body below draws it - the pale blue
++			// here was a stand-in from when the port drew a plain line.
++			effect.r = 1.0f; effect.g = 1.0f; effect.b = 1.0f;
++			// V4: the bolt's own <totaltime>, which the client body fades
++			// every segment over together.
++			effect.life = weapon_->getTotalTime().asFloat();
+ 			ScorchDroidEffects::push(effect);
+ 		}
+ 	}
