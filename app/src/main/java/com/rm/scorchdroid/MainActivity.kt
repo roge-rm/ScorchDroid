@@ -1700,7 +1700,11 @@ class MainActivity : AppCompatActivity() {
         // fling the turret somewhere on release.
         var downX = 0f
         var downY = 0f
-        var downTime = 0L
+        // How far the finger has actually travelled, added up over the whole
+        // gesture rather than measured from where it started. A drag that
+        // curves away and comes back finishes near its own start, so net
+        // displacement cannot tell it from a tap; the distance walked can.
+        var pathLength = 0f
         var multiTouched = false
 
         fun focusOf(event: MotionEvent): Pair<Float, Float> {
@@ -1733,7 +1737,7 @@ class MainActivity : AppCompatActivity() {
                     dragging = true
                     downX = event.x
                     downY = event.y
-                    downTime = event.eventTime
+                    pathLength = 0f
                     multiTouched = false
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> {
@@ -1769,6 +1773,7 @@ class MainActivity : AppCompatActivity() {
                         lastFocusX = fx
                         lastFocusY = fy
                     }
+                    pathLength += kotlin.math.hypot(event.x - lastX, event.y - lastY)
                     lastX = event.x
                     lastY = event.y
                 }
@@ -1782,11 +1787,16 @@ class MainActivity : AppCompatActivity() {
                     if (event.pointerCount - 1 < 2) panning = false
                 }
                 MotionEvent.ACTION_UP -> {
-                    val movedX = event.x - downX
-                    val movedY = event.y - downY
-                    val moved = kotlin.math.hypot(movedX, movedY)
-                    val heldMs = event.eventTime - downTime
-                    if (!multiTouched && moved <= tapSlopPx && heldMs <= TAP_MAX_MS) {
+                    // A press that never went anywhere is a tap, however long
+                    // it was held. There used to be a 250ms ceiling on it as
+                    // well, and it was quietly throwing away deliberate taps:
+                    // anyone lining a shot up rather than stabbing at the
+                    // screen holds the screen for longer than that, and the
+                    // tap simply did nothing. Nothing needed the limit -
+                    // there is no long press on the battlefield for it to
+                    // protect, and the distance walked already separates a
+                    // tap from an orbit.
+                    if (!multiTouched && pathLength <= tapSlopPx) {
                         handleBattlefieldTap(event.x, event.y)
                     }
                     dragging = false
@@ -2925,7 +2935,6 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         // A press longer than this is a deliberate hold, not a tap - it
         // stops a slow, still finger from firing off an aim on release.
-        const val TAP_MAX_MS = 250L
 
         // Upstream's PortNo default, which every ScorchDroid host uses since
         // nothing in the port lets a player change it. Only ever a guess for
