@@ -152,3 +152,21 @@ work in a new file under `porting/` rather than in the submodule.
   upside down against the JPEG and PNG loaders and upstream's SDL path;
   tank and ship skins sampled the wrong half of their image. Rows now
   land bottom-up like the rest.
+- `0022-android-weaponanimation-hook.patch` - `WeaponAnimation` builds a
+  `MetaActionRenderer` by name and hands it to a client-only `SpriteAction`;
+  the last visual in `src/common` raised through such a path, found by the
+  src/client parity review.
+- `0023-android-channel-messages.patch` - `ChannelManager::showText`'s
+  `S3D_SERVER` branch only writes to the Logger, so kills, joins and round
+  notices were never seen on a build that is `S3D_SERVER` and still has a
+  screen.
+- `0024-android-plan-lines-host-copy.patch` - one call in
+  `ServerLinesHandler` so the hosting player gets their own copy of a plan
+  line a client drew. A desktop host is a separate process with no map of
+  its own; here it is a player. It cannot be a second registered handler,
+  because `ComsMessageHandler` keeps one per message id and registering
+  would replace the relay.
+- `0025-android-explosion-camera-shake.patch` - carries a weapon's
+  `<explosionshake>` on the explosion event, where upstream ends the same
+  client body by calling MainCamera's `addShake`. Its own field, since
+  explosions already spend `value` on 0019's splash flag.
