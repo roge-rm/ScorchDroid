@@ -88,6 +88,13 @@ class GameRenderer : GLSurfaceView.Renderer {
     external fun nativeMiniMapImage(): IntArray
 
     /**
+     * V9: one of upstream's own images as ARGB, width and height first. Used
+     * for the arrow over a tank, which the HUD draws rather than GL so that
+     * it keeps its place between the name plate and the health bar.
+     */
+    external fun nativeLoadImageArgb(file: String, mask: String, fromMod: Boolean): IntArray
+
+    /**
      * "lookX|lookY|dirX|dirY" in landscape coordinates, for the plan view's
      * camera arrow (upstream's GLWPlanView::drawCameraPointer).
      */

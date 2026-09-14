@@ -440,13 +440,15 @@ namespace
 
 	GLuint particleProgram = 0, particleVao = 0, particleVbo = 0;
 
-	// V9: upstream's arrow over a tank (TargetRendererImplTank::drawArrow).
-	// Its own tiny program rather than the particle one, whose sampler is
-	// the effect atlas' 2D array and whose layout has no room for a
-	// per-quad tint that is not a particle colour.
-	GLuint arrowProgram = 0, arrowVao = 0, arrowVbo = 0, arrowTexture = 0;
-	GLint  arrowMvpLoc = -1, arrowSamplerLoc = -1;
-	GLint  arrowFogColorLoc = -1, arrowFogDensityLoc = -1;
+	// One textured, tinted quad program, shared by everything that is a flat
+	// picture standing in the world: V9's arrow over a tank, and V8's arena
+	// wall and the splash where a shot hits it. Its own program rather than
+	// the particle one, whose sampler is the effect atlas' 2D array and
+	// whose layout has no room for a tint that is not a particle colour.
+	GLuint texQuadProgram = 0, texQuadVao = 0, texQuadVbo = 0;
+	GLuint wallGridTexture = 0, wallHitTexture = 0;
+	GLint  texQuadMvpLoc = -1, texQuadSamplerLoc = -1;
+	GLint  texQuadFogColorLoc = -1, texQuadFogDensityLoc = -1;
 
 	GLint  particleMvpLoc = -1, particleFogColorLoc = -1, particleFogDensityLoc = -1;
 	GLuint beamVao = 0, beamVbo = 0;
@@ -786,6 +788,21 @@ namespace
 	// Upstream's own per-type colours (OptionsTransient::getWallColor):
 	// wrap-around olive, bouncy blue, concrete grey.
 	float wallColor[3] = { 0.5f, 0.5f, 0.5f };
+
+	// V8: the splash where a shot struck the wall
+	// (WallActionRenderer). Position is already on the wall's plane; the
+	// quad stands in that plane and is drawn twice, a hair either side of
+	// it, so it shows from both directions without z-fighting the panel.
+	struct WallHit {
+		float x, y, z;   // world
+		int   side;      // OptionsTransient::WallSide
+		float fade;      // 1 down to 0 over two seconds, as upstream's
+		float offset;    // how far either side of the plane to sit
+	};
+	std::vector<WallHit> wallHits;
+	// Upstream advances this 0.1 -> 0.4 in steps of 0.02 per hit and wraps,
+	// so two splashes close together do not land in the same plane.
+	float wallHitOffsetCycle = 0.1f;
 
 	// M6 terrain picking. Rather than invert the MVP, the camera basis is
 	// published each frame and the pick ray is rebuilt from it. The basis
@@ -1985,13 +2002,13 @@ namespace
 	// V9. Position and colour are per vertex because the tint is the tank's
 	// own and several tanks go in one buffer; upstream sets it with
 	// glColor3fv per arrow, which is the same thing a draw call at a time.
-	const char *kArrowVertexShader = R"(#version 300 es
+	const char *kTexQuadVertexShader = R"(#version 300 es
 		layout(location = 0) in vec3 aPosition;
 		layout(location = 1) in vec2 aUv;
-		layout(location = 2) in vec3 aColor;
+		layout(location = 2) in vec4 aColor;
 		uniform mat4 uMVP;
 		out vec2 vUv;
-		out vec3 vColor;
+		out vec4 vColor;
 		out float vViewDepth;
 		void main() {
 			vUv = aUv;
@@ -2001,10 +2018,10 @@ namespace
 		}
 	)";
 
-	const char *kArrowFragmentShader = R"(#version 300 es
+	const char *kTexQuadFragmentShader = R"(#version 300 es
 		precision highp float;
 		in vec2 vUv;
-		in vec3 vColor;
+		in vec4 vColor;
 		in float vViewDepth;
 		out vec4 fragColor;
 		uniform sampler2D uArrow;
@@ -2017,8 +2034,8 @@ namespace
 			// everything else here gets.
 			vec4 t = texture(uArrow, vUv);
 			float z = uFogDensity * vViewDepth;
-			vec3 colour = mix(uFogColor, t.rgb * vColor, exp(-z * z));
-			fragColor = vec4(colour, t.a);
+			vec3 colour = mix(uFogColor, t.rgb * vColor.rgb, exp(-z * z));
+			fragColor = vec4(colour, t.a * vColor.a);
 		}
 	)";
 
@@ -4611,7 +4628,20 @@ namespace
 			}
 			case ScorchDroidEffects::eWallHit: {
 				const int side = (int) event.value;
-				if (side >= 0 && side < 4) wallFade[side] = 1.0f;
+				if (side >= 0 && side < 4) {
+					wallFade[side] = 1.0f;
+					// V8: and the splash at the point of impact.
+					WallHit hit = {};
+					hit.x = event.x;
+					hit.y = event.z;                       // engine height
+					hit.z = worldZFromEngineY(event.y);
+					hit.side = side;
+					hit.fade = 1.0f;
+					hit.offset = wallHitOffsetCycle;
+					wallHitOffsetCycle += 0.02f;
+					if (wallHitOffsetCycle > 0.4f) wallHitOffsetCycle = 0.1f;
+					wallHits.push_back(hit);
+				}
 				break;
 			}
 			case ScorchDroidEffects::eDebris: {
@@ -4896,6 +4926,17 @@ namespace
 
 		for (int i = 0; i < 4; i++) {
 			if (wallFade[i] > 0.0f) wallFade[i] = std::max(0.0f, wallFade[i] - deltaSeconds);
+		}
+
+		// V8: upstream fades a splash by frameTime/2, so two seconds.
+		for (size_t i = 0; i < wallHits.size(); ) {
+			wallHits[i].fade -= deltaSeconds / 2.0f;
+			if (wallHits[i].fade <= 0.0f) {
+				wallHits[i] = wallHits.back();
+				wallHits.pop_back();
+			} else {
+				i++;
+			}
 		}
 
 		live = 0;
@@ -6180,29 +6221,32 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	glEnableVertexAttribArray(3);
 	glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, 10 * sizeof(float), (void *) (6 * sizeof(float)));
 
-	// V9: the arrow over a tank. 8 floats a vertex - position, uv, tint.
-	arrowProgram = linkProgram(kArrowVertexShader, kArrowFragmentShader);
-	arrowMvpLoc = glGetUniformLocation(arrowProgram, "uMVP");
-	arrowSamplerLoc = glGetUniformLocation(arrowProgram, "uArrow");
-	arrowFogColorLoc = glGetUniformLocation(arrowProgram, "uFogColor");
-	arrowFogDensityLoc = glGetUniformLocation(arrowProgram, "uFogDensity");
-	glGenVertexArrays(1, &arrowVao);
-	glBindVertexArray(arrowVao);
-	glGenBuffers(1, &arrowVbo);
-	glBindBuffer(GL_ARRAY_BUFFER, arrowVbo);
+	// Position, uv and an rgba tint - 9 floats a vertex.
+	texQuadProgram = linkProgram(kTexQuadVertexShader, kTexQuadFragmentShader);
+	texQuadMvpLoc = glGetUniformLocation(texQuadProgram, "uMVP");
+	texQuadSamplerLoc = glGetUniformLocation(texQuadProgram, "uArrow");
+	texQuadFogColorLoc = glGetUniformLocation(texQuadProgram, "uFogColor");
+	texQuadFogDensityLoc = glGetUniformLocation(texQuadProgram, "uFogDensity");
+	glGenVertexArrays(1, &texQuadVao);
+	glBindVertexArray(texQuadVao);
+	glGenBuffers(1, &texQuadVbo);
+	glBindBuffer(GL_ARRAY_BUFFER, texQuadVbo);
 	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) 0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *) 0);
 	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (3 * sizeof(float)));
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *) (3 * sizeof(float)));
 	glEnableVertexAttribArray(2);
-	glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *) (5 * sizeof(float)));
-	// The same colour+mask pair the trees load through - but from the base
-	// data directory, not a mod: upstream's ExplosionTextures loads these
-	// two with eDataLocation, and under eModLocation they are simply not
-	// there.
-	arrowTexture = loadSkyTexture("data/images/arrow.bmp", "data/images/arrowi.bmp",
-								  false, nullptr, nullptr, S3D::eDataLocation);
-	LOGI("Tank arrow texture: %s", arrowTexture ? "loaded" : "FAILED");
+	glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void *) (5 * sizeof(float)));
+	// V8: the arena wall and the splash where a shot hits it. Both are mod
+	// assets, and upstream loads each with the *same* file as its own mask
+	// (Wall's ImageID and WallActionRenderer::init both pass the path
+	// twice), so the alpha comes from the image's own luminance.
+	wallGridTexture = loadSkyTexture("data/textures/bordershield/grid.bmp",
+									 "data/textures/bordershield/grid.bmp", true);
+	wallHitTexture = loadSkyTexture("data/textures/bordershield/hit.bmp",
+									"data/textures/bordershield/hit.bmp", false);
+	LOGI("Wall textures: grid %s, hit %s",
+		 wallGridTexture ? "loaded" : "FAILED", wallHitTexture ? "loaded" : "FAILED");
 
 	// Beams reuse the sight program (position + rgb), so the layout must
 	// match what that shader declares.
@@ -8226,7 +8270,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// height - the panel is meant to look like the whole wall lighting up,
 	// not a splash where the shot landed.
 	if ((wallFade[0] > 0.0f || wallFade[1] > 0.0f ||
-		 wallFade[2] > 0.0f || wallFade[3] > 0.0f) && sightProgram != 0) {
+		 wallFade[2] > 0.0f || wallFade[3] > 0.0f) &&
+		texQuadProgram != 0 && wallGridTexture != 0) {
 		// Upstream's own per-type colours (OptionsTransient::getWallColor),
 		// read from the engine rather than fixed here - the type is picked
 		// per round, since WallType defaults to WallRandom.
@@ -8266,34 +8311,131 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			if (fade <= 0.0f) continue;
 			const float x0 = sides[side][0], z0 = worldZFromEngineY(sides[side][1]);
 			const float x1 = sides[side][2], z1 = worldZFromEngineY(sides[side][3]);
-			const float r = wallColor[0] * fade;
-			const float g = wallColor[1] * fade;
-			const float b = wallColor[2] * fade;
-			const float corner[6][3] = {
-				{ x0, 0.0f, z0 }, { x1, 0.0f, z1 }, { x1, top, z1 },
-				{ x0, 0.0f, z0 }, { x1, top,  z1 }, { x0, top, z0 },
-			};
+			const float r = wallColor[0], g = wallColor[1], b = wallColor[2];
+
+			// V8: upstream's grid over the panel, 20 tiles across and down
+			// (Wall::drawWall's texture coordinates), with its own shimmer -
+			// `pos` flips between 0 and 5 as the fade counts down, and only
+			// on the two top corners, which shears the grid back and forth
+			// rather than sliding it. That asymmetry is upstream's, sitting
+			// under a commented-out `rot` it was clearly being tried
+			// against; it is what its wall does, so it is what this does.
+			const float pos = (float) (((int) (fade * 75.0f)) % 2) * 5.0f;
+			// Upstream's own corner order for this side is
+			// drawWall(bot0, bot1, top1, top0), and it lays the grid on as
+			// top0 (20+pos, pos), top1 (pos, pos), bot1 (0, 20), bot0 (20, 20).
+			const float bot0[3] = { x0, 0.0f, z0 }, bot1[3] = { x1, 0.0f, z1 };
+			const float top0[3] = { x0, top,  z0 }, top1[3] = { x1, top,  z1 };
+			const float uvBot0[2] = { 20.0f, 20.0f }, uvBot1[2] = { 0.0f, 20.0f };
+			const float uvTop0[2] = { 20.0f + pos, pos }, uvTop1[2] = { pos, pos };
+			const float *pv[6] = { bot0, bot1, top1, bot0, top1, top0 };
+			const float *uv[6] = { uvBot0, uvBot1, uvTop1, uvBot0, uvTop1, uvTop0 };
 			for (int c = 0; c < 6; c++) {
-				quads.push_back(corner[c][0]);
-				quads.push_back(corner[c][1]);
-				quads.push_back(corner[c][2]);
+				quads.push_back(pv[c][0]); quads.push_back(pv[c][1]); quads.push_back(pv[c][2]);
+				quads.push_back(uv[c][0]); quads.push_back(uv[c][1]);
+				// The fade rides in the alpha rather than being multiplied
+				// into the colour: upstream blends this the ordinary way
+				// (GLSetup's glBlendFunc, which nothing here switches off
+				// for the wall), where this port had it additive - which
+				// made a concrete-grey wall glow instead of tint.
 				quads.push_back(r); quads.push_back(g); quads.push_back(b);
+				quads.push_back(fade);
 			}
 		}
 
 		if (!quads.empty()) {
-			glUseProgram(sightProgram);
-		setFixedFunctionFog(sightFogColorLoc, sightFogDensityLoc);
-			glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, mvp.m);
+			glUseProgram(texQuadProgram);
+			glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, mvp.m);
+			setFixedFunctionFog(texQuadFogColorLoc, texQuadFogDensityLoc);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, wallGridTexture);
+			glUniform1i(texQuadSamplerLoc, 0);
 			glEnable(GL_BLEND);
-			glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			glDepthMask(GL_FALSE);
 			glDisable(GL_CULL_FACE);
-			glBindVertexArray(beamVao);
-			glBindBuffer(GL_ARRAY_BUFFER, beamVbo);
+			glBindVertexArray(texQuadVao);
+			glBindBuffer(GL_ARRAY_BUFFER, texQuadVbo);
 			glBufferData(GL_ARRAY_BUFFER, quads.size() * sizeof(float), quads.data(), GL_DYNAMIC_DRAW);
 			frameDrawCalls++;
-			glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (quads.size() / 6));
+			glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (quads.size() / 9));
+			glEnable(GL_CULL_FACE);
+			glDepthMask(GL_TRUE);
+			glDisable(GL_BLEND);
+			glBindVertexArray(0);
+		}
+	}
+
+	// V8: the splash where a shot struck the wall (WallActionRenderer), on
+	// top of the panel that lit up behind it.
+	//
+	// Upstream's own shape: a 40-unit square lying in the wall's plane,
+	// centred on the impact, drawn twice - once a little in front of the
+	// plane and once a little behind, with the winding and the texture
+	// reversed between them, so it reads from either side without fighting
+	// the panel for depth.
+	if (!wallHits.empty() && texQuadProgram != 0 && wallHitTexture != 0) {
+		const float halfSize = 20.0f;
+		std::vector<float> quads;
+		for (const WallHit &hit : wallHits) {
+			const bool acrossX = (hit.side == OptionsTransient::TopSide ||
+								  hit.side == OptionsTransient::BotSide);
+			const float r = wallColor[0], g = wallColor[1], b = wallColor[2];
+
+			// Upstream's four corners as (horizontal, height) signs, with
+			// its own texture coordinates: u follows the *height* and v the
+			// horizontal, which rotates the splash a quarter turn - its
+			// choice, reproduced rather than tidied.
+			const float signs[4][2] = { { 1, 1 }, { 1, -1 }, { -1, -1 }, { -1, 1 } };
+			for (int pass = 0; pass < 2; pass++) {
+				const float push = (pass == 0 ? hit.offset : -hit.offset);
+				float px = hit.x, pz = hit.z;
+				if (acrossX) pz += push; else px += push;
+
+				float corner[4][3];
+				float uv[4][2];
+				for (int c = 0; c < 4; c++) {
+					const float horizontal = signs[c][0] * halfSize;
+					const float height = signs[c][1] * halfSize;
+					corner[c][0] = px + (acrossX ? horizontal : 0.0f);
+					corner[c][1] = hit.y + height;
+					corner[c][2] = pz + (acrossX ? 0.0f : horizontal);
+					uv[c][0] = (signs[c][1] + 1.0f) * 0.5f;
+					uv[c][1] = (signs[c][0] + 1.0f) * 0.5f;
+				}
+
+				// The second pass runs the quad the other way round, as
+				// upstream's does, so each face is wound outwards.
+				const int order[2][6] = { { 0, 1, 2, 0, 2, 3 }, { 3, 2, 1, 3, 1, 0 } };
+				for (int i = 0; i < 6; i++) {
+					const int c = order[pass][i];
+					quads.push_back(corner[c][0]);
+					quads.push_back(corner[c][1]);
+					quads.push_back(corner[c][2]);
+					quads.push_back(uv[c][0]);
+					quads.push_back(uv[c][1]);
+					quads.push_back(r); quads.push_back(g); quads.push_back(b);
+					quads.push_back(hit.fade);
+				}
+			}
+		}
+
+		if (!quads.empty()) {
+			glUseProgram(texQuadProgram);
+			glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, mvp.m);
+			setFixedFunctionFog(texQuadFogColorLoc, texQuadFogDensityLoc);
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, wallHitTexture);
+			glUniform1i(texQuadSamplerLoc, 0);
+			glEnable(GL_BLEND);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			glDepthMask(GL_FALSE);
+			glDisable(GL_CULL_FACE);
+			glBindVertexArray(texQuadVao);
+			glBindBuffer(GL_ARRAY_BUFFER, texQuadVbo);
+			glBufferData(GL_ARRAY_BUFFER, quads.size() * sizeof(float), quads.data(), GL_DYNAMIC_DRAW);
+			frameDrawCalls++;
+			glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (quads.size() / 9));
 			glEnable(GL_CULL_FACE);
 			glDepthMask(GL_TRUE);
 			glDisable(GL_BLEND);
@@ -8613,87 +8755,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 
 
 	drawTanksPass(mvp, true);
-
-	// V9: upstream's arrow over a tank (TargetRendererImplTank::drawArrow),
-	// drawn after the tanks so the depth buffer already holds them.
-	//
-	// Upstream shows it over every tank but your own, and over yours too
-	// once the camera is not one of the five that already frame it
-	// (CamAim/CamShot/CamTank/CamAction/CamExplosion). This port's presets
-	// are its own, so the same intent maps onto them: yours appears only
-	// from the two that stand back, Free and Top.
-	//
-	// Two deliberate deviations, both marked:
-	//  - the width is fixed rather than upstream's `aspect * 0.8`, which on
-	//    a phone held in portrait would pinch the arrow to a third of the
-	//    width a desktop shows. 1.4 units is what upstream works out to at
-	//    16:9, so the shape is the one its players see.
-	//  - it is skipped for a tank that is not visible, which upstream gets
-	//    for free by bailing out of drawParticle before it ever calls this.
-	if (arrowProgram != 0 && arrowTexture != 0 && g_showTankArrows.load() != 0 &&
-		!tankInstances.empty()) {
-		const bool showMine = (g_camera.preset == OrbitCamera::pFree ||
-							   g_camera.preset == OrbitCamera::pTop);
-		// The camera's right vector, so the quad faces the viewer.
-		const float rX = g_pickCamera.rightX, rY = g_pickCamera.rightY, rZ = g_pickCamera.rightZ;
-		const float halfWidth = 0.7f;
-
-		std::vector<float> arrowVerts;
-		for (const TankInstance &inst : tankInstances) {
-			if (!inst.visible) continue;
-			if (inst.mine && !showMine) continue;
-
-			// Upstream's own heights: 4 to 7 units over the tank, measured
-			// from the ground if the tank has somehow sunk below it.
-			const float baseY = inst.y;
-			const float y0 = baseY + 4.0f, y1 = baseY + 7.0f;
-			const float lx = inst.x - rX * halfWidth, lz = inst.z - rZ * halfWidth;
-			const float rx = inst.x + rX * halfWidth, rz = inst.z + rZ * halfWidth;
-			const float ly0 = y0 - rY * halfWidth, ry0 = y0 + rY * halfWidth;
-			const float ly1 = y1 - rY * halfWidth, ry1 = y1 + rY * halfWidth;
-			const float cr = inst.colorR, cg = inst.colorG, cb = inst.colorB;
-
-			// v runs with world height, not against it: every Image in this
-			// port is bottom-up (row 0 is the bottom of the picture), so
-			// v = 0 belongs at the bottom of the quad. Mapped the other way
-			// the arrow draws upside down - which is exactly what it did.
-			const float quad[6][8] = {
-				{ lx, ly0, lz, 0.0f, 0.0f, cr, cg, cb },
-				{ rx, ry0, rz, 1.0f, 0.0f, cr, cg, cb },
-				{ rx, ry1, rz, 1.0f, 1.0f, cr, cg, cb },
-				{ lx, ly0, lz, 0.0f, 0.0f, cr, cg, cb },
-				{ rx, ry1, rz, 1.0f, 1.0f, cr, cg, cb },
-				{ lx, ly1, lz, 0.0f, 1.0f, cr, cg, cb },
-			};
-			for (int v = 0; v < 6; v++) {
-				for (int f = 0; f < 8; f++) arrowVerts.push_back(quad[v][f]);
-			}
-		}
-
-		if (!arrowVerts.empty()) {
-			glUseProgram(arrowProgram);
-			glBindVertexArray(arrowVao);
-			glBindBuffer(GL_ARRAY_BUFFER, arrowVbo);
-			glBufferData(GL_ARRAY_BUFFER, arrowVerts.size() * sizeof(float),
-						 arrowVerts.data(), GL_DYNAMIC_DRAW);
-			glUniformMatrix4fv(arrowMvpLoc, 1, GL_FALSE, mvp.m);
-			glUniform3f(arrowFogColorLoc, fogColor[0], fogColor[1], fogColor[2]);
-			glUniform1f(arrowFogDensityLoc, skyDescription.fogDensity);
-			glActiveTexture(GL_TEXTURE0);
-			glBindTexture(GL_TEXTURE_2D, arrowTexture);
-			glUniform1i(arrowSamplerLoc, 0);
-			glEnable(GL_BLEND);
-			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-			// Upstream's glDepthMask(GL_FALSE) with the test left on: the
-			// ground in front still hides the arrow, but the arrow never
-			// occludes anything itself.
-			glEnable(GL_DEPTH_TEST);
-			glDepthMask(GL_FALSE);
-			glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (arrowVerts.size() / 8));
-			glDepthMask(GL_TRUE);
-			glDisable(GL_BLEND);
-		}
-	}
 
 	if (haveSight && g_sightStyle.load() == 1) {
 		// M22: upstream's own arrangement - a protractor ring flat under the
@@ -9210,6 +9271,56 @@ Java_com_rm_scorchdroid_GameRenderer_nativeMiniMapImage(JNIEnv *env, jobject) {
 	env->SetIntArrayRegion(out, 0, count,
 						   reinterpret_cast<const jint *>(miniMap.argb.data()));
 	return out;
+}
+
+// V9: one of upstream's own images, as ARGB for Compose to draw. Width and
+// height lead, then width*height pixels.
+//
+// The arrow over a tank is drawn in the HUD rather than in GL, so that it
+// keeps its place in the stack the name plate and the health bar already
+// make - those are Compose at a pixel offset from the tank, and a quad at a
+// fixed world height would drift above the name at one camera distance and
+// below the bar at another. This is how it gets upstream's actual picture
+// there rather than a shape drawn to look like it.
+extern "C" JNIEXPORT jintArray JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeLoadImageArgb(
+		JNIEnv *env, jobject, jstring jFile, jstring jMask, jboolean fromMod) {
+	const char *fileChars = env->GetStringUTFChars(jFile, nullptr);
+	const char *maskChars = env->GetStringUTFChars(jMask, nullptr);
+	const std::string file(fileChars ? fileChars : "");
+	const std::string mask(maskChars ? maskChars : "");
+	if (fileChars) env->ReleaseStringUTFChars(jFile, fileChars);
+	if (maskChars) env->ReleaseStringUTFChars(jMask, maskChars);
+	if (file.empty()) return env->NewIntArray(0);
+
+	Image image = ImageFactory::loadImage(
+		fromMod ? S3D::eModLocation : S3D::eDataLocation, file, mask, false);
+	const int w = image.getWidth(), h = image.getHeight();
+	if (!image.getBits() || w <= 0 || h <= 0) return env->NewIntArray(0);
+	const int components = image.getComponents();
+	if (components < 3) return env->NewIntArray(0);
+
+	std::vector<int> out;
+	out.reserve(2 + w * h);
+	out.push_back(w);
+	out.push_back(h);
+	const unsigned char *bits = image.getBits();
+	// Rows arrive bottom-up (every Image here does); Compose wants them the
+	// other way, so this walks them in reverse rather than leaving the
+	// caller to flip a bitmap.
+	for (int y = h - 1; y >= 0; y--) {
+		const unsigned char *row = bits + (size_t) y * (size_t) w * components;
+		for (int x = 0; x < w; x++) {
+			const unsigned char *px = row + (size_t) x * components;
+			const int a = (components >= 4) ? px[3] : 255;
+			out.push_back((a << 24) | (px[0] << 16) | (px[1] << 8) | px[2]);
+		}
+	}
+
+	jintArray result = env->NewIntArray((jsize) out.size());
+	if (!result) return nullptr;
+	env->SetIntArrayRegion(result, 0, (jsize) out.size(), out.data());
+	return result;
 }
 
 // Where the camera is looking and which way, in landscape coordinates, for

@@ -191,6 +191,7 @@ class MainActivity : AppCompatActivity() {
     // about, so a message it is already timing is never restarted.
     private var lastChatVersion = 0
     private var lastChatLineId = 0
+    private var tankArrowLoadFailed = false
     private var lastMapLineVersion = 0
     private var lastMapLineId = 0
 
@@ -691,6 +692,7 @@ class MainActivity : AppCompatActivity() {
     private fun applySettingsToHud() {
         hudState.showNamePlates = settings.showNamePlates
         hudState.showHealthBars = settings.showHealthBars
+        hudState.showTankArrows = settings.showTankArrows
         hudState.chatToastMillis = settings.chatToastSeconds * 1000L
         hudState.leftHandMode = settings.leftHandMode
         hudState.controlOpacity = settings.controlOpacity
@@ -1355,6 +1357,27 @@ class MainActivity : AppCompatActivity() {
             // The picture itself is fetched only when the renderer says it
             // changed - a handful of times a round, against the ten times a
             // second this loop runs - so the usual tick copies nothing.
+            // V9: upstream's arrow picture, read once the engine's data root
+            // exists. Only attempted while it is missing, so a failure costs
+            // one call rather than one a tick.
+            if (hudState.tankArrowImage == null && !tankArrowLoadFailed) {
+                val argb = withContext(Dispatchers.Default) {
+                    gameRenderer.nativeLoadImageArgb(
+                        "data/images/arrow.bmp", "data/images/arrowi.bmp", false,
+                    )
+                }
+                if (argb.size > 2 && argb[0] > 0 && argb[1] > 0 &&
+                    argb.size == 2 + argb[0] * argb[1]
+                ) {
+                    hudState.tankArrowImage = Bitmap.createBitmap(
+                        argb.copyOfRange(2, argb.size), argb[0], argb[1],
+                        Bitmap.Config.ARGB_8888,
+                    ).asImageBitmap()
+                } else {
+                    tankArrowLoadFailed = true
+                }
+            }
+
             if (hudState.miniMapVisible) {
                 val version = gameRenderer.nativeMiniMapVersion()
                 if (version != hudState.miniMapVersion) {
