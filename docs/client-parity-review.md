@@ -139,8 +139,26 @@ becomes the n-1 segments between them, with pen-ups splitting it, so a PC
 client's freehand scribble renders here even though this port only ever
 sends two-point lines.
 
-Not yet run between two devices - the logic is covered by host-tests and
-JVM tests, but nothing has watched a line cross a real link.
+**Verified between two devices 2026-09-14**, two emulators bridged with
+`adb forward`/`adb reverse` so the joiner reaches the host's 27270 (the
+join screen's manual host:port entry takes `127.0.0.1`; LAN discovery and
+Wi-Fi Direct both also turned up, and a stray tap on a Wi-Fi Direct row is
+easy to make in that dialog). Both directions carry a line, and each is
+drawn in the *sender's* tank colour rather than the viewer's: the host's red
+line appears on the client, the client's orange line appears on the host -
+the latter being the path through patch 0024, which is the only way the
+hosting player sees anything at all.
+
+Two things worth knowing for the next person testing this:
+
+- **A line lives three seconds and takes a second or two to cross**, so a
+  screenshot taken right after drawing catches nothing. The logs are the
+  reliable witness; a screenshot wants a deliberate delay. Several apparent
+  failures here were only a camera pointed at the wrong moment.
+- **Rounds roll over roughly every 30 seconds** in a default hosted game,
+  and each one is a new landscape with a new arena. Taps aimed at where the
+  terrain used to be fall outside the arena and are ignored, which looks
+  exactly like the feature being broken.
 
 - ~~The open design question is the gesture, not the code.~~ **Answered**,
   by dan, and built in cc1eb37: a double tap enlarges the map and another
