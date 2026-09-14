@@ -208,10 +208,41 @@ highp since 0.7.2, with `setprop debug.scorchdroid.highp 0` to compare.
   layer curves down to the horizon and fogs the way upstream's does. Tint
   by the sun colour, alpha 0.7.
 
-### V7 – Recoil
+### V7 – Recoil — spiked 2026-09-14, **not worth building**
 
 - `fireOffSet_` −0.25 on firing, recovering at `frameTime/25`; the gun mesh
   slides along its axis by it. Tiny.
+
+Built it to find out, then reverted it. The code is easy and faithful -
+upstream translates by `fireOffSet_` *after* the elevation rotation
+(`ModelRendererTank::draw`), so the gun slides along the barrel it is
+actually pointing; in this port the barrel is -Z rather than upstream's +Y
+after the upload's axis remap, so the sign flips with it. The trigger is the
+`#else` this port already owns in `PlayMovesSimAction::tankFired`, exactly
+where upstream calls `renderer->fired()`.
+
+**The problem is the magnitude, not the work.** `fireOffSet_` is in *model*
+units, applied inside the tank's own scale, next to `gunOffset_`. Measured on
+the device: a model uploading at scale 0.093 turns 0.25 model units into
+**0.023 world units**. A tank is a few world units long, so upstream's recoil
+is well under one percent of the tank's own length - sub-pixel at any normal
+camera distance. Implementing it faithfully changes nothing anyone can see.
+
+Two things fell out of the spike that matter more than V7 itself:
+
+- **The hull/turret/gun split has never been observed working.** Every
+  `Model uploaded` line seen so far reports `turret 0, gun 0 tris` - all
+  geometry lands in the hull. The classifier matches mesh names beginning
+  `"Turret`/`"turret` and `"Gun`/`"gun`, and the MilkShape tank models do
+  contain meshes named exactly `"turret"` and `"gun"`, so it ought to fire.
+  If it does not, the turret is not turning independently of the hull
+  either, which is a far larger parity gap than recoil.
+- **Tanks rendered no model at all** in three consecutive single-player
+  Quick Games on the emulator: name plates floated over the terrain with no
+  tank beneath them, no tank model ever uploaded, and the status line read
+  `0 targets`. They drew normally in the two-device game an hour earlier, so
+  this is situational rather than constant - but it wants chasing before any
+  more work goes into how tanks look.
 
 ### V8 – Arena wall
 
