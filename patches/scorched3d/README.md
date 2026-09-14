@@ -170,3 +170,8 @@ work in a new file under `porting/` rather than in the submodule.
   `<explosionshake>` on the explosion event, where upstream ends the same
   client body by calling MainCamera's `addShake`. Its own field, since
   explosions already spend `value` on 0019's splash flag.
+- `0026-android-beam-event-fields.patch` - the laser and lightning events
+  carry the laser's `<color>` and `<ringradius>` and both weapons'
+  `<totaltime>`, and lightning's colour becomes the white its client body
+  draws. The port used to draw both as plain lines and made the colours up;
+  V4 draws them as upstream does and needs the real values. Fields only.

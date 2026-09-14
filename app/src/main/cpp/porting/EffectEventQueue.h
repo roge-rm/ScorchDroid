@@ -93,6 +93,13 @@ namespace ScorchDroidEffects
 		// Unused by the rest.
 		float value = 0.0f;
 
+		// V4: how long the effect lasts, in seconds, for the beam types.
+		// Upstream fades a laser over its weapon's <totaltime> and a bolt
+		// over the lightning's; neither was carried, so the renderer used
+		// short constants and both were gone sooner than upstream shows
+		// them. Zero means "not supplied" and the renderer keeps its own.
+		float life = 0.0f;
+
 		// V10: the weapon's <explosionshake>, for eExplosion only. Its own
 		// field rather than riding in `value`, which explosions already
 		// spend on the splash flag. Zero for nearly every weapon - only the

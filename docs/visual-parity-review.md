@@ -188,11 +188,41 @@ highp since 0.7.2, with `setprop debug.scorchdroid.highp 0` to compare.
 - Precomputed vertex lighting (`lightintense`) only applies when the option
   is on upstream; ignore.
 
-### V4 – Laser and lightning geometry
+### V4 – Laser and lightning geometry — **laser done 2026-09-14, lightning built but unseen**
 
-- Laser: a tube of `sides` quads around the beam with `waves.bmp` scrolling
-  and `particle` sparks at both ends, as `ExplosionLaserBeamRenderer`.
-- Lightning: textured segments rather than lines.
+~~Laser: a tube of `sides` quads around the beam with `waves.bmp` scrolling
+and `particle` sparks at both ends, as `ExplosionLaserBeamRenderer`.~~
+**That was wrong** - it describes `ExplosionLaserBeamRenderer`, the blue
+column a tank dies in, not the laser weapon. `Laser::draw` is:
+
+- two `gluCylinder` tubes along the beam, untextured and additive: an inner
+  one of `0.05/2 x hurtRadius` with **3** sides in white, and an outer of
+  `0.2/2 x hurtRadius` with **5** sides in the weapon's own `<color>`. A
+  bright core inside a coloured sheath.
+- alpha `(1 - age/totaltime) * 0.5`, which under additive blending is the
+  same as dimming the colour by it.
+- if `<ringradius>` is set, textured quads of that size threaded along the
+  beam every 1 unit, double-sided, from the `<ringtextureset>` (default
+  `"ring"`). Both shipped lasers set it: 1.5 and 1.75.
+
+Lightning is a camera-facing textured ribbon per branch: half-width
+`0.4 x segment.size`, laid across the segment direction and the direction of
+the eye, white and additive, over `data/textures/lightning.bmp`.
+
+**Done:** the laser's two tubes, and both beams now fade over the weapon's
+real `<totaltime>` rather than the 0.5s/0.6s constants the port invented when
+it had nothing better. The laser also draws in its actual colour at last -
+the event hardcoded a pale pink, so the shipped Laser, which is **red**, had
+never looked it.
+
+**Not done:** the rings. They want the `"ring"` texture *set*, which lives in
+this port's particle atlas as a layer of a 2D array rather than a plain 2D
+texture, so the shared textured-quad program cannot sample it as it stands.
+
+**Lightning is built but has not been seen.** The ribbon, its texture and its
+fade are all in, and the texture loads - but the Lightning weapon is
+`<armslevel>10</armslevel> `and does not appear in a Target Practice shop, so
+there was no way to fire one. It wants a game whose arms level reaches it.
 
 ### V5 – Shield textures
 
