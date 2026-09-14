@@ -209,15 +209,29 @@ Lightning is a camera-facing textured ribbon per branch: half-width
 `0.4 x segment.size`, laid across the segment direction and the direction of
 the eye, white and additive, over `data/textures/lightning.bmp`.
 
-**Done:** the laser's two tubes, and both beams now fade over the weapon's
+**Done:** the laser's two tubes and its rings, and both beams now fade over the weapon's
 real `<totaltime>` rather than the 0.5s/0.6s constants the port invented when
 it had nothing better. The laser also draws in its actual colour at last -
 the event hardcoded a pale pink, so the shipped Laser, which is **red**, had
 never looked it.
 
-**Not done:** the rings. They want the `"ring"` texture *set*, which lives in
-this port's particle atlas as a layer of a 2D array rather than a plain 2D
-texture, so the shared textured-quad program cannot sample it as it stands.
+**The rings are done too**, and the atlas turned out to be the answer rather
+than the obstacle. They are quads from a named texture set, blended
+additively - which is what a particle is here. So they go into the particle
+buffer and ride the particle program, which already samples that 2D array by
+layer. No second program, no copy of the texture, no extra draw call. The
+only thing that differs from a particle is orientation: a particle faces the
+camera, a ring stands square across the beam, a gate the beam passes through.
+
+The set name travels in the event's `texture` field - the one the explosion
+events already use for exactly this - and the renderer resolves it through
+the atlas' own name table, taking the set's texture 0 as upstream does rather
+than a frame chosen by age.
+
+Worth knowing when looking for them: **from the side a ring is edge-on**, so
+a beam viewed across its length shows the tubes and little else. They read as
+squares when the beam runs towards or away from the camera. That is
+upstream's geometry, not a fault.
 
 **Lightning is built but has not been seen.** The ribbon, its texture and its
 fade are all in, and the texture loads - but the Lightning weapon is

@@ -175,3 +175,7 @@ work in a new file under `porting/` rather than in the submodule.
   `<totaltime>`, and lightning's colour becomes the white its client body
   draws. The port used to draw both as plain lines and made the colours up;
   V4 draws them as upstream does and needs the real values. Fields only.
+- `0027-android-laser-ring-texture-set.patch` - the laser event carries its
+  `<ringtextureset>` in the `texture` field the explosion events already use,
+  so the renderer can resolve it to a layer of the particle atlas and draw
+  V4's rings from the real set.

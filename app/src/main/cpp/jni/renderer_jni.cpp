@@ -546,8 +546,10 @@ namespace
 		// fraction of. Lightning: this segment's own size, which its ribbon
 		// is 0.4 of.
 		float size = 1.0f;
-		// Laser only: <ringradius>, 0 for a weapon that wants no rings.
+		// Laser only: <ringradius>, 0 for a weapon that wants no rings, and
+		// the atlas layer its <ringtextureset> resolved to (-1 for none).
 		float ringRadius = 0.0f;
+		int   ringLayer = -1;
 	};
 
 	// A WeaponDeathAnimation's column (upstream's ExplosionLaserBeamRenderer)
@@ -4873,6 +4875,14 @@ namespace
 				beam.laser = (event.type == ScorchDroidEffects::eLaser);
 				beam.size = event.size;
 				beam.ringRadius = beam.laser ? event.value : 0.0f;
+				if (beam.ringRadius > 0.0f && !event.texture.empty()) {
+					if (!spriteAtlas.valid()) spriteAtlas = ScorchDroidParticleTextures::load();
+					// Upstream draws the set's texture 0 - not a frame chosen
+					// by age, as an animated particle would.
+					const ScorchDroidParticleTextures::Set *set =
+						spriteAtlas.find(event.texture);
+					if (set && set->count > 0) beam.ringLayer = set->firstLayer;
+				}
 				beams.push_back(beam);
 				break;
 			}
@@ -5150,6 +5160,67 @@ namespace
 					into.push_back((float) layer);
 					into.push_back(particle.r); into.push_back(particle.g); into.push_back(particle.b);
 					into.push_back(alpha);
+				}
+			}
+
+			// V4: the laser's rings, threaded along the beam every unit of
+			// its length. They go in the particle buffer rather than getting
+			// a pass of their own, because that is what they are: quads from
+			// the same texture set atlas, blended the same additive way. The
+			// only difference is orientation - a particle faces the camera,
+			// a ring stands square across the beam, a gate the beam passes
+			// through.
+			//
+			// Upstream leaves the outer tube's colour set when it draws
+			// them, so they take the weapon's colour at the same alpha, and
+			// it draws each quad twice for two-sidedness - unnecessary here,
+			// since this pass has culling off already.
+			for (const Beam &beam : beams) {
+				if (!beam.laser || beam.ringLayer < 0 || beam.ringRadius <= 0.0f) continue;
+				if (beam.y1 < clipBelowY && beam.y2 < clipBelowY) continue;
+				const float alpha = (1.0f - beam.age / beam.life) * 0.5f;
+				if (alpha <= 0.0f) continue;
+
+				float ax = beam.x2 - beam.x1, ay = beam.y2 - beam.y1, az = beam.z2 - beam.z1;
+				const float len = sqrtf(ax * ax + ay * ay + az * az);
+				if (len < 1e-4f) continue;
+				ax /= len; ay /= len; az /= len;
+				float upX = 0.0f, upY = 1.0f, upZ = 0.0f;
+				if (fabsf(ay) > 0.9f) { upX = 1.0f; upY = 0.0f; upZ = 0.0f; }
+				float ux = ay * upZ - az * upY;
+				float uy = az * upX - ax * upZ;
+				float uz = ax * upY - ay * upX;
+				const float ul = sqrtf(ux * ux + uy * uy + uz * uz);
+				if (ul < 1e-4f) continue;
+				ux /= ul; uy /= ul; uz /= ul;
+				const float vx = ay * uz - az * uy;
+				const float vy = az * ux - ax * uz;
+				const float vz = ax * uy - ay * ux;
+
+				const float size = beam.ringRadius;
+				// Upstream's own spacing: one ring per world unit. A very
+				// long beam is capped so a stray shot across the whole map
+				// cannot flood the buffer.
+				const int rings = std::min((int) len, 512);
+				for (int step = 0; step < rings; step++) {
+					const float f = (float) step;
+					const float cxp = beam.x1 + ax * f, cyp = beam.y1 + ay * f, czp = beam.z1 + az * f;
+					const float sx[4] = { -1.0f, -1.0f, 1.0f, 1.0f };
+					const float sy[4] = { -1.0f, 1.0f, 1.0f, -1.0f };
+					const float uvx[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+					const float uvy[4] = { 0.0f, 1.0f, 1.0f, 0.0f };
+					static const int tri[6] = { 0, 1, 2, 0, 2, 3 };
+					for (int t = 0; t < 6; t++) {
+						const int c = tri[t];
+						additive.push_back(cxp + (ux * sx[c] + vx * sy[c]) * size);
+						additive.push_back(cyp + (uy * sx[c] + vy * sy[c]) * size);
+						additive.push_back(czp + (uz * sx[c] + vz * sy[c]) * size);
+						additive.push_back(uvx[c]);
+						additive.push_back(uvy[c]);
+						additive.push_back((float) beam.ringLayer);
+						additive.push_back(beam.r); additive.push_back(beam.g);
+						additive.push_back(beam.b); additive.push_back(alpha);
+					}
 				}
 			}
 
