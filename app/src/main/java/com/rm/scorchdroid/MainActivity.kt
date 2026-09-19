@@ -1962,7 +1962,21 @@ class MainActivity : AppCompatActivity() {
                     // protect, and the distance walked already separates a
                     // tap from an orbit.
                     if (!multiTouched && pathLength <= tapSlopPx) {
-                        handleBattlefieldTap(event.x, event.y)
+                        // A tank's plate answers for itself before the
+                        // battlefield gets the tap: the plate sits above the
+                        // tank, so aiming at the tank is untouched, and a
+                        // tap that lands on a name is a question about that
+                        // player rather than a shot at them.
+                        val plateTankId = if (settings.showTankInfo) {
+                            renderer.nativePickTankPlate(event.x, event.y)
+                        } else {
+                            0
+                        }
+                        if (plateTankId != 0) {
+                            showTankInfo(plateTankId)
+                        } else {
+                            handleBattlefieldTap(event.x, event.y)
+                        }
                     }
                     dragging = false
                     panning = false
@@ -2086,6 +2100,41 @@ class MainActivity : AppCompatActivity() {
             parseWeaponShop(NativeBridge.getWeaponShop())
         }
         shop.settle(weapon.accessoryId, money, entries)
+    }
+
+    /**
+     * Upstream's tank tooltip, as a card. The lines and the conditions are
+     * TankTip::populate's: the shield only while one is up, the state only
+     * when it is not the ordinary one, skill and rank only when the game
+     * keeps them. Nothing here is computed on this side - the engine
+     * answers, and this lays it out.
+     */
+    private fun showTankInfo(playerId: Int) {
+        CoroutineScope(Dispatchers.Main).launch {
+            val info = withContext(Dispatchers.Default) {
+                parseTankInfo(NativeBridge.getTankInfo(playerId))
+            } ?: return@launch
+
+            val lines = buildList {
+                add("Life: ${info.life}/${info.maxLife}")
+                if (info.maxShield > 0) add("Shield: ${info.shield}/${info.maxShield}")
+                if (info.state.isNotEmpty()) add("State: ${info.state}")
+                add("Lives: ${info.lives}/${info.maxLives}")
+                add("Score: ${info.score}")
+                if (info.skill > 0) add("Skill: ${info.skill} (${info.startSkill})")
+                if (info.rank > 0) add("Rank: ${info.rank}")
+            }
+            hudState.dialog = HudDialog.ListChoice(
+                title = info.name,
+                items = lines,
+                cancelLabel = "Close",
+                // Nothing here is a choice - the rows are the card. Tapping
+                // one closes it, which is what a player does to a card they
+                // have finished reading.
+                onSelect = { hudState.dialog = HudDialog.None },
+                onCancel = { hudState.dialog = HudDialog.None },
+            )
+        }
     }
 
     /**

@@ -194,11 +194,30 @@ Wired to "Done buying" for that reason, and deliberately *not* to a long press
 on the Defences button - that button is reachable at any time, so hanging it
 there would give every player the accessory's benefit for free.
 
-### Tooltips
+### Tooltips — DONE 2026-09-19
 
 `TipDialog` is not tips-of-the-day — it is the settings for upstream's two
 tooltip kinds (help and info). Related to the already-deferred tank tooltip
 work; one feature, not two.
+
+Built as one. The tank tooltip (`GLWTankTip`'s `TankTip::populate`, hung on a
+20x20 hover box over the tank in `render2D`) is a card here, with upstream's
+own lines and upstream's own conditions: life, the shield only while one is
+up, the state only when it is not `sNormal`, lives, score, and skill and rank
+only when the game keeps them. The engine answers with all of it; nothing is
+computed on the UI side.
+
+**The gesture is a tap on the name plate, not on the tank.** A phone has no
+hover, and the tank itself is spoken for - tapping a tank is how you aim at
+it, and a tap aims however long it is held (02f5f9d), so a long press was not
+free either. The plate sits above the tank, the renderer already knows where
+it drew every one of them, and a tap that lands on a name is a question about
+that player rather than a shot at them.
+
+Of the two settings, only the info one has an analogue here: `ShowContextHelp`
+covers help tooltips on buttons, and this port's button descriptions are read
+aloud by the screen reader rather than drawn. So it is one switch, "Tank
+info", beside the other three HUD ones.
 
 ## Confirmed non-gaps
 
@@ -212,9 +231,9 @@ work; one feature, not two.
 
 ## Remaining
 
-Tooltip settings, which is one job with the deferred tank tooltip. That is
-the whole list: plan drawing was the other entry and it shipped on
-2026-09-14 (a47b1a0), verified between two devices.
+Nothing. Plan drawing shipped on 2026-09-14 (a47b1a0), verified between two
+devices, and the tooltips - the tank card and the one setting that means
+anything on a phone - shipped on 2026-09-19. This review is closed.
 
 ## The structural finding
 

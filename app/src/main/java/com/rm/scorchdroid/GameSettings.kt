@@ -190,6 +190,22 @@ class GameSettings(context: Context) {
     }
 
     /**
+     * Upstream's tank tooltip (GLWTankTip), which it shows when the mouse
+     * rests on a tank. A phone has no hover, so here it is a tap on the
+     * plate above the tank - the tank itself still aims. Upstream's switch
+     * for this is ShowContextInfo, one of the two in its TipDialog; the
+     * other one covers help tooltips on buttons, which this port has no
+     * equivalent of (its descriptions are read out, not drawn).
+     */
+    var showTankInfo by mutableStateOf(prefs.getBoolean(KEY_TANK_INFO, true))
+        private set
+
+    fun updateShowTankInfo(value: Boolean) {
+        showTankInfo = value
+        prefs.edit().putBoolean(KEY_TANK_INFO, value).apply()
+    }
+
+    /**
      * V9: upstream's arrow over a tank. Its own switch rather than a level
      * folded in with the two above, because upstream keeps the three apart
      * (getDrawPlayerColor, getDrawPlayerName, getDrawPlayerHealth) and the
@@ -434,6 +450,7 @@ class GameSettings(context: Context) {
         const val KEY_PLATES = "hud.namePlates"
         const val KEY_HEALTH = "hud.healthBars"
         const val KEY_ARROWS = "hud.tankArrows"
+        const val KEY_TANK_INFO = "hud.tankInfo"
         const val KEY_TOAST = "hud.chatToastSeconds"
         const val KEY_INVERT = "controls.invertDrag"
         const val KEY_TAP_AIM = "controls.tapToAim"
