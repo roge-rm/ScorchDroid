@@ -32,8 +32,8 @@ class GameRenderer : GLSurfaceView.Renderer {
     /**
      * Whose name plate is at this point on screen, or 0 for none. The
      * rectangles come from the plate pass, so the target is what the player
-     * can actually see - and the tank itself is left alone, because tapping
-     * a tank is how you aim at it.
+     * can actually see. Only a *hold* on one opens a card: a tap, there as
+     * anywhere else, aims.
      */
     external fun nativePickTankPlate(screenX: Float, screenY: Float): Int
 

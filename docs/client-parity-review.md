@@ -207,12 +207,13 @@ up, the state only when it is not `sNormal`, lives, score, and skill and rank
 only when the game keeps them. The engine answers with all of it; nothing is
 computed on the UI side.
 
-**The gesture is a tap on the name plate, not on the tank.** A phone has no
-hover, and the tank itself is spoken for - tapping a tank is how you aim at
-it, and a tap aims however long it is held (02f5f9d), so a long press was not
-free either. The plate sits above the tank, the renderer already knows where
-it drew every one of them, and a tap that lands on a name is a question about
-that player rather than a shot at them.
+**The gesture is a long press on the name plate.** A phone has no hover, and
+a tap is spoken for: tapping a tank is how you aim at it, and that holds over
+the plate too - dan's call, after trying it the other way round for an hour.
+So the plate is the only place in the battlefield where a press is timed at
+all, and holding one opens its card while a tap on it still aims at the tank
+underneath. The renderer already knows where it drew every plate, so the
+target costs nothing to find.
 
 Of the two settings, only the info one has an analogue here: `ShowContextHelp`
 covers help tooltips on buttons, and this port's button descriptions are read

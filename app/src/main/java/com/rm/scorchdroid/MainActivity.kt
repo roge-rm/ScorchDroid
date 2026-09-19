@@ -1892,6 +1892,18 @@ class MainActivity : AppCompatActivity() {
             },
         )
 
+        // A long press over a tank's plate opens that tank's card. Only over
+        // a plate: everywhere else a press is a press however long it is
+        // held, which is the rule the battlefield tap has kept since
+        // 02f5f9d - and over a plate a *tap* still aims at the tank, so the
+        // card costs the hold rather than the shot.
+        var plateHeld = false
+        val plateLongPress = Runnable {
+            plateHeld = true
+            val tankId = renderer.nativePickTankPlate(downX, downY)
+            if (tankId != 0) showTankInfo(tankId)
+        }
+
         surface.setOnTouchListener { _, event ->
             scaleDetector.onTouchEvent(event)
 
@@ -1904,10 +1916,22 @@ class MainActivity : AppCompatActivity() {
                     downY = event.y
                     pathLength = 0f
                     multiTouched = false
+                    plateHeld = false
+                    // Armed only where there is a plate to open, so a press
+                    // anywhere else carries no hidden timer at all.
+                    if (settings.showTankInfo &&
+                        renderer.nativePickTankPlate(event.x, event.y) != 0
+                    ) {
+                        surface.postDelayed(
+                            plateLongPress,
+                            android.view.ViewConfiguration.getLongPressTimeout().toLong(),
+                        )
+                    }
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> {
                     // A second finger rules the gesture out as a tap.
                     multiTouched = true
+                    surface.removeCallbacks(plateLongPress)
                     // A second finger just went down - this is a pinch/pan,
                     // not a one-finger orbit; stop treating pointer 0's
                     // movement as one and start tracking the centroid.
@@ -1941,6 +1965,9 @@ class MainActivity : AppCompatActivity() {
                     pathLength += kotlin.math.hypot(event.x - lastX, event.y - lastY)
                     lastX = event.x
                     lastY = event.y
+                    // A finger that has travelled is orbiting the camera, not
+                    // holding a plate.
+                    if (pathLength > tapSlopPx) surface.removeCallbacks(plateLongPress)
                 }
                 MotionEvent.ACTION_POINTER_UP -> {
                     // One finger lifted out of a multi-touch gesture - resume
@@ -1952,6 +1979,7 @@ class MainActivity : AppCompatActivity() {
                     if (event.pointerCount - 1 < 2) panning = false
                 }
                 MotionEvent.ACTION_UP -> {
+                    surface.removeCallbacks(plateLongPress)
                     // A press that never went anywhere is a tap, however long
                     // it was held. There used to be a 250ms ceiling on it as
                     // well, and it was quietly throwing away deliberate taps:
@@ -1961,27 +1989,16 @@ class MainActivity : AppCompatActivity() {
                     // there is no long press on the battlefield for it to
                     // protect, and the distance walked already separates a
                     // tap from an orbit.
-                    if (!multiTouched && pathLength <= tapSlopPx) {
-                        // A tank's plate answers for itself before the
-                        // battlefield gets the tap: the plate sits above the
-                        // tank, so aiming at the tank is untouched, and a
-                        // tap that lands on a name is a question about that
-                        // player rather than a shot at them.
-                        val plateTankId = if (settings.showTankInfo) {
-                            renderer.nativePickTankPlate(event.x, event.y)
-                        } else {
-                            0
-                        }
-                        if (plateTankId != 0) {
-                            showTankInfo(plateTankId)
-                        } else {
-                            handleBattlefieldTap(event.x, event.y)
-                        }
+                    // plateHeld: the card is already open, and the press
+                    // that opened it is not also a shot.
+                    if (!multiTouched && !plateHeld && pathLength <= tapSlopPx) {
+                        handleBattlefieldTap(event.x, event.y)
                     }
                     dragging = false
                     panning = false
                 }
                 MotionEvent.ACTION_CANCEL -> {
+                    surface.removeCallbacks(plateLongPress)
                     dragging = false
                     panning = false
                 }

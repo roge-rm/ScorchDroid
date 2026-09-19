@@ -388,7 +388,7 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                         ) { settings.updateShowTankArrows(it) }
                         SwitchRow(
                             "Tank info",
-                            "Tap a tank's name plate for its life, lives and score",
+                            "Hold a tank's name plate for its life, lives and score",
                             settings.showTankInfo,
                         ) { settings.updateShowTankInfo(it) }
                         SliderRow(

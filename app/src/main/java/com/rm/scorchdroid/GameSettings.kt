@@ -191,8 +191,9 @@ class GameSettings(context: Context) {
 
     /**
      * Upstream's tank tooltip (GLWTankTip), which it shows when the mouse
-     * rests on a tank. A phone has no hover, so here it is a tap on the
-     * plate above the tank - the tank itself still aims. Upstream's switch
+     * rests on a tank. A phone has no hover, so here it is a long press on
+     * the plate above the tank - a tap anywhere, plate included, still
+     * aims. Upstream's switch
      * for this is ShowContextInfo, one of the two in its TipDialog; the
      * other one covers help tooltips on buttons, which this port has no
      * equivalent of (its descriptions are read out, not drawn).
