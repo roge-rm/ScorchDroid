@@ -64,10 +64,12 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -239,6 +241,25 @@ class GameHudState {
     // speed != 1.0), because a permanent "1x" would be noise.
     var speedLabel by mutableStateOf("")
 
+    /**
+     * Upstream's "Skip All Moves" (SkipDialog + SkipAllDialog): every turn of
+     * yours passes itself, after a five-second countdown you can stop, until
+     * you cancel it. Not resigning - the tank, the money and the score all
+     * stay - it is what you press when you have to walk away.
+     *
+     * Upstream keeps the flag on the tank (`TankState::skipshots_`) and clears
+     * it in `TankState::clientNewGame()`, which `TankNewGameSimAction` calls
+     * only when `!context.getServerMode()`. This build is the server in every
+     * game it hosts, so that reset would never fire here; the flag lives on
+     * this side instead, where [reset] already clears it when a game ends.
+     * Nothing about it crosses the wire upstream either - it is local state
+     * that happens to sit on an engine object there.
+     */
+    var skipAllMoves by mutableStateOf(false)
+
+    /** Seconds left before this turn is skipped, or -1 when nothing counts. */
+    var skipAllSeconds by mutableIntStateOf(-1)
+
     // M11 settings, mirrored here so the HUD reads one object rather than
     // reaching for preferences mid-composition. Set from GameSettings.
     var showNamePlates by mutableStateOf(true)
@@ -267,6 +288,8 @@ class GameHudState {
         buyingPhase = false
         shotLocked = false
         floatingLabels = emptyList()
+        skipAllMoves = false
+        skipAllSeconds = -1
         windLabel = ""
         positionSelectWeapon = ""
         isHost = false
@@ -467,6 +490,35 @@ fun GameHud(
                     onClick = onToggleCamera,
                     onLongClick = onCameraPresets,
                 )
+            }
+        }
+
+        // Skip All Moves, counting down (see GameHudState.skipAllMoves).
+        // Upstream puts this in a modal window that covers the battlefield on
+        // every one of your turns; this is the same five seconds and the same
+        // two ways out, as a banner you can see past. Centred between the
+        // status text and the map rather than over either.
+        if (state.skipAllSeconds >= 0) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 72.dp)
+                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+            ) {
+                Text(
+                    "Skipping your move in ${state.skipAllSeconds}s",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                TextButton(onClick = onSkip) { Text("Skip now") }
+                // Cancel clears the whole mode, not just this turn's
+                // countdown - which is what upstream's Cancel does too.
+                TextButton(onClick = {
+                    state.skipAllMoves = false
+                    state.skipAllSeconds = -1
+                }) { Text("Cancel") }
             }
         }
 
