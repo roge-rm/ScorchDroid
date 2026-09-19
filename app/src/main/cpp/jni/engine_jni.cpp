@@ -15,6 +15,9 @@ std::mutex g_engineMutex;
 #include <server/ScorchedServerSettings.hpp>
 #include <server/ServerState.hpp>
 #include <engine/SaveGame.hpp>
+#include <dirent.h>
+#include <unistd.h>
+#include <sys/stat.h>
 #include <common/DefinesScorched.hpp>
 #include <server/ServerFileServer.hpp>
 #include <server/ServerChannelManager.hpp>
@@ -46,6 +49,7 @@ std::mutex g_engineMutex;
 #include <SoundEventQueue.h>
 #include <target/TargetLife.hpp>
 #include <landscapemap/LandscapeMaps.hpp>
+#include <landscapedef/LandscapeDefinitions.hpp>
 // M6 tank movement: upstream fires a WeaponMoveTank as an ordinary shot
 // with a selected landscape position, and MovementMap decides what is
 // reachable - see firePositionSelect()/refreshMovementMask() below.
@@ -470,6 +474,167 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
     g_humanLoadPending = false;
     g_mode = EngineMode::kHost;
     return JNI_TRUE;
+}
+
+// Resume a saved game. The same role as startLocalGame - this device hosts,
+// and everything after this is an ordinary hosted game - but the options,
+// the landscape and the players all come out of the file rather than the
+// setup screen.
+//
+// Three things about this path are worth knowing, all of them upstream's
+// doing rather than choices made here:
+//
+//  - The settings object is ScorchedServerSettingsSave, which makes
+//    startServerInternal take its "SAVE" branch and call
+//    SaveGame::loadState. That restores the game's own options - the mod
+//    among them - *before* setDataFileMod reads them, so the right mod
+//    loads with nothing here naming it. The session file startLocalGame
+//    writes is not involved at all.
+//  - The tanks are not restored by that branch. Upstream restores them when
+//    the first client authenticates (ServerConnectAuthHandler), and that
+//    code is inside #ifndef S3D_SERVER, which this build is on the wrong
+//    side of. So the same two calls it would have made are made here.
+//  - Nothing adds a human tank. A fresh game builds one (addHumanTank);
+//    a loaded one already has it in the file, with the destination id it
+//    was saved under, and loadTanks removes any tank the save does not
+//    carry - so adding one first would only have it deleted again.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_startLoadedGame(JNIEnv *env, jobject /* this */,
+                                                     jstring jName) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    if (g_mode != EngineMode::kNone) {
+        LOGE("startLoadedGame: engine already started (mode=%d)", (int) g_mode);
+        return JNI_FALSE;
+    }
+
+    const char *nameChars = env->GetStringUTFChars(jName, nullptr);
+    const std::string name(nameChars ? nameChars : "");
+    if (nameChars) env->ReleaseStringUTFChars(jName, nameChars);
+    if (name.empty()) return JNI_FALSE;
+    const std::string path = S3D::getSaveFile(name);
+
+    // As startLocalGame: upstream seeds this in its own main(), which the
+    // port never runs, and the landscape of every later round comes from it.
+    srand((unsigned int) time(nullptr));
+
+    ScorchedServerSettingsSave settings(path);
+    bool started = ScorchedServer::startServer(settings, false, nullptr);
+    LOGI("ScorchedServer::startServer(save \"%s\") -> %d", name.c_str(), started);
+    if (!started) return JNI_FALSE;
+
+    // Upstream's own startup landscape, generated here because nothing else
+    // will. ServerStateNewGame - which is what ServerNewLevelState runs -
+    // picks the *blank* landscape whenever the current definition number is
+    // still 0, and a real random one after that. A server that has been up
+    // for a while burned that blank one at startup long before anyone
+    // joined; a loaded game goes straight to the round, so without this the
+    // round being resumed is played on the blank landscape itself: real
+    // hills under a black texture, which is exactly how it looked.
+    {
+        ScorchedContext &ctx = ScorchedServer::instance()->getContext();
+        LandscapeDefinition blank = ScorchedServer::instance()->getLandscapes().getBlankLandscapeDefn();
+        ScorchedServer::instance()->getOptionsGame().updateLevelOptions(ctx, blank);
+        ScorchedServer::instance()->getLandscapeMaps().generateMaps(ctx, blank, nullptr);
+    }
+
+    // The destination the saved human tank belongs to. A real client gets
+    // one when it connects; without it, code that looks a tank's
+    // destination up finds nothing (see addHumanTank, which registers the
+    // same one for the same reason).
+    ScorchedServer::instance()->getServerDestinations().addDestination(kHumanDestinationId, 0);
+
+    if (!SaveGame::loadTargets(path)) {
+        LOGE("startLoadedGame: %s did not load", path.c_str());
+        ScorchedServer::stopServer();
+        return JNI_FALSE;
+    }
+
+    // What ServerConnectAuthHandler does immediately after loadTargets: the
+    // state that starts a round on the restored game.
+    ScorchedServer::instance()->getServerState().setState(ServerState::ServerNewLevelState);
+
+    // Re-take the snapshot, now that the save's options are in place -
+    // otherwise commitChanges at the first round copies the pre-load
+    // snapshot back over them. Same reason startLocalGame does it.
+    OptionsScorched &options = ScorchedServer::instance()->getOptionsGame();
+    options.updateChangeSet();
+    LOGI("Loaded game: rounds=%d turns=%d round=%d tanks=%u",
+         options.getNoRounds(), options.getNoTurns(),
+         ScorchedServer::instance()->getOptionsTransient().getCurrentRoundNo(),
+         ScorchedServer::instance()->getTargetContainer().getNoOfTanks());
+
+    int port = options.getPortNo();
+    g_hostingPort = port;
+    g_hostingListening = ScorchedServer::instance()->getContext().getNetInterface().start(port);
+    LOGI("NetInterface::start(%d) -> %d", port, g_hostingListening);
+    if (!g_hostingListening) {
+        LOGE("Failed to bind port %d - continuing without LAN hosting", port);
+    }
+
+    g_humanPromoted = false;
+    g_humanLoadPending = false;
+    g_mode = EngineMode::kHost;
+    return JNI_TRUE;
+}
+
+// Throw a save away. The name comes from listSavedGames and is checked
+// against the same shape rather than trusted: it names a file in one known
+// directory, and nothing here should be able to reach outside it.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_deleteSavedGame(JNIEnv *env, jobject /* this */, jstring jName) {
+    const char *nameChars = env->GetStringUTFChars(jName, nullptr);
+    const std::string name(nameChars ? nameChars : "");
+    if (nameChars) env->ReleaseStringUTFChars(jName, nameChars);
+
+    if (name.size() < 5 || name.compare(name.size() - 4, 4, ".s3d") != 0) return JNI_FALSE;
+    if (name.find('/') != std::string::npos || name.find("..") != std::string::npos) return JNI_FALSE;
+
+    const std::string path = S3D::getSaveFile(name);
+    const bool gone = (unlink(path.c_str()) == 0);
+    LOGI("deleteSavedGame: %s -> %d", path.c_str(), gone ? 1 : 0);
+    return gone ? JNI_TRUE : JNI_FALSE;
+}
+
+// The saved games on this device, newest first, one row each:
+// "name|epochSeconds|bytes". Upstream's SaveSelectDialog lists the same
+// directory the same way - every *.s3d in the settings directory's saves/
+// folder, with the time it was written.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_listSavedGames(JNIEnv *env, jobject /* this */) {
+    std::vector<std::pair<long, std::string> > found;
+
+    // getSaveFile("") is the directory itself, and makes it if it is not
+    // there yet - so this never has to know the path's shape.
+    const std::string dir = S3D::getSaveFile("");
+    DIR *handle = opendir(dir.c_str());
+    if (handle) {
+        while (struct dirent *entry = readdir(handle)) {
+            const std::string file(entry->d_name);
+            if (file.size() < 5) continue;
+            if (file.compare(file.size() - 4, 4, ".s3d") != 0) continue;
+
+            struct stat info;
+            const std::string full = dir + "/" + file;
+            if (stat(full.c_str(), &info) != 0) continue;
+
+            std::ostringstream row;
+            row << file << "|" << (long) info.st_mtime << "|" << (long) info.st_size;
+            found.push_back(std::make_pair((long) info.st_mtime, row.str()));
+        }
+        closedir(handle);
+    }
+
+    // Newest first, which is the one a player almost always wants.
+    std::sort(found.begin(), found.end(),
+              [](const std::pair<long, std::string> &a, const std::pair<long, std::string> &b) {
+                  return a.first > b.first;
+              });
+
+    jobjectArray result = env->NewObjectArray((jsize) found.size(), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < found.size(); i++) {
+        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(found[i].second.c_str()));
+    }
+    return result;
 }
 
 // M5 Phase 2: the "join" counterpart to startLocalGame() - opens a real

@@ -19,6 +19,8 @@
 #include <tankai/TankAIAdder.hpp>
 #include <coms/ComsGiftMoneyMessage.hpp>
 #include <engine/SaveGame.hpp>
+#include <common/OptionsTransient.hpp>
+#include <server/ScorchedServerSettings.hpp>
 #include <coms/ComsLoadLevelMessage.hpp>
 #include <simactions/TankGiftSimAction.hpp>
 #include <target/TargetContainer.hpp>
@@ -1013,6 +1015,113 @@ namespace
 		ComsLoadLevelMessage message;
 		check(SaveGame::loadFile(path, message),
 			"...and reads back through upstream's own loader, version and all");
+
+		unlink(path.c_str());
+	}
+
+	// Loading a saved game (engine_jni.cpp's startLoadedGame mechanism).
+	//
+	// Runs last, and for a reason: it stops the server this whole suite has
+	// been sharing and starts a new one from a file, which is exactly what
+	// the port does when a player picks a save. Anything after it would be
+	// looking at a different game.
+	//
+	// The sequence is the port's own, because upstream's is not available
+	// here: its client restores the tanks from inside
+	// ServerConnectAuthHandler, which is #ifndef S3D_SERVER and so compiled
+	// out of this build. What is pinned is that the game that comes back is
+	// the one that was saved - the same money, the same tank - rather than a
+	// fresh game on the save's landscape.
+	void testLoadGame()
+	{
+		printf("loading a saved game (engine_jni.cpp's startLoadedGame mechanism):\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+
+		// This runs after testServerRestart, so the tank and the landscape
+		// the earlier tests built are both long gone. Build what a save
+		// needs: a landscape (as ServerStateNewGame would) and a tank at the
+		// destination id the port's own human player uses.
+		if (server->getLandscapeMaps().getGroundMaps().getHeightMap().getMapWidth() <= 0)
+		{
+			LandscapeDefinition defn = server->getLandscapes().getRandomLandscapeDefn(
+				server->getContext().getOptionsGame(), server->getContext().getTargetContainer());
+			server->getOptionsGame().updateLevelOptions(server->getContext(), defn);
+			server->getLandscapeMaps().generateMaps(server->getContext(), defn, nullptr);
+		}
+
+		Tank *human = nullptr;
+		for (auto &entry : server->getTargetContainer().getTanks())
+		{
+			if (entry.second->getDestinationId() == 1) { human = entry.second; break; }
+		}
+		if (!human)
+		{
+			server->getServerDestinations().addDestination(1, 0);
+			std::set<unsigned int> takenPlayerIds;
+			unsigned int tankId = TankAIAdder::getNextTankId("", server->getContext(), takenPlayerIds);
+			server->getServerSimulator().addSimulatorAction(new TankAddSimAction(
+				tankId, 1, "", "", "", 0, LANG_STRING("Player"), ""));
+			simulateUntil(server, [&] { return server->getTargetContainer().getTankById(tankId) != nullptr; },
+				"a tank to save");
+			human = server->getTargetContainer().getTankById(tankId);
+		}
+		check(human != nullptr, "a human tank to save");
+		if (!human) return;
+
+		// Money first, then the level message: newLevel() copies the tanks
+		// into the message as they are at that moment, so a value set after
+		// it would never reach the file.
+		const int savedMoney = 4242;
+		const unsigned int savedPlayerId = human->getPlayerId();
+		human->getScore().setMoney(savedMoney);
+		server->getServerSimulator().newLevel();
+
+		const unsigned int savedRound = server->getOptionsTransient().getCurrentRoundNo();
+		const std::string path = S3D::getSaveFile("host-tests-load.s3d");
+		check(SaveGame::saveFile(path), "the game saves");
+
+		// Everything the port's startLoadedGame does, in its order.
+		ScorchedServer::stopServer();
+		ScorchedServerSettingsSave settings(path);
+		check(ScorchedServer::startServer(settings, true, nullptr),
+			"a server starts from the save file rather than from options");
+
+		ScorchedServer *loaded = ScorchedServer::instance();
+
+		// Upstream's startup landscape, which the port generates on this
+		// path because nothing else will: ServerStateNewGame - what
+		// ServerNewLevelState runs - picks the *blank* landscape whenever
+		// the current definition number is still 0, and a real one after
+		// that. Without this the resumed round is played on the blank
+		// landscape: real hills under a black texture, which is what a
+		// loaded game looked like until this was found.
+		{
+			LandscapeDefinition blank = loaded->getLandscapes().getBlankLandscapeDefn();
+			loaded->getOptionsGame().updateLevelOptions(loaded->getContext(), blank);
+			loaded->getLandscapeMaps().generateMaps(loaded->getContext(), blank, nullptr);
+		}
+		check(loaded->getLandscapeMaps().getDefinitions().getDefinition().getDefinitionNumber() != 0,
+			"the loaded server has a landscape definition, so its first round is not the blank one");
+
+		loaded->getServerDestinations().addDestination(1, 0);
+		check(SaveGame::loadTargets(path), "the saved tanks load into it");
+		loaded->getServerState().setState(ServerState::ServerNewLevelState);
+
+		Tank *restored = loaded->getTargetContainer().getTankById(savedPlayerId);
+		check(restored != nullptr, "the saved player is in the loaded game, by the same id");
+		if (restored)
+		{
+			check(restored->getScore().getMoney() == savedMoney,
+				"...with the money they had when it was saved");
+			check(restored->getDestinationId() == 1,
+				"...and the destination id they were saved under, which is what findMyTank looks for");
+		}
+
+		// Upstream steps the round number back by one as it loads, because
+		// the round it is resuming is about to be started again.
+		check(loaded->getOptionsTransient().getCurrentRoundNo() == savedRound - 1,
+			"the round counter is stepped back, as upstream's loadTargets does");
 
 		unlink(path.c_str());
 	}
@@ -4883,6 +4992,7 @@ int main(int argc, char **argv)
 	testAmbientSound();
 	testOceanWaves();
 	testParticleTextures();
+	testLoadGame();
 
 	printf("\n%s (%d failure%s)\n", failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
 		failures, failures == 1 ? "" : "s");

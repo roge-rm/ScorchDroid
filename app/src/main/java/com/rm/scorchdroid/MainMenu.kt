@@ -22,6 +22,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -39,7 +43,7 @@ import androidx.compose.ui.unit.sp
  * choice happened once at launch, and the only way out was to kill it.
  */
 enum class AppScreen {
-    SPLASH, MENU, SINGLE_PLAYER, QUICK_GAME, MULTIPLAYER, SETUP, JOINING, SETTINGS, ABOUT, GAME
+    SPLASH, MENU, SINGLE_PLAYER, QUICK_GAME, LOAD_GAME, MULTIPLAYER, SETUP, JOINING, SETTINGS, ABOUT, GAME
 }
 
 /** The palette the menu screens share, so they read as one thing. */
@@ -129,6 +133,7 @@ private fun MenuButton(
     label: String,
     subtitle: String? = null,
     enabled: Boolean = true,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     Button(
@@ -143,7 +148,7 @@ private fun MenuButton(
         // widthIn *before* fillMaxWidth: the other order lets fillMaxWidth
         // take the whole width first, which on a landscape phone made every
         // button 2340px of purple.
-        modifier = Modifier
+        modifier = modifier
             .widthIn(max = 340.dp)
             .fillMaxWidth()
             .padding(vertical = 6.dp),
@@ -189,6 +194,8 @@ fun SinglePlayerScreen(
     onQuickGame: () -> Unit,
     quickGameEnabled: Boolean,
     onNewGame: () -> Unit,
+    onLoadGame: () -> Unit,
+    loadGameEnabled: Boolean,
     onTutorial: () -> Unit,
     tutorialEnabled: Boolean,
     onBack: () -> Unit,
@@ -205,6 +212,14 @@ fun SinglePlayerScreen(
             onClick = onQuickGame,
         )
         MenuButton("New Game", "Choose the settings yourself", onClick = onNewGame)
+        // Only a game this device hosts can be saved, and every game started
+        // from here is one - so this is where a save comes back to.
+        MenuButton(
+            "Load Game",
+            if (loadGameEnabled) "Carry on a saved game" else "No saved games yet",
+            enabled = loadGameEnabled,
+            onClick = onLoadGame,
+        )
         MenuButton(
             "Tutorial",
             if (tutorialEnabled) "Learn the controls" else "Not built yet",
@@ -226,6 +241,59 @@ fun SinglePlayerScreen(
  * shown under the mod they came from rather than merged into one list - the
  * Apocalypse ones play a different game entirely.
  */
+/**
+ * The saves on this device, newest first - upstream's SaveSelectDialog is the
+ * same list from the same directory, with the time each one was written.
+ */
+@Composable
+fun LoadGameScreen(
+    saves: List<SavedGame>,
+    onPick: (SavedGame) -> Unit,
+    onDelete: (SavedGame) -> Unit,
+    onBack: () -> Unit,
+) {
+    MenuBackdrop {
+        Title("Load Game")
+        Spacer(Modifier.height(24.dp))
+        saves.forEach { save ->
+            // The bin sits beside each save rather than behind a long press:
+            // nothing else on these menu screens is held rather than tapped,
+            // and a save is the one thing here a player may want rid of.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.widthIn(max = 380.dp).fillMaxWidth(),
+            ) {
+                MenuButton(
+                    savedGameLabel(save.savedAtSeconds),
+                    "${save.bytes / 1024} KB",
+                    modifier = Modifier.weight(1f),
+                ) { onPick(save) }
+                IconButton(onClick = { onDelete(save) }) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "Delete this saved game",
+                        tint = Color.White.copy(alpha = 0.55f),
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
+    }
+}
+
+/** "Today 15:04" for a save from today, otherwise "19 Sep 15:04". */
+private fun savedGameLabel(epochSeconds: Long): String {
+    val saved = java.util.Calendar.getInstance().apply { timeInMillis = epochSeconds * 1000L }
+    val now = java.util.Calendar.getInstance()
+    val sameDay = saved.get(java.util.Calendar.YEAR) == now.get(java.util.Calendar.YEAR) &&
+        saved.get(java.util.Calendar.DAY_OF_YEAR) == now.get(java.util.Calendar.DAY_OF_YEAR)
+    val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(saved.time)
+    if (sameDay) return "Today $time"
+    val day = java.text.SimpleDateFormat("d MMM", java.util.Locale.getDefault()).format(saved.time)
+    return "$day $time"
+}
+
 @Composable
 fun QuickGameScreen(
     presets: List<GamePreset>,
