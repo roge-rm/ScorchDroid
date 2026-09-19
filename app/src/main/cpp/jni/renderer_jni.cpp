@@ -5318,7 +5318,7 @@ namespace
 				{ { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } },
 				{ { 1, 0 }, { 1, 1 }, { 0, 1 }, { 0, 0 } },
 			};
-			std::vector<float> additive, blended;
+			std::vector<float> additive, blended, precipitation;
 			additive.reserve(particles.size() * 60);
 			for (size_t i = 0; i < particles.size(); i++) {
 				const Particle &particle = particles[i];
@@ -5341,6 +5341,19 @@ namespace
 				}
 				if (alpha <= 0.0f) continue;
 
+				// X4c/1.0.1: precipitation goes in its own batch, because it
+				// is the one thing here upstream draws with the fog *off*.
+				// Its fog block wraps the target pass alone (RenderTargets
+				// turns GL_FOG on at the top and off at the bottom), and the
+				// camera's own rain and snow engine draws outside it.
+				//
+				// Fogging them is not a subtle difference: a flake is 0.2
+				// units across, so the whole quad is one flat colour, and on
+				// a landscape whose <fog> is dark grey the sky filled with
+				// hard dark squares. That is what it looked like.
+				std::vector<float> &target = (particle.kind == 2) ? precipitation
+					: (particle.alphaBlend ? blended : additive);
+
 				int layer = particle.layer;
 				if (particle.frames > 1) {
 					const int frame = (particle.framesPerSecond > 0.0f)
@@ -5359,7 +5372,7 @@ namespace
 					particle.z + rz * half + uz * half, particle.z - rz * half + uz * half,
 					particle.z - rz * half - uz * half, particle.z + rz * half - uz * half };
 				const float (*uv)[2] = kUv[particle.orient & 3];
-				std::vector<float> &into = particle.alphaBlend ? blended : additive;
+				std::vector<float> &into = target;
 				static const int tri[6] = { 0, 1, 2, 0, 2, 3 };
 				for (int t = 0; t < 6; t++) {
 					const int c = tri[t];
@@ -5454,6 +5467,17 @@ namespace
 							 blended.data(), GL_DYNAMIC_DRAW);
 				frameDrawCalls++;
 				glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (blended.size() / 10));
+			}
+			if (!precipitation.empty()) {
+				// The same program with the fog turned off - see where these
+				// were sorted out above.
+				glUniform1f(particleFogDensityLoc, 0.0f);
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+				glBufferData(GL_ARRAY_BUFFER, precipitation.size() * sizeof(float),
+							 precipitation.data(), GL_DYNAMIC_DRAW);
+				frameDrawCalls++;
+				glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (precipitation.size() / 10));
+				setFixedFunctionFog(particleFogColorLoc, particleFogDensityLoc);
 			}
 			glEnable(GL_CULL_FACE);
 			glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
