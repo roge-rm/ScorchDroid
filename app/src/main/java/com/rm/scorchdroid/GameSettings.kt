@@ -169,6 +169,29 @@ class GameSettings(context: Context) {
     /** The ambient player, likewise. */
     var ambient: AmbientPlayer? = null
 
+    /**
+     * A6: upstream's NoCountDownSound and NoChannelTextSound. Both silence
+     * one sound without silencing the game, which is why they are switches of
+     * their own rather than a level on the effects volume.
+     */
+    var countdownSound by mutableStateOf(prefs.getBoolean(KEY_COUNTDOWN_SOUND, true))
+        private set
+
+    fun updateCountdownSound(value: Boolean) {
+        countdownSound = value
+        prefs.edit().putBoolean(KEY_COUNTDOWN_SOUND, value).apply()
+        NativeBridge.setCountdownSound(value)
+    }
+
+    var chatSound by mutableStateOf(prefs.getBoolean(KEY_CHAT_SOUND, true))
+        private set
+
+    fun updateChatSound(value: Boolean) {
+        chatSound = value
+        prefs.edit().putBoolean(KEY_CHAT_SOUND, value).apply()
+        NativeBridge.setChatSound(value)
+    }
+
     // --- HUD ----------------------------------------------------------------
 
     var showNamePlates by mutableStateOf(prefs.getBoolean(KEY_PLATES, true))
@@ -433,6 +456,8 @@ class GameSettings(context: Context) {
         NativeBridge.setReflectionStyle(reflectionLevel)
         NativeBridge.setEffectsDetail(effectsDetail)
         NativeBridge.setShadowDetail(shadowDetail)
+        NativeBridge.setCountdownSound(countdownSound)
+        NativeBridge.setChatSound(chatSound)
         NativeBridge.setShowNamePlates(showNamePlates)
         NativeBridge.setShowHealthBars(showHealthBars)
         NativeBridge.setShowTankArrows(showTankArrows)
@@ -452,6 +477,8 @@ class GameSettings(context: Context) {
         const val KEY_HEALTH = "hud.healthBars"
         const val KEY_ARROWS = "hud.tankArrows"
         const val KEY_TANK_INFO = "hud.tankInfo"
+        const val KEY_COUNTDOWN_SOUND = "sound.countdown"
+        const val KEY_CHAT_SOUND = "sound.chat"
         const val KEY_TOAST = "hud.chatToastSeconds"
         const val KEY_INVERT = "controls.invertDrag"
         const val KEY_TAP_AIM = "controls.tapToAim"

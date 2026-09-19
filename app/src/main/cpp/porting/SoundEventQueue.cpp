@@ -6,6 +6,8 @@
 namespace ScorchDroidAudio
 {
 	int soundChannels = kDefaultSoundChannels;
+	bool countdownSoundEnabled = true;
+	bool chatSoundEnabled = true;
 
 	namespace
 	{
@@ -56,6 +58,35 @@ namespace ScorchDroidAudio
 			const float falloff = refDist / denominator;
 			return sound.gain * std::min(1.0f, std::max(0.0f, falloff));
 		}
+	}
+
+	// How far across the stereo field a sound sits, from the listener's own
+	// right vector - the cheap projection of what OpenAL does with a full
+	// listener orientation. Upstream hands it the orientation every frame
+	// (MainCamera sets it from the camera's look direction) and lets the
+	// mixer place the source; SoundPool takes a left and a right volume, so
+	// the placement has to be computed rather than described.
+	//
+	// Deliberately not squared or curved: the dot product of two unit
+	// vectors is already the cosine of the angle, which is what a linear
+	// pan wants.
+	float panForPosition(float x, float y, float z,
+		bool haveListener, float listenerX, float listenerY, float listenerZ,
+		float rightX, float rightY, float rightZ)
+	{
+		if (!haveListener) return 0.0f;
+		const float dx = x - listenerX;
+		const float dy = y - listenerY;
+		const float dz = z - listenerZ;
+		const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+		// On top of the listener: there is no direction to it.
+		if (distance < 0.001f) return 0.0f;
+
+		const float rightLength = sqrtf(rightX * rightX + rightY * rightY + rightZ * rightZ);
+		if (rightLength < 0.001f) return 0.0f;
+
+		const float pan = (dx * rightX + dy * rightY + dz * rightZ) / (distance * rightLength);
+		return std::min(1.0f, std::max(-1.0f, pan));
 	}
 
 	float gainForPosition(float x, float y, float z,
@@ -113,7 +144,8 @@ namespace ScorchDroidAudio
 	}
 
 	std::vector<SelectedSound> drainSoundEvents(
-		bool haveListener, float listenerX, float listenerY, float listenerZ)
+		bool haveListener, float listenerX, float listenerY, float listenerZ,
+		float rightX, float rightY, float rightZ)
 	{
 		std::vector<QueuedSound> drained;
 		{
@@ -164,6 +196,12 @@ namespace ScorchDroidAudio
 			sound.file     = drained[i].file;
 			sound.gain     = gain;
 			sound.priority = drained[i].priority;
+			// A sound with no position is upstream's relative case: it sits
+			// at the listener, and something at the listener has no side.
+			sound.pan      = drained[i].positioned
+				? panForPosition(drained[i].x, drained[i].y, drained[i].z,
+					haveListener, listenerX, listenerY, listenerZ, rightX, rightY, rightZ)
+				: 0.0f;
 			selected.push_back(sound);
 		}
 		return selected;

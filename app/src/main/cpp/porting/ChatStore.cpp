@@ -47,8 +47,12 @@ namespace ScorchDroidChat
 		// countdown, and well below eAction, so a round's explosions take
 		// the channels ahead of a chat notification rather than the other
 		// way round.
-		ScorchDroidAudio::pushSoundEvent(
-			S3D::getModFile(kChatSoundFile), ScorchDroidAudio::kPriorityText);
+		// A6: upstream's NoChannelTextSound silences this one line without
+		// silencing the game.
+		if (ScorchDroidAudio::chatSoundEnabled) {
+			ScorchDroidAudio::pushSoundEvent(
+				S3D::getModFile(kChatSoundFile), ScorchDroidAudio::kPriorityText);
+		}
 	}
 
 	std::vector<Line> snapshot()

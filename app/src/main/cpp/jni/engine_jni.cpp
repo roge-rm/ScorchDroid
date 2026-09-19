@@ -973,6 +973,21 @@ Java_com_rm_scorchdroid_NativeBridge_useDefense(JNIEnv *env, jobject /* this */,
 // nothing has to be typed on a phone. S3D::getSaveFile puts it in the
 // settings directory's saves/ folder and creates that folder if it has to;
 // initEngine has already set the settings directory.
+// A6: upstream's two sound mutes - NoCountDownSound and NoChannelTextSound.
+// Everything else about the mix stays where it is; these silence one sound
+// each, which is what upstream's own options do.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setCountdownSound(JNIEnv *, jobject, jboolean on) {
+    ScorchDroidAudio::countdownSoundEnabled = (on == JNI_TRUE);
+    LOGI("Countdown sound: %s", ScorchDroidAudio::countdownSoundEnabled ? "on" : "off");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setChatSound(JNIEnv *, jobject, jboolean on) {
+    ScorchDroidAudio::chatSoundEnabled = (on == JNI_TRUE);
+    LOGI("Chat sound: %s", ScorchDroidAudio::chatSoundEnabled ? "on" : "off");
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_rm_scorchdroid_NativeBridge_saveGame(JNIEnv *env, jobject /* this */) {
     std::lock_guard<std::mutex> lock(g_engineMutex);
@@ -1333,6 +1348,9 @@ static void countdownBeeps(ScorchedServer *server, Tank *myTank)
     g_lastCountdownSecond = remaining;
     if (previous < 0 || remaining >= previous) return;  // New move, or no change.
 
+    // A6: upstream's NoCountDownSound silences the beeps and nothing else.
+    if (!ScorchDroidAudio::countdownSoundEnabled) return;
+
     if (remaining == 0) {
         ScorchDroidAudio::pushSoundEvent(
             S3D::getModFile("data/wav/misc/beep2.wav"), ScorchDroidAudio::kPriorityText);
@@ -1355,6 +1373,16 @@ static void trackPhaseTime(ScorchedServer *server, fixed frameTime)
     const unsigned int moveId = tank ? tank->getShotInfo().getMoveId() : 0;
 
     if (state != g_lastServerState || moveId != g_lastMoveId) {
+        // A3: a move of ours has just been granted, which is where upstream
+        // plays data/wav/misc/play.wav - from TankStartMoveSimAction's client
+        // body, by way of ClientStartGameHandler::startGame, whose own
+        // comment calls it "a new game is commencing" and is wrong: the
+        // action it hangs off is a tank's move starting, so it is the sound
+        // of your turn. Relative and eText, exactly as upstream plays it.
+        if (moveId != 0 && moveId != g_lastMoveId) {
+            ScorchDroidAudio::pushSoundEvent(
+                S3D::getModFile("data/wav/misc/play.wav"), ScorchDroidAudio::kPriorityText);
+        }
         g_lastServerState = state;
         g_lastMoveId = moveId;
         g_phaseElapsed = 0;
@@ -2093,7 +2121,7 @@ Java_com_rm_scorchdroid_NativeBridge_getGameStateDebugString(JNIEnv *env, jobjec
 // the files bundled in data/ (see the porting plan's note on the
 // audio-approach revisit).
 //
-// Each row is "path|gain|priority", the same pipe-delimited convention
+// Each row is "path|gain|priority|pan", the same pipe-delimited convention
 // getWeaponShop and getScores use. The gain is not a preference - it is upstream's own
 // inverse-distance attenuation, computed against the live listener, and the
 // batch has already been cut to the channel budget with the nearest sounds
@@ -2106,13 +2134,15 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
     // before g_engineMutex is taken rather than inside it - two locks held at
     // once between these threads is exactly the shape a deadlock needs.
     float listenerX = 0.0f, listenerY = 0.0f, listenerZ = 0.0f;
-    const bool haveListener = renderListenerEnginePosition(listenerX, listenerY, listenerZ);
+    float rightX = 1.0f, rightY = 0.0f, rightZ = 0.0f;
+    const bool haveListener = renderListenerEngineBasis(
+        listenerX, listenerY, listenerZ, rightX, rightY, rightZ);
 
     std::vector<ScorchDroidAudio::SelectedSound> events;
     {
         std::lock_guard<std::mutex> lock(g_engineMutex);
         events = ScorchDroidAudio::drainSoundEvents(
-            haveListener, listenerX, listenerY, listenerZ);
+            haveListener, listenerX, listenerY, listenerZ, rightX, rightY, rightZ);
     }
     // M13: one line per batch, naming the files, so "is that sound wired"
     // can be answered from logcat rather than by listening. Quiet when there
@@ -2130,7 +2160,11 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
             // The gain too, since "why was that quiet" and "why did that not
             // play at all" are the two questions this mix raises, and both
             // are answered by the number rather than by listening.
-            names << S3D::formatStringBuffer("(%.2f)", events[i].gain);
+            // The gain and the side, since "why was that quiet", "why did
+            // that not play at all" and "why did that come from the wrong
+            // ear" are the three questions this mix raises, and all three
+            // are answered by numbers rather than by listening.
+            names << S3D::formatStringBuffer("(%.2f,%+.2f)", events[i].gain, events[i].pan);
         }
         LOGI("Sound events: %s", names.str().c_str());
     }
@@ -2138,7 +2172,8 @@ Java_com_rm_scorchdroid_NativeBridge_pollSoundEvents(JNIEnv *env, jobject /* thi
     jobjectArray result = env->NewObjectArray((jsize) events.size(), env->FindClass("java/lang/String"), nullptr);
     for (size_t i = 0; i < events.size(); i++) {
         const std::string row = events[i].file +
-            S3D::formatStringBuffer("|%.4f|%d", events[i].gain, events[i].priority);
+            S3D::formatStringBuffer("|%.4f|%d|%.3f",
+                events[i].gain, events[i].priority, events[i].pan);
         env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(row.c_str()));
     }
     return result;

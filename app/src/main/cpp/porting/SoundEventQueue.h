@@ -39,6 +39,12 @@ namespace ScorchDroidAudio
 	// Sound::init() creates exactly this many OpenAL sources up front, so a
 	// ninth simultaneous sound physically cannot play.
 	extern int soundChannels;
+
+	// A6: upstream's NoCountDownSound and NoChannelTextSound - the two
+	// sounds it lets you silence without silencing the game. Both default
+	// on, as upstream's do.
+	extern bool countdownSoundEnabled;
+	extern bool chatSoundEnabled;
 	const int kDefaultSoundChannels = 8;
 
 	// Upstream's VirtualSoundSource constructor defaults. Every sound but
@@ -87,6 +93,12 @@ namespace ScorchDroidAudio
 		// Flatten that to gain alone and a point-blank explosion ranks
 		// level with a beep.
 		int         priority;
+		// Where it sits across the stereo field: -1 hard left, 0 centred,
+		// +1 hard right. Upstream never computes this - it hands OpenAL a
+		// position and a listener orientation and lets it pan - but this
+		// port's player takes a left and a right volume, so the projection
+		// happens here, next to the attenuation it belongs with.
+		float       pan;
 	};
 
 	// The gain a sound at this point would play at, for callers that hold a
@@ -96,6 +108,13 @@ namespace ScorchDroidAudio
 	// an explosion at the same spot would be.
 	float gainForPosition(float x, float y, float z,
 		bool haveListener, float listenerX, float listenerY, float listenerZ);
+
+	// Where a sound at this point sits across the stereo field, for the same
+	// callers. [rightX..] is the listener's right vector in engine space;
+	// a zero vector, or no listener, leaves it centred.
+	float panForPosition(float x, float y, float z,
+		bool haveListener, float listenerX, float listenerY, float listenerZ,
+		float rightX, float rightY, float rightZ);
 
 	// Drains the queue and answers with the sounds that win a channel,
 	// nearest first, each with its attenuated gain.
@@ -111,7 +130,8 @@ namespace ScorchDroidAudio
 	// has been drawn), in which case everything plays unattenuated rather
 	// than being silently dropped.
 	std::vector<SelectedSound> drainSoundEvents(
-		bool haveListener, float listenerX, float listenerY, float listenerZ);
+		bool haveListener, float listenerX, float listenerY, float listenerZ,
+		float rightX = 1.0f, float rightY = 0.0f, float rightZ = 0.0f);
 }
 
 #endif  // SCORCHDROID_SOUND_EVENT_QUEUE_H
