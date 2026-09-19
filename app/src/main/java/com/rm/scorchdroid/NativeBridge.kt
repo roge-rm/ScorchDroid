@@ -331,6 +331,14 @@ object NativeBridge {
      * plate's and the health bar's, because upstream keeps its three
      * equivalents apart as well.
      */
+    /**
+     * Whether a tank wears its name and its health bar. They reach the
+     * renderer rather than the HUD now that it draws the plates itself.
+     */
+    external fun setShowNamePlates(show: Boolean)
+
+    external fun setShowHealthBars(show: Boolean)
+
     external fun setShowTankArrows(show: Boolean)
 
     /**

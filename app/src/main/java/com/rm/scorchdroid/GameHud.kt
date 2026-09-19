@@ -131,45 +131,6 @@ import kotlinx.coroutines.delay
  */
 const val DEFAULT_POWER_FRACTION = 0.5f
 
-/**
- * One tank's on-screen plate. Mirrors what upstream draws above each tank
- * (TargetRendererImplTank::drawNames/drawLife): the player name in that
- * player's colour, a health bar, and a shield bar when a shield is up.
- */
-data class TankOverlay(
-    val screenX: Float,
-    val screenY: Float,
-    val onScreen: Boolean,
-    val alive: Boolean,
-    val mine: Boolean,
-    val life: Float,
-    val shield: Float,
-    val color: Color,
-    val name: String,
-)
-
-fun parseTankOverlays(rows: Array<String>): List<TankOverlay> = rows.mapNotNull { row ->
-    // The name is last and may itself contain the separator, so split with a
-    // limit rather than assuming it doesn't.
-    val p = row.split("|", limit = 11)
-    if (p.size != 11) return@mapNotNull null
-    TankOverlay(
-        screenX = p[0].toFloatOrNull() ?: return@mapNotNull null,
-        screenY = p[1].toFloatOrNull() ?: return@mapNotNull null,
-        onScreen = p[2] == "1",
-        alive = p[3] == "1",
-        mine = p[4] == "1",
-        life = p[5].toFloatOrNull() ?: 0f,
-        shield = p[6].toFloatOrNull() ?: 0f,
-        color = Color(
-            (p[7].toFloatOrNull() ?: 1f).coerceIn(0f, 1f),
-            (p[8].toFloatOrNull() ?: 1f).coerceIn(0f, 1f),
-            (p[9].toFloatOrNull() ?: 1f).coerceIn(0f, 1f),
-        ),
-        name = p[10],
-    )
-}
-
 class GameHudState {
     var statusText by mutableStateOf("")
     var hostingLabel by mutableStateOf("")
@@ -198,7 +159,6 @@ class GameHudState {
     // this the Fire button looked like it had done nothing.
     var shotLocked by mutableStateOf(false)
     // M6: name plates, refreshed from the renderer's projection every tick.
-    var tankOverlays by mutableStateOf<List<TankOverlay>>(emptyList())
     // M6: floating damage numbers and speech bubbles, world-anchored and
     // already projected by the renderer - it has no font, so they are drawn
     // here alongside the name plates.
@@ -284,10 +244,6 @@ class GameHudState {
     var showNamePlates by mutableStateOf(true)
     var showHealthBars by mutableStateOf(true)
     var showTankArrows by mutableStateOf(true)
-    // V9: upstream's arrow over a tank (data/images/arrow.bmp), loaded once
-    // and tinted per tank. Null until it is read off disk, and if that ever
-    // fails the arrow is simply absent rather than a placeholder.
-    var tankArrowImage by mutableStateOf<ImageBitmap?>(null)
     var chatToastMillis by mutableStateOf(CHAT_TOAST_MILLIS)
     var leftHandMode by mutableStateOf(false)
     var controlOpacity by mutableFloatStateOf(1.0f)
@@ -310,7 +266,6 @@ class GameHudState {
         cameraFollow = false
         buyingPhase = false
         shotLocked = false
-        tankOverlays = emptyList()
         floatingLabels = emptyList()
         windLabel = ""
         positionSelectWeapon = ""
@@ -758,14 +713,10 @@ fun GameHud(
         }
 
 
-        // Name plates and health bars, positioned from the renderer's own
-        // projection. Drawn before the dialog host so a modal covers them.
-        TankPlates(
-            state.tankOverlays,
-            state.showNamePlates,
-            state.showHealthBars,
-            if (state.showTankArrows) state.tankArrowImage else null,
-        )
+        // The name plates, the arrow and the health bars are drawn by the
+        // renderer now (drawTankPlates), in the frame they were projected
+        // for. What is left here is the floating damage numbers, which are
+        // text the renderer has no font for.
         FloatingLabels(state.floatingLabels)
 
         HudDialogHost(state.dialog)
@@ -794,119 +745,6 @@ private fun wrapDegrees(degrees: Float): Float = ((degrees % 360f) + 360f) % 360
  * knows which axis this is - the button drives a compass, an elevation and
  * a power bar without knowing the difference.
  */
-
-/**
- * Name plates over the battlefield - this port's answer to upstream's
- * TargetRendererImplTank::drawNames/drawLife, which draw a name billboard
- * and life bars in world space using its own GL font atlas.
- *
- * Rendered as Compose instead: there is no font renderer here and the whole
- * UI layer is Compose by design, so the renderer hands over projected screen
- * positions and the text is ordinary Android text - which also means it
- * stays legible at any distance rather than shrinking into the terrain.
- *
- * A destroyed tank has no plate at all - the renderer stops publishing an
- * overlay for it, matching upstream's getVisible() guard (see the overlay
- * loop in renderer_jni.cpp). What arrives here with alive=false is a tank
- * that is alive but in the buying phase: upstream draws its name and no
- * life bar, so that is what this does.
- */
-@Composable
-private fun TankPlates(
-    overlays: List<TankOverlay>,
-    showNames: Boolean,
-    showHealth: Boolean,
-    arrow: ImageBitmap?,
-) {
-    if (overlays.isEmpty() || (!showNames && !showHealth && arrow == null)) return
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        for (overlay in overlays) {
-            if (!overlay.onScreen) continue
-
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    // Centre the plate on the tank and sit it just above.
-                    //
-                    // The lambda form of offset on purpose: these positions
-                    // arrive once a frame while the camera turns, and this
-                    // one places the plate in the layout pass rather than
-                    // re-measuring the name and the bars inside it. The dp
-                    // form would put a text measure on every frame of every
-                    // spin, for a column whose contents never changed.
-                    .offset {
-                        IntOffset(
-                            (overlay.screenX - 60.dp.toPx()).roundToInt(),
-                            (overlay.screenY - 28.dp.toPx()).roundToInt(),
-                        )
-                    }
-                    .width(120.dp),
-            ) {
-                if (showNames) {
-                    Text(
-                        text = overlay.name,
-                        // Full colour either way: the only non-sNormal tank
-                        // that reaches here is one still buying, and upstream
-                        // draws its name in the player's own colour like any
-                        // other.
-                        color = overlay.color,
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                // V9: upstream's arrow, between the name and the bars -
-                // which is how its own screen reads, name on top, then the
-                // arrow, then the health. It lives in this column rather
-                // than in GL for exactly that reason: the plates are placed
-                // at a pixel offset from the tank, so an arrow at a fixed
-                // world height would ride above the name at one camera
-                // distance and below the bar at another.
-                if (arrow != null) {
-                    Spacer(Modifier.height(1.dp))
-                    Image(
-                        bitmap = arrow,
-                        contentDescription = null,
-                        colorFilter = ColorFilter.tint(overlay.color),
-                        modifier = Modifier.size(width = 12.dp, height = 16.dp),
-                    )
-                }
-                // Bars only while alive - a destroyed tank has no health to
-                // report, and upstream likewise draws life only for a
-                // playing tank.
-                if (overlay.alive && showHealth) {
-                    Spacer(Modifier.height(2.dp))
-                    StatBar(overlay.life, Color(0xFF4CAF50))
-                    // Second bar only when a shield is actually up, matching
-                    // upstream's own "zero unless raised" behaviour.
-                    if (overlay.shield > 0f) {
-                        Spacer(Modifier.height(2.dp))
-                        StatBar(overlay.shield, Color(0xFF4FC3F7))
-                    }
-                }
-            }
-        }
-    }
-}
-
-/** One thin filled bar, dark behind so it reads against any terrain. */
-@Composable
-private fun StatBar(fraction: Float, color: Color) {
-    Box(
-        modifier = Modifier
-            .width(52.dp)
-            .height(4.dp)
-            .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(2.dp)),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .width(52.dp * fraction.coerceIn(0f, 1f))
-                .background(color, RoundedCornerShape(2.dp)),
-        )
-    }
-}
 
 @Composable
 private fun NudgeButton(label: String, onNudge: (Float) -> Unit) {
