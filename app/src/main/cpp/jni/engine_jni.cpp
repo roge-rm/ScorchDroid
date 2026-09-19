@@ -91,6 +91,7 @@ std::mutex g_engineMutex;
 #include <simactions/TankGiftSimAction.hpp>
 #include <engine/Wind.hpp>
 #include <target/TargetShield.hpp>
+#include <weapons/Shield.hpp>
 #include <target/TargetParachute.hpp>
 #include <tank/TankModelStore.hpp>
 #include <tanket/TanketType.hpp>
@@ -994,6 +995,58 @@ Java_com_rm_scorchdroid_NativeBridge_saveGame(JNIEnv *env, jobject /* this */) {
     }
     LOGI("saveGame: wrote %s", path.c_str());
     return env->NewStringUTF(name);
+}
+
+// One tank's card, as upstream's tooltip draws it when the mouse rests on a
+// tank: "name|life|maxLife|shield|maxShield|state|lives|maxLives|score|skill|
+// startSkill|rank". Empty for a tank that is not there.
+//
+// The fields and the conditions are TankTip::populate and its
+// generateTargetTip, line for line: the shield pair is zero unless one is
+// actually up, the state is empty unless it is something other than normal,
+// and skill and rank are zero when the game is not keeping them - the UI
+// leaves out what is zero, exactly as the tooltip does.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getTankInfo(JNIEnv *env, jobject /* this */, jint playerId) {
+    std::string result;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        Tank *tank = ctx ? ctx->getTargetContainer().getTankById((unsigned int) playerId) : nullptr;
+        if (tank) {
+            double shield = 0.0, maxShield = 0.0;
+            if (Accessory *shieldAccessory = tank->getShield().getGraphicalCurrentShield()) {
+                if (Shield *shieldAction = (Shield *) shieldAccessory->getAction()) {
+                    shield = tank->getShield().getGraphicalShieldPower().asDouble();
+                    maxShield = shieldAction->getPower().asDouble();
+                }
+            }
+
+            // Upstream prints the state only when it is not the ordinary
+            // one - a tank in play says nothing about being in play.
+            std::string state;
+            if (tank->getState().getState() != TankState::sNormal) {
+                const char *small = tank->getState().getSmallStateString();
+                if (small) state = small;
+            }
+
+            std::ostringstream row;
+            row << tank->getCStrName() << "|"
+                << (int) tank->getLife().getLife().asDouble() << "|"
+                << (int) tank->getLife().getMaxLife().asDouble() << "|"
+                << (int) shield << "|"
+                << (int) maxShield << "|"
+                << state << "|"
+                << tank->getState().getLives() << "|"
+                << tank->getState().getMaxLives() << "|"
+                << tank->getScore().getScore() << "|"
+                << tank->getScore().getSkill() << "|"
+                << tank->getScore().getStartSkill() << "|"
+                << tank->getScore().getRank();
+            result = row.str();
+        }
+    }
+    return env->NewStringUTF(result.c_str());
 }
 
 // Who this player may gift money to, one row each:

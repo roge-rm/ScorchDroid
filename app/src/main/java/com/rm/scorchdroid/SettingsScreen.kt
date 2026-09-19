@@ -386,6 +386,11 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             "Scorched3D's floating arrow marking each tank, in its colour",
                             settings.showTankArrows,
                         ) { settings.updateShowTankArrows(it) }
+                        SwitchRow(
+                            "Tank info",
+                            "Tap a tank's name plate for its life, lives and score",
+                            settings.showTankInfo,
+                        ) { settings.updateShowTankInfo(it) }
                         SliderRow(
                             "Chat message time",
                             "${settings.chatToastSeconds}s",

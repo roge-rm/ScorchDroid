@@ -763,7 +763,19 @@ namespace
 		float shield = 0.0f;  // 0..1, 0 when no shield is up
 		float r = 1.0f, g = 1.0f, b = 1.0f;
 		std::string name;
+		unsigned int playerId = 0;
 	};
+
+	// Where each plate ended up on screen, so a tap on one can say whose it
+	// is. Published by the plate pass, read from the UI thread - the same
+	// projection the plates are drawn from, so what a player taps and what
+	// they see are the same thing by construction.
+	struct PlatePick {
+		float x = 0.0f, y = 0.0f, width = 0.0f, height = 0.0f;
+		unsigned int playerId = 0;
+	};
+	std::mutex g_platePickMutex;
+	std::vector<PlatePick> g_platePicks;
 
 	// The one thing this renderer still cannot do for itself is *text*:
 	// upstream has a GL font atlas here and the port has none. So the UI
@@ -6488,6 +6500,9 @@ namespace
 			}
 		};
 
+		std::vector<PlatePick> picks;
+		picks.reserve(overlays.size());
+
 		for (size_t i = 0; i < overlays.size(); i++) {
 			const TankOverlay &o = overlays[i];
 			if (!o.onScreen) continue;
@@ -6495,6 +6510,8 @@ namespace
 			// Where the Compose column's top edge sat: centred on the tank
 			// and 28dp above the anchor the projection put 4 units over it.
 			float top = o.screenY - 28.0f * d;
+			const float plateTop = top;
+			float plateWidth = 0.0f;
 
 			if (wantNames) {
 				std::map<std::string, PlateText *>::iterator it = ready.find(o.name);
@@ -6509,6 +6526,7 @@ namespace
 							  0.0f, 1.0f, o.r, o.g, o.b, 1.0f);
 					nameDraws.push_back(std::make_pair(text.texture, verts));
 					top += (float) text.height;
+					plateWidth = std::max(plateWidth, (float) text.width);
 				}
 			}
 
@@ -6520,6 +6538,7 @@ namespace
 				Quad::add(arrowVerts, o.screenX - 6.0f * d, top, 12.0f * d, 16.0f * d,
 						  1.0f, 0.0f, o.r, o.g, o.b, 1.0f);
 				top += 16.0f * d;
+				plateWidth = std::max(plateWidth, 12.0f * d);
 			}
 
 			// Bars only while alive, as upstream draws life only for a
@@ -6528,6 +6547,7 @@ namespace
 			if (wantHealth && o.alive) {
 				const float barW = 52.0f * d, barH = 4.0f * d;
 				const float barX = o.screenX - barW * 0.5f;
+				plateWidth = std::max(plateWidth, barW);
 				top += 2.0f * d;
 				Quad::add(barVerts, barX, top, barW, barH, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.5f);
 				Quad::add(barVerts, barX, top, barW * std::min(std::max(o.life, 0.0f), 1.0f), barH,
@@ -6541,6 +6561,26 @@ namespace
 					top += barH;
 				}
 			}
+
+			if (plateWidth > 0.0f) {
+				// A little wider and taller than the plate draws, because a
+				// fingertip is not a mouse pointer: upstream's own hover box
+				// for this is 20x20 pixels around a tank, which on a phone
+				// would be most of nothing.
+				const float padX = 8.0f * d, padY = 6.0f * d;
+				PlatePick pick;
+				pick.x = o.screenX - plateWidth * 0.5f - padX;
+				pick.y = plateTop - padY;
+				pick.width = plateWidth + padX * 2.0f;
+				pick.height = (top - plateTop) + padY * 2.0f;
+				pick.playerId = o.playerId;
+				picks.push_back(pick);
+			}
+		}
+
+		{
+			std::lock_guard<std::mutex> lock(g_platePickMutex);
+			g_platePicks.swap(picks);
 		}
 
 		if (barVerts.empty() && arrowVerts.empty() && nameDraws.empty()) return;
@@ -7177,6 +7217,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		float shieldX, shieldY, shieldZ;           // square shields (half-extents)
 		float shieldR, shieldG, shieldB;
 		bool  parachuteOpen;
+		// Who this tank is, for the plate tap that opens their card.
+		unsigned int playerId;
 	};
 	std::vector<TankInstance> tankInstances;
 
@@ -7484,6 +7526,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			shieldRadius, shieldX, shieldY, shieldZ,
 			shieldR, shieldG, shieldB,
 			parachuteOpen,
+			(unsigned int) tank->getPlayerId(),
 		});
 
 		float markerY = groundY + 1.5f;
@@ -9813,6 +9856,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			const float cw = mvp.m[3] * wx + mvp.m[7] * wy + mvp.m[11] * wz + mvp.m[15];
 
 			TankOverlay overlay;
+			overlay.playerId = inst.playerId;
 			overlay.alive = inst.alive;
 			overlay.mine = inst.mine;
 			overlay.life = inst.life;
@@ -9952,6 +9996,30 @@ Java_com_rm_scorchdroid_GameRenderer_nativePickTerrain(JNIEnv *env, jobject, jfl
 		previous = travelled;
 	}
 	return env->NewStringUTF("");
+}
+
+// Whose plate is at this point on screen, or 0 for none. The rectangles
+// come from the plate pass itself, so what a player taps is what they can
+// see rather than a second guess at where a tank ended up.
+//
+// Upstream's equivalent is a mouse hovering inside a 20x20 box on the tank
+// (TargetRendererImplTank::render2D). A phone has no hover and a fingertip
+// is not a pointer, so the plate above the tank is the target instead - and
+// the tank itself is left alone, because tapping a tank is how you aim at it.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativePickTankPlate(JNIEnv *, jobject,
+														 jfloat screenX, jfloat screenY) {
+	std::lock_guard<std::mutex> lock(g_platePickMutex);
+	// Last first: the plates are laid out in the order the tanks are drawn,
+	// and where two overlap the one on top is the later one.
+	for (size_t i = g_platePicks.size(); i > 0; i--) {
+		const PlatePick &pick = g_platePicks[i - 1];
+		if (screenX >= pick.x && screenX <= pick.x + pick.width &&
+			screenY >= pick.y && screenY <= pick.y + pick.height) {
+			return (jint) pick.playerId;
+		}
+	}
+	return 0;
 }
 
 // The names the plate pass wants a picture of and has not been given one

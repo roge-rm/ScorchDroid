@@ -164,6 +164,14 @@ object NativeBridge {
     external fun saveGame(): String
 
     /**
+     * One tank's card, as upstream's tooltip shows it when the mouse rests
+     * on a tank: `"name|life|maxLife|shield|maxShield|state|lives|maxLives|
+     * score|skill|startSkill|rank"`, or "" if there is no such tank. See
+     * [parseTankInfo].
+     */
+    external fun getTankInfo(playerId: Int): String
+
+    /**
      * Who this player may give money to, one row each:
      * `"playerId|name|money|r,g,b"`. Empty whenever a gift would be refused -
      * outside the buying phase, or with nobody eligible - so the Shop can ask
@@ -730,6 +738,43 @@ fun parseSavedGames(rows: Array<String>): List<SavedGame> = rows.mapNotNull { ro
         name = parts[0],
         savedAtSeconds = parts[1].toLongOrNull() ?: return@mapNotNull null,
         bytes = parts[2].toLongOrNull() ?: 0L,
+    )
+}
+
+/**
+ * What upstream's tank tooltip says (GLWTankTip's TankTip::populate): the
+ * player's name over their life, shield, state, lives, score, skill and rank.
+ * Zero means "not in this game" for the shield, the skill and the rank, which
+ * is how upstream decides to leave those lines out.
+ */
+data class TankInfo(
+    val name: String,
+    val life: Int,
+    val maxLife: Int,
+    val shield: Int,
+    val maxShield: Int,
+    val state: String,
+    val lives: Int,
+    val maxLives: Int,
+    val score: Int,
+    val skill: Int,
+    val startSkill: Int,
+    val rank: Int,
+)
+
+fun parseTankInfo(row: String): TankInfo? {
+    val p = row.split("|")
+    if (p.size != 12) return null
+    fun n(index: Int) = p[index].toIntOrNull() ?: 0
+    return TankInfo(
+        name = p[0],
+        life = n(1), maxLife = n(2),
+        shield = n(3), maxShield = n(4),
+        state = p[5],
+        lives = n(6), maxLives = n(7),
+        score = n(8),
+        skill = n(9), startSkill = n(10),
+        rank = n(11),
     )
 }
 
