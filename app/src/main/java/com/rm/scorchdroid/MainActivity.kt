@@ -12,7 +12,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.AndroidUiDispatcher
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -20,6 +22,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Collections
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -186,6 +189,11 @@ class MainActivity : AppCompatActivity() {
     // starting turret rotation yet (see the tick loop). One-shot, so it
     // never fights the player's own adjustments afterwards.
     private var aimSeeded = false
+
+    // Debug perf readout only - see the plates/s line in runTickLoop.
+    private var platePolls = 0
+    private var platePollWindowNanos = 0L
+    private var platePollRate = 0
     // M6 parity: chat polling state. The version is the cheap "did anything
     // arrive" check; the line id is how far the HUD has already been told
     // about, so a message it is already timing is never restarted.
@@ -1302,6 +1310,37 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Everything anchored to a place in the world - the name plates, the
+        // arrow over each tank, the floating damage numbers - is published by
+        // the renderer as a *screen* position, so it goes stale the moment the
+        // camera moves. The tick loop below runs ten times a second, which is
+        // right for a status line and hopeless for these: at 60fps the scene
+        // had moved six frames between updates, and the plates stepped after
+        // it in visible jumps while everything behind them turned smoothly.
+        //
+        // So they read on the frame clock instead. The renderer already
+        // projects them every frame on the GL thread and leaves the result
+        // under a mutex (the overlay block at the end of drawFrame), so
+        // nothing new is computed here - this only stops the UI sampling it
+        // at a tenth of the rate. AndroidUiDispatcher.CurrentThread is what
+        // carries the MonotonicFrameClock withFrameNanos needs; a plain
+        // Dispatchers.Main scope has none and would throw.
+        //
+        // A frame of lag remains and cannot be removed here: the plate is
+        // placed from the MVP of the frame the GL thread finished last. It
+        // shows as the plates trailing very slightly during a fast spin,
+        // which is a different thing from stepping.
+        platePolls = 0
+        platePollWindowNanos = System.nanoTime()
+        launch(AndroidUiDispatcher.CurrentThread) {
+            while (isActive) {
+                withFrameNanos { }
+                hudState.tankOverlays = parseTankOverlays(gameRenderer.nativeGetTankOverlays())
+                hudState.floatingLabels = parseFloatingLabels(gameRenderer.nativeGetFloatingLabels())
+                platePolls++
+            }
+        }
+
         while (isActive) {
             withContext(Dispatchers.Default) {
                 NativeBridge.tickEngine()
@@ -1345,11 +1384,6 @@ class MainActivity : AppCompatActivity() {
             // M6: a granted move id means it is our turn to act again, so
             // whatever we committed last round has been played out. See
             // GameHudState.shotLocked - the Fire button reads this.
-            // M6 name plates - the renderer projected these on its own
-            // thread last frame; this just picks up the result.
-            hudState.tankOverlays = parseTankOverlays(gameRenderer.nativeGetTankOverlays())
-            hudState.floatingLabels = parseFloatingLabels(gameRenderer.nativeGetFloatingLabels())
-
             // The mini-map. Nothing here runs unless it is actually on
             // screen: it is off by default, and a map nobody is looking at
             // should not cost a tank sweep and a JNI string every tick.
@@ -1529,10 +1563,22 @@ class MainActivity : AppCompatActivity() {
                 val fps = stats.getOrNull(0).orEmpty()
                 val calls = stats.getOrNull(1).orEmpty()
                 val targets = stats.getOrNull(2).orEmpty()
+                // How often the name plates actually took a new position in
+                // the last second, next to how often the scene was drawn.
+                // The two should be the same number; when they were not -
+                // plates at ten a second against a 60fps scene - the plates
+                // stepped across the screen as the camera turned, which is
+                // the whole reason this is measured rather than assumed.
+                val elapsed = (System.nanoTime() - platePollWindowNanos) / 1_000_000_000.0
+                if (elapsed >= 1.0) {
+                    platePollRate = (platePolls / elapsed).roundToInt()
+                    platePolls = 0
+                    platePollWindowNanos = System.nanoTime()
+                }
                 hudState.perfLabel = if (fps.isEmpty()) {
                     ""
                 } else {
-                    "$fps fps | $calls draws | $targets targets"
+                    "$fps fps | $calls draws | $targets targets | $platePollRate plates/s"
                 }
             }
             // M6: seed the aiming sliders from where the tank is actually

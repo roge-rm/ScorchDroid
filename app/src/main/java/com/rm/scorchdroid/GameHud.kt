@@ -819,19 +819,28 @@ private fun TankPlates(
     arrow: ImageBitmap?,
 ) {
     if (overlays.isEmpty() || (!showNames && !showHealth && arrow == null)) return
-    val density = LocalDensity.current
 
     Box(modifier = Modifier.fillMaxSize()) {
         for (overlay in overlays) {
             if (!overlay.onScreen) continue
-            val xDp = with(density) { overlay.screenX.toDp() }
-            val yDp = with(density) { overlay.screenY.toDp() }
 
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     // Centre the plate on the tank and sit it just above.
-                    .offset(x = xDp - 60.dp, y = yDp - 28.dp)
+                    //
+                    // The lambda form of offset on purpose: these positions
+                    // arrive once a frame while the camera turns, and this
+                    // one places the plate in the layout pass rather than
+                    // re-measuring the name and the bars inside it. The dp
+                    // form would put a text measure on every frame of every
+                    // spin, for a column whose contents never changed.
+                    .offset {
+                        IntOffset(
+                            (overlay.screenX - 60.dp.toPx()).roundToInt(),
+                            (overlay.screenY - 28.dp.toPx()).roundToInt(),
+                        )
+                    }
                     .width(120.dp),
             ) {
                 if (showNames) {
@@ -1863,7 +1872,6 @@ private fun ChatComposer(
  */
 @Composable
 private fun FloatingLabels(labels: List<FloatingLabel>) {
-    val density = LocalDensity.current
     labels.forEach { label ->
         if (!label.onScreen) return@forEach
         Text(
@@ -1871,10 +1879,14 @@ private fun FloatingLabels(labels: List<FloatingLabel>) {
             style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Bold,
             color = label.color.copy(alpha = label.fade.coerceIn(0f, 1f)),
-            modifier = Modifier.offset(
-                x = with(density) { label.screenX.toDp() } - 16.dp,
-                y = with(density) { label.screenY.toDp() } - 10.dp,
-            ),
+            // Placed in the layout pass, for the same reason the name
+            // plates are - these move every frame too.
+            modifier = Modifier.offset {
+                IntOffset(
+                    (label.screenX - 16.dp.toPx()).roundToInt(),
+                    (label.screenY - 10.dp.toPx()).roundToInt(),
+                )
+            },
         )
     }
 }
