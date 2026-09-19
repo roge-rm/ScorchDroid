@@ -33,6 +33,9 @@
 #include <thread>
 #include <algorithm>
 #include <cmath>
+#include <map>
+#include <set>
+#include <string>
 
 #include <engine/ScorchedContext.hpp>
 #include <engine/Simulator.hpp>
@@ -466,6 +469,11 @@ namespace
 	float  shieldSpinSeconds = 0.0f;
 	GLint  texQuadMvpLoc = -1, texQuadSamplerLoc = -1, texQuadTintLoc = -1;
 	GLint  texQuadFogColorLoc = -1, texQuadFogDensityLoc = -1;
+	// The plate pass draws through texQuad too: the arrow is upstream's own
+	// image, and the life and shield bars are flat colour through a single
+	// white texel rather than a program of their own.
+	GLuint tankArrowTexture = 0;
+	GLuint whitePixelTexture = 0;
 
 	GLint  particleMvpLoc = -1, particleFogColorLoc = -1, particleFogDensityLoc = -1;
 	GLuint beamVao = 0, beamVbo = 0;
@@ -738,12 +746,14 @@ namespace
 	// Set when a new landscape is built, cleared once the free-fly camera
 	// has been pointed at "my tank" for that round. One-shot, so it never
 	// fights the player's own panning afterwards.
-	// M6 name plates / health bars. Upstream draws these in world space with
-	// its own GL font atlas (TargetRendererImplTank::drawNames/drawLife);
-	// this port has no font renderer and its whole UI layer is Compose, so
-	// the renderer publishes projected screen positions instead and Kotlin
-	// draws the text. Guarded by its own mutex: written on the GL thread,
-	// read from the UI thread's poll.
+	// M6 name plates / health bars, as upstream draws them in world space
+	// with its own GL font atlas (TargetRendererImplTank::drawNames and
+	// drawLife). They were Compose widgets here for a long time, positioned
+	// from these projected coordinates; that cost them a frame of lag and,
+	// while the UI read the positions on its ten-a-second tick, made them
+	// step across the screen as the camera turned. They are drawn in this
+	// pass now, in the same frame they were projected for, which puts them
+	// beyond lagging by construction.
 	struct TankOverlay {
 		float screenX = 0.0f, screenY = 0.0f;
 		bool  onScreen = false;
@@ -754,14 +764,41 @@ namespace
 		float r = 1.0f, g = 1.0f, b = 1.0f;
 		std::string name;
 	};
-	std::mutex g_overlayMutex;
-	std::vector<TankOverlay> g_tankOverlays;
+
+	// The one thing this renderer still cannot do for itself is *text*:
+	// upstream has a GL font atlas here and the port has none. So the UI
+	// layer draws each string once into a bitmap and hands the pixels over,
+	// keyed by the string itself, and the renderer asks for what it is
+	// missing rather than the UI guessing who is on screen - see
+	// nativeGetMissingPlateTexts.
+	//
+	// The pixels are kept after upload, not dropped: the GL context goes
+	// away with the surface (a rotation, a trip to the background), and
+	// keeping a few hundred KB means the plates come back by themselves
+	// instead of waiting on another round trip through the UI thread.
+	struct PlateText {
+		int width = 0, height = 0;
+		std::vector<unsigned char> rgba;
+		GLuint texture = 0;
+	};
+	std::mutex g_plateTextMutex;
+	std::map<std::string, PlateText> g_plateTexts;
+	std::set<std::string> g_plateTextMissing;
+
+	// dp to px. The plates are laid out in the same dp the Compose ones
+	// used, so they keep their size on a dense screen and a coarse one
+	// alike; only the UI layer knows the number.
+	std::atomic<float> g_uiDensity{3.0f};
+	std::atomic<int> g_showNamePlates{1};
+	std::atomic<int> g_showHealthBars{1};
 
 	// M6: short-lived labels pinned to a world position - the floating
 	// damage numbers upstream draws over a hurt target, and the speech
 	// bubble over a tank that just spoke. Both are *text*, which this
 	// renderer cannot draw: it has no font. So they are projected here and
-	// handed to Compose, the same route the tank name plates already take.
+	// handed to Compose - the route the name plates took until they moved
+	// into the plate pass, which is where these could follow if their lag
+	// ever shows the way the plates' did.
 	struct FloatingLabel {
 		float x, y, z;      // world, render space
 		std::string text;
@@ -6349,6 +6386,180 @@ namespace
 		frameDrawCalls++; glDrawArrays(GL_POINTS, 0, (GLsizei) (worldPositions.size() / 3));
 	}
 
+	// The plate over each tank: its name, upstream's arrow, and the life and
+	// shield bars. Drawn flat over the finished scene in pixel coordinates -
+	// no depth, no fog (density 0 makes the shared texQuad shader a plain
+	// textured blend), the tank's own colour in the vertices.
+	//
+	// The layout is upstream's order - name, then arrow, then the bars -
+	// in the same dp the Compose plates used, so nothing about the size or
+	// the spacing changed when they moved into GL.
+	void drawTankPlates(const std::vector<TankOverlay> &overlays)
+	{
+		if (overlays.empty() || texQuadProgram == 0) return;
+		const bool wantNames  = g_showNamePlates.load() != 0;
+		const bool wantHealth = g_showHealthBars.load() != 0;
+		const bool wantArrow  = g_showTankArrows.load() != 0 && tankArrowTexture != 0;
+		if (!wantNames && !wantHealth && !wantArrow) return;
+
+		const float d = g_uiDensity.load();
+
+		// Upload anything the UI handed over since the last frame, and note
+		// down every name there is no picture for yet. Both under the one
+		// lock, which is held only for as long as the uploads take.
+		std::map<std::string, PlateText *> ready;
+		{
+			std::lock_guard<std::mutex> lock(g_plateTextMutex);
+			for (size_t i = 0; i < overlays.size(); i++) {
+				const std::string &name = overlays[i].name;
+				if (name.empty()) continue;
+				std::map<std::string, PlateText>::iterator it = g_plateTexts.find(name);
+				if (it == g_plateTexts.end()) {
+					g_plateTextMissing.insert(name);
+					continue;
+				}
+				PlateText &text = it->second;
+				if (text.texture == 0 && !text.rgba.empty()) {
+					glGenTextures(1, &text.texture);
+					glBindTexture(GL_TEXTURE_2D, text.texture);
+					glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+					glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, text.width, text.height, 0,
+								 GL_RGBA, GL_UNSIGNED_BYTE, text.rgba.data());
+					glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+					glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+					glBindTexture(GL_TEXTURE_2D, 0);
+				}
+				if (text.texture != 0) ready[name] = &text;
+			}
+		}
+
+		// x and y are the top-left corner in pixels; v runs with the
+		// texture's own rows, which is why the caller passes both edges.
+		std::vector<float> barVerts, arrowVerts;
+		std::vector<std::pair<GLuint, std::vector<float> > > nameDraws;
+		struct Quad {
+			static void add(std::vector<float> &out, float x, float y, float w, float h,
+							float vTop, float vBottom,
+							float r, float g, float b, float a)
+			{
+				const float x1 = x + w, y1 = y + h;
+				const float verts[6][9] = {
+					{ x,  y,  0.0f, 0.0f, vTop,    r, g, b, a },
+					{ x,  y1, 0.0f, 0.0f, vBottom, r, g, b, a },
+					{ x1, y1, 0.0f, 1.0f, vBottom, r, g, b, a },
+					{ x,  y,  0.0f, 0.0f, vTop,    r, g, b, a },
+					{ x1, y1, 0.0f, 1.0f, vBottom, r, g, b, a },
+					{ x1, y,  0.0f, 1.0f, vTop,    r, g, b, a },
+				};
+				out.insert(out.end(), &verts[0][0], &verts[0][0] + 6 * 9);
+			}
+		};
+
+		for (size_t i = 0; i < overlays.size(); i++) {
+			const TankOverlay &o = overlays[i];
+			if (!o.onScreen) continue;
+
+			// Where the Compose column's top edge sat: centred on the tank
+			// and 28dp above the anchor the projection put 4 units over it.
+			float top = o.screenY - 28.0f * d;
+
+			if (wantNames) {
+				std::map<std::string, PlateText *>::iterator it = ready.find(o.name);
+				if (it != ready.end()) {
+					const PlateText &text = *it->second;
+					std::vector<float> verts;
+					// The UI's bitmap has row 0 at the *top*, unlike every
+					// Image this renderer loads, so v runs 0 to 1 downward
+					// here and the other way for the arrow below.
+					Quad::add(verts, o.screenX - text.width * 0.5f, top,
+							  (float) text.width, (float) text.height,
+							  0.0f, 1.0f, o.r, o.g, o.b, 1.0f);
+					nameDraws.push_back(std::make_pair(text.texture, verts));
+					top += (float) text.height;
+				}
+			}
+
+			if (wantArrow) {
+				top += 1.0f * d;
+				// Bottom-up rows, as every ImageFactory image is: v = 0
+				// belongs at the bottom edge. Mapped the other way the
+				// arrow draws upside down, which is what it did first time.
+				Quad::add(arrowVerts, o.screenX - 6.0f * d, top, 12.0f * d, 16.0f * d,
+						  1.0f, 0.0f, o.r, o.g, o.b, 1.0f);
+				top += 16.0f * d;
+			}
+
+			// Bars only while alive, as upstream draws life only for a
+			// playing tank - a tank that is visible but not alive is one in
+			// the buying phase, which gets its name and nothing else.
+			if (wantHealth && o.alive) {
+				const float barW = 52.0f * d, barH = 4.0f * d;
+				const float barX = o.screenX - barW * 0.5f;
+				top += 2.0f * d;
+				Quad::add(barVerts, barX, top, barW, barH, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.5f);
+				Quad::add(barVerts, barX, top, barW * std::min(std::max(o.life, 0.0f), 1.0f), barH,
+						  0.0f, 1.0f, 0.30f, 0.69f, 0.31f, 1.0f);
+				top += barH;
+				if (o.shield > 0.0f) {
+					top += 2.0f * d;
+					Quad::add(barVerts, barX, top, barW, barH, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.5f);
+					Quad::add(barVerts, barX, top, barW * std::min(o.shield, 1.0f), barH,
+							  0.0f, 1.0f, 0.31f, 0.76f, 0.97f, 1.0f);
+					top += barH;
+				}
+			}
+		}
+
+		if (barVerts.empty() && arrowVerts.empty() && nameDraws.empty()) return;
+
+		glUseProgram(texQuadProgram);
+		const Mat4 ortho = Mat4::orthoPixels((float) surfaceWidth, (float) surfaceHeight);
+		glUniformMatrix4fv(texQuadMvpLoc, 1, GL_FALSE, ortho.m);
+		glUniform4f(texQuadTintLoc, 1.0f, 1.0f, 1.0f, 1.0f);
+		// Density 0 leaves exp(-z*z) at 1, so the fog term in the shared
+		// shader contributes nothing: a HUD is not in the world's air.
+		glUniform3f(texQuadFogColorLoc, 0.0f, 0.0f, 0.0f);
+		glUniform1f(texQuadFogDensityLoc, 0.0f);
+		glUniform1i(texQuadSamplerLoc, 0);
+		glActiveTexture(GL_TEXTURE0);
+		glDisable(GL_DEPTH_TEST);
+		glDepthMask(GL_FALSE);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glBindVertexArray(texQuadVao);
+		glBindBuffer(GL_ARRAY_BUFFER, texQuadVbo);
+
+		// One draw for every bar on screen, one for every arrow, and one a
+		// name - the names cannot share, each being its own texture.
+		if (!barVerts.empty()) {
+			glBindTexture(GL_TEXTURE_2D, whitePixelTexture);
+			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr) (barVerts.size() * sizeof(float)),
+						 barVerts.data(), GL_DYNAMIC_DRAW);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (barVerts.size() / 9));
+		}
+		if (!arrowVerts.empty()) {
+			glBindTexture(GL_TEXTURE_2D, tankArrowTexture);
+			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr) (arrowVerts.size() * sizeof(float)),
+						 arrowVerts.data(), GL_DYNAMIC_DRAW);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (arrowVerts.size() / 9));
+		}
+		for (size_t i = 0; i < nameDraws.size(); i++) {
+			glBindTexture(GL_TEXTURE_2D, nameDraws[i].first);
+			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr) (nameDraws[i].second.size() * sizeof(float)),
+						 nameDraws[i].second.data(), GL_DYNAMIC_DRAW);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, (GLsizei) (nameDraws[i].second.size() / 9));
+		}
+
+		glBindVertexArray(0);
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glDisable(GL_BLEND);
+		glDepthMask(GL_TRUE);
+		glEnable(GL_DEPTH_TEST);
+	}
+
 	// Real height at an arbitrary landscape-space (x,z), nearest-sample
 	// (no interpolation - fine for placing a tank/shot marker a little
 	// above the ground, not for anything precision-sensitive).
@@ -6610,6 +6821,39 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 									 "data/textures/bordershield/grid.bmp", true);
 	wallHitTexture = loadSkyTexture("data/textures/bordershield/hit.bmp",
 									"data/textures/bordershield/hit.bmp", false);
+	// V9: upstream's own arrow, for the plate pass. The pair lives in the
+	// *base* data directory rather than under a mod, so it needs
+	// eDataLocation - loadSkyTexture defaults to the mod and silently finds
+	// nothing there, which is exactly how this image failed the first time.
+	tankArrowTexture = loadSkyTexture("data/images/arrow.bmp", "data/images/arrowi.bmp",
+									  false, nullptr, nullptr, S3D::eDataLocation);
+	LOGI("Tank arrow texture: %s", tankArrowTexture ? "loaded" : "FAILED");
+
+	// One white texel, so a flat-coloured quad can go through the textured
+	// program with the colour in its vertices.
+	{
+		const unsigned char white[4] = { 255, 255, 255, 255 };
+		glGenTextures(1, &whitePixelTexture);
+		glBindTexture(GL_TEXTURE_2D, whitePixelTexture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+
+	// Every name texture belonged to the context that has just gone away.
+	// The pixels are still here, so they upload again on the next frame
+	// that wants them.
+	{
+		std::lock_guard<std::mutex> lock(g_plateTextMutex);
+		for (std::map<std::string, PlateText>::iterator it = g_plateTexts.begin();
+			 it != g_plateTexts.end(); ++it) {
+			it->second.texture = 0;
+		}
+	}
+
 	// V4: upstream's lightning ribbon texture (WeaponLightning's default
 	// <texture>), loaded with the file as its own mask like the wall's.
 	lightningTexture = loadSkyTexture("data/textures/lightning.bmp",
@@ -9507,10 +9751,12 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	// Effects last, so they blend additively over the finished scene.
 	drawEffects(mvp, view, eyeX, eyeY, eyeZ, kFovYRadians);
 
-	// Project each tank to screen space for the Compose name plates. Done
-	// here rather than in Kotlin because this is the only place that has
-	// the finished MVP, and repeating the camera maths on the UI thread
-	// would be a second implementation to keep in step.
+	// Project each tank to screen space and draw its plate - the name, the
+	// arrow and the life and shield bars. Both halves are here because this
+	// is the only place that has the finished MVP: projecting on the UI
+	// thread would be a second copy of the camera maths to keep in step,
+	// and drawing there cost the plates a frame and made them step behind
+	// the scene while the camera turned.
 	{
 		std::vector<TankOverlay> overlays;
 		overlays.reserve(tankInstances.size());
@@ -9557,8 +9803,8 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			}
 			overlays.push_back(overlay);
 		}
-		std::lock_guard<std::mutex> lock(g_overlayMutex);
-		g_tankOverlays.swap(overlays);
+
+		drawTankPlates(overlays);
 	}
 
 	// The floating labels take the same projection as the plates above.
@@ -9678,31 +9924,72 @@ Java_com_rm_scorchdroid_GameRenderer_nativePickTerrain(JNIEnv *env, jobject, jfl
 	return env->NewStringUTF("");
 }
 
-// M6 name plates: the last frame's projected tank positions, one row each:
-// "screenX|screenY|onScreen|alive|mine|life|shield|r|g|b|name". Kotlin draws
-// the plates (see GameHud) - this port has no GL font renderer and its UI is
-// Compose, so text stays on that side.
+// The names the plate pass wants a picture of and has not been given one
+// for. The renderer asks; the UI layer draws each string into a bitmap and
+// hands it back through nativeSetPlateText. Asking this way round means the
+// UI never has to work out who is on screen - the frame that drew them
+// already knows.
+//
+// Each name is reported once: it leaves this list when it is asked for, and
+// only comes back if the UI never answers and the pass asks again.
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_com_rm_scorchdroid_GameRenderer_nativeGetTankOverlays(JNIEnv *env, jobject) {
-	std::vector<TankOverlay> snapshot;
+Java_com_rm_scorchdroid_GameRenderer_nativeGetMissingPlateTexts(JNIEnv *env, jobject) {
+	std::vector<std::string> wanted;
 	{
-		std::lock_guard<std::mutex> lock(g_overlayMutex);
-		snapshot = g_tankOverlays;
+		std::lock_guard<std::mutex> lock(g_plateTextMutex);
+		wanted.assign(g_plateTextMissing.begin(), g_plateTextMissing.end());
+		g_plateTextMissing.clear();
 	}
 
 	jclass stringClass = env->FindClass("java/lang/String");
-	jobjectArray result = env->NewObjectArray((jsize) snapshot.size(), stringClass, nullptr);
-	for (size_t i = 0; i < snapshot.size(); i++) {
-		const TankOverlay &o = snapshot[i];
-		char buffer[512];
-		snprintf(buffer, sizeof(buffer), "%.1f|%.1f|%d|%d|%d|%.3f|%.3f|%.3f|%.3f|%.3f|%s",
-				 o.screenX, o.screenY, o.onScreen ? 1 : 0, o.alive ? 1 : 0, o.mine ? 1 : 0,
-				 o.life, o.shield, o.r, o.g, o.b, o.name.c_str());
-		jstring row = env->NewStringUTF(buffer);
+	jobjectArray result = env->NewObjectArray((jsize) wanted.size(), stringClass, nullptr);
+	for (size_t i = 0; i < wanted.size(); i++) {
+		jstring row = env->NewStringUTF(wanted[i].c_str());
 		env->SetObjectArrayElement(result, (jsize) i, row);
 		env->DeleteLocalRef(row);
 	}
 	return result;
+}
+
+// One string's picture, as ARGB_8888 straight out of a Bitmap. Stored, not
+// uploaded: this arrives on the UI thread and there is no GL context here.
+// The next frame that wants it does the upload.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeSetPlateText(
+		JNIEnv *env, jobject, jstring jText, jint width, jint height, jintArray jPixels) {
+	if (width <= 0 || height <= 0) return;
+	const char *textChars = env->GetStringUTFChars(jText, nullptr);
+	const std::string text(textChars ? textChars : "");
+	if (textChars) env->ReleaseStringUTFChars(jText, textChars);
+	if (text.empty()) return;
+
+	const jsize count = env->GetArrayLength(jPixels);
+	if (count != width * height) return;
+	std::vector<jint> argb((size_t) count);
+	env->GetIntArrayRegion(jPixels, 0, count, argb.data());
+
+	PlateText entry;
+	entry.width = width;
+	entry.height = height;
+	entry.rgba.resize((size_t) count * 4);
+	for (size_t i = 0; i < (size_t) count; i++) {
+		const unsigned int pixel = (unsigned int) argb[i];
+		entry.rgba[i * 4 + 0] = (unsigned char) ((pixel >> 16) & 0xff);
+		entry.rgba[i * 4 + 1] = (unsigned char) ((pixel >> 8) & 0xff);
+		entry.rgba[i * 4 + 2] = (unsigned char) (pixel & 0xff);
+		entry.rgba[i * 4 + 3] = (unsigned char) ((pixel >> 24) & 0xff);
+	}
+
+	std::lock_guard<std::mutex> lock(g_plateTextMutex);
+	g_plateTexts[text] = entry;
+	g_plateTextMissing.erase(text);
+}
+
+// dp to px, for the plate layout. Pushed when the surface is created, since
+// only the UI layer knows it.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeSetUiDensity(JNIEnv *, jobject, jfloat density) {
+	if (density > 0.0f) g_uiDensity.store(density);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -9857,56 +10144,6 @@ Java_com_rm_scorchdroid_GameRenderer_nativeMiniMapImage(JNIEnv *env, jobject) {
 	return out;
 }
 
-// V9: one of upstream's own images, as ARGB for Compose to draw. Width and
-// height lead, then width*height pixels.
-//
-// The arrow over a tank is drawn in the HUD rather than in GL, so that it
-// keeps its place in the stack the name plate and the health bar already
-// make - those are Compose at a pixel offset from the tank, and a quad at a
-// fixed world height would drift above the name at one camera distance and
-// below the bar at another. This is how it gets upstream's actual picture
-// there rather than a shape drawn to look like it.
-extern "C" JNIEXPORT jintArray JNICALL
-Java_com_rm_scorchdroid_GameRenderer_nativeLoadImageArgb(
-		JNIEnv *env, jobject, jstring jFile, jstring jMask, jboolean fromMod) {
-	const char *fileChars = env->GetStringUTFChars(jFile, nullptr);
-	const char *maskChars = env->GetStringUTFChars(jMask, nullptr);
-	const std::string file(fileChars ? fileChars : "");
-	const std::string mask(maskChars ? maskChars : "");
-	if (fileChars) env->ReleaseStringUTFChars(jFile, fileChars);
-	if (maskChars) env->ReleaseStringUTFChars(jMask, maskChars);
-	if (file.empty()) return env->NewIntArray(0);
-
-	Image image = ImageFactory::loadImage(
-		fromMod ? S3D::eModLocation : S3D::eDataLocation, file, mask, false);
-	const int w = image.getWidth(), h = image.getHeight();
-	if (!image.getBits() || w <= 0 || h <= 0) return env->NewIntArray(0);
-	const int components = image.getComponents();
-	if (components < 3) return env->NewIntArray(0);
-
-	std::vector<int> out;
-	out.reserve(2 + w * h);
-	out.push_back(w);
-	out.push_back(h);
-	const unsigned char *bits = image.getBits();
-	// Rows arrive bottom-up (every Image here does); Compose wants them the
-	// other way, so this walks them in reverse rather than leaving the
-	// caller to flip a bitmap.
-	for (int y = h - 1; y >= 0; y--) {
-		const unsigned char *row = bits + (size_t) y * (size_t) w * components;
-		for (int x = 0; x < w; x++) {
-			const unsigned char *px = row + (size_t) x * components;
-			const int a = (components >= 4) ? px[3] : 255;
-			out.push_back((a << 24) | (px[0] << 16) | (px[1] << 8) | px[2]);
-		}
-	}
-
-	jintArray result = env->NewIntArray((jsize) out.size());
-	if (!result) return nullptr;
-	env->SetIntArrayRegion(result, 0, (jsize) out.size(), out.data());
-	return result;
-}
-
 // Where the camera is looking and which way, in landscape coordinates, for
 // the plan view's arrow: "lookX|lookY|dirX|dirY" with the direction
 // normalised. Upstream's GLWPlanView::drawCameraPointer does the same sum
@@ -9972,7 +10209,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeCameraLookAt(
 // M6: the short-lived world-anchored labels - floating damage numbers and
 // speech bubbles. Rows are "screenX|screenY|onScreen|fade|r|g|b|text"; text
 // is last so it may contain pipes. Drawn in Compose because this renderer
-// has no font, exactly as the tank name plates are.
+// has no font - the name plates solved that by having the UI draw each
+// string once, which works for a name and not for a number that is
+// different every time.
 // M11: renderer options from the settings screen. Takes effect on the next
 // frame - nothing here is baked into a buffer.
 extern "C" JNIEXPORT void JNICALL
@@ -10052,6 +10291,19 @@ Java_com_rm_scorchdroid_NativeBridge_getTerrainDetailRange(JNIEnv *env, jobject)
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_setSightStyle(JNIEnv *env, jobject, jint style) {
     g_sightStyle.store(style == 1 ? 1 : 0);
+}
+
+// Whether the name and the bars are drawn. They reach the renderer now that
+// the plates are drawn here rather than in Compose; the arrow's switch below
+// always did.
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setShowNamePlates(JNIEnv *, jobject, jboolean show) {
+    g_showNamePlates.store(show ? 1 : 0);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setShowHealthBars(JNIEnv *, jobject, jboolean show) {
+    g_showHealthBars.store(show ? 1 : 0);
 }
 
 // V9: whether to draw upstream's arrow over a tank.

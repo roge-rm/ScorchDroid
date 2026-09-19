@@ -96,6 +96,19 @@ struct Mat4 {
         return r;
     }
 
+    // Screen space in pixels - origin top-left, y downward, which is the
+    // convention every projected screen position in this renderer already
+    // uses - onto clip space. For the plate pass, which is drawn flat over
+    // the finished scene rather than in the world.
+    static Mat4 orthoPixels(float width, float height) {
+        Mat4 r = identity();
+        r.m[0] = 2.0f / width;
+        r.m[5] = -2.0f / height;
+        r.m[12] = -1.0f;
+        r.m[13] = 1.0f;
+        return r;
+    }
+
     static Mat4 perspective(float fovYRadians, float aspect, float nearZ, float farZ) {
         Mat4 r{};
         float f = 1.0f / tanf(fovYRadians / 2.0f);

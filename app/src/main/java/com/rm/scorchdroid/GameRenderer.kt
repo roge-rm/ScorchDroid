@@ -19,16 +19,18 @@ class GameRenderer : GLSurfaceView.Renderer {
     external fun nativeOnSurfaceChanged(width: Int, height: Int)
     external fun nativeOnDrawFrame()
     /**
-     * M6 name plates: the last frame's tank positions projected to screen
-     * pixels, one row each:
-     * "screenX|screenY|onScreen|alive|mine|life|shield|r|g|b|name".
-     *
-     * Projected natively because the renderer is the only place with the
-     * finished MVP - redoing the camera maths in Kotlin would be a second
-     * implementation to keep in step. The *text* stays on this side: this
-     * port has no GL font renderer and its UI layer is Compose.
+     * The names the plate pass wants a picture of. The renderer draws the
+     * plates itself now - in the frame it projected them for, so they cannot
+     * lag - but it has no font, which is the one thing it still needs from
+     * this side. It asks for what it is missing; [nativeSetPlateText] answers.
      */
-    external fun nativeGetTankOverlays(): Array<String>
+    external fun nativeGetMissingPlateTexts(): Array<String>
+
+    /** One string's picture, ARGB_8888 as [android.graphics.Bitmap.getPixels] gives it. */
+    external fun nativeSetPlateText(text: String, width: Int, height: Int, pixels: IntArray)
+
+    /** dp to px, for the plate layout - only this side knows it. */
+    external fun nativeSetUiDensity(density: Float)
 
     /**
      * M6: turns a screen tap into a landscape "x|y", or "" if the ray
@@ -86,13 +88,6 @@ class GameRenderer : GLSurfaceView.Renderer {
 
     /** ARGB_8888 rows in landscape order - see [nativeMiniMapVersion]. */
     external fun nativeMiniMapImage(): IntArray
-
-    /**
-     * V9: one of upstream's own images as ARGB, width and height first. Used
-     * for the arrow over a tank, which the HUD draws rather than GL so that
-     * it keeps its place between the name plate and the health bar.
-     */
-    external fun nativeLoadImageArgb(file: String, mask: String, fromMod: Boolean): IntArray
 
     /**
      * "lookX|lookY|dirX|dirY" in landscape coordinates, for the plan view's

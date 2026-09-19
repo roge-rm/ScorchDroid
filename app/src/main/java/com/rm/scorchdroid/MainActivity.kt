@@ -2,6 +2,7 @@ package com.rm.scorchdroid
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.util.TypedValue
 import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.view.MotionEvent
@@ -22,7 +23,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Collections
-import kotlin.math.roundToInt
+import kotlin.math.ceil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -189,17 +190,11 @@ class MainActivity : AppCompatActivity() {
     // starting turret rotation yet (see the tick loop). One-shot, so it
     // never fights the player's own adjustments afterwards.
     private var aimSeeded = false
-
-    // Debug perf readout only - see the plates/s line in runTickLoop.
-    private var platePolls = 0
-    private var platePollWindowNanos = 0L
-    private var platePollRate = 0
     // M6 parity: chat polling state. The version is the cheap "did anything
     // arrive" check; the line id is how far the HUD has already been told
     // about, so a message it is already timing is never restarted.
     private var lastChatVersion = 0
     private var lastChatLineId = 0
-    private var tankArrowLoadFailed = false
     private var lastMapLineVersion = 0
     private var lastMapLineId = 0
 
@@ -721,6 +716,54 @@ class MainActivity : AppCompatActivity() {
         appScreen = AppScreen.MULTIPLAYER
     }
 
+    /**
+     * The renderer draws the name plates itself, but it has no font: upstream
+     * has a GL font atlas there and this port never had one. So each name is
+     * drawn here, once, into a bitmap the plate pass uploads and keeps.
+     *
+     * White on nothing, because the *tank's* colour is applied in the shader -
+     * one picture serves a player whatever colour they are playing, and a
+     * player who changes colour needs no new one.
+     */
+    private val plateTextPaint by lazy {
+        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            // The size the Compose plates used (labelMedium), through the
+            // same sp scaling, so nothing about them changed in the move.
+            textSize = TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_SP, 12f, resources.displayMetrics,
+            )
+            typeface = android.graphics.Typeface.create(
+                "sans-serif-medium", android.graphics.Typeface.NORMAL,
+            )
+            color = android.graphics.Color.WHITE
+        }
+    }
+
+    /**
+     * Answers whatever the plate pass has asked for since the last tick.
+     * Normally nothing: a name is asked for once, the first frame that draws
+     * a plate for it, and again only if the GL context and this process ever
+     * disagree about what has been handed over.
+     */
+    private fun supplyPlateTexts() {
+        if (!::gameRenderer.isInitialized) return
+        val missing = gameRenderer.nativeGetMissingPlateTexts()
+        if (missing.isEmpty()) return
+
+        val metrics = plateTextPaint.fontMetrics
+        val height = ceil(metrics.descent - metrics.ascent).toInt().coerceIn(1, 256)
+        for (text in missing) {
+            if (text.isEmpty()) continue
+            val width = ceil(plateTextPaint.measureText(text)).toInt().coerceIn(1, 2048)
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            android.graphics.Canvas(bitmap).drawText(text, 0f, -metrics.ascent, plateTextPaint)
+            val pixels = IntArray(width * height)
+            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+            bitmap.recycle()
+            gameRenderer.nativeSetPlateText(text, width, height, pixels)
+        }
+    }
+
     private fun attachGameSurface() {
         val surface = GLSurfaceView(this).apply {
             setEGLContextClientVersion(3)
@@ -735,6 +778,9 @@ class MainActivity : AppCompatActivity() {
             setEGLConfigChooser(8, 8, 8, 8, 16, 0)
         }
         gameRenderer = GameRenderer()
+        // The plate pass lays out in dp, the same dp the Compose plates used,
+        // and the renderer has no way of its own to know what a dp is here.
+        gameRenderer.nativeSetUiDensity(resources.displayMetrics.density)
         surface.setRenderer(gameRenderer)
         // After setRenderer, never before: GLSurfaceView has no GL thread
         // until a renderer is attached, and setRenderMode dereferences it.
@@ -1310,34 +1356,36 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Everything anchored to a place in the world - the name plates, the
-        // arrow over each tank, the floating damage numbers - is published by
-        // the renderer as a *screen* position, so it goes stale the moment the
-        // camera moves. The tick loop below runs ten times a second, which is
-        // right for a status line and hopeless for these: at 60fps the scene
-        // had moved six frames between updates, and the plates stepped after
-        // it in visible jumps while everything behind them turned smoothly.
+        // What is left on this side of the world-anchored drawing - the
+        // floating damage numbers, and the plan view's camera arrow - is
+        // published by the renderer as a *screen* position, so it goes stale
+        // the moment the camera moves. The tick loop below runs ten times a
+        // second, which is right for a status line and hopeless for these:
+        // at 60fps the scene moved six frames between updates and they
+        // stepped after it in visible jumps.
         //
-        // So they read on the frame clock instead. The renderer already
-        // projects them every frame on the GL thread and leaves the result
-        // under a mutex (the overlay block at the end of drawFrame), so
-        // nothing new is computed here - this only stops the UI sampling it
-        // at a tenth of the rate. AndroidUiDispatcher.CurrentThread is what
-        // carries the MonotonicFrameClock withFrameNanos needs; a plain
-        // Dispatchers.Main scope has none and would throw.
+        // So they read on the frame clock instead. AndroidUiDispatcher's
+        // CurrentThread is what carries the MonotonicFrameClock that
+        // withFrameNanos needs; a plain Dispatchers.Main scope has none and
+        // would throw.
         //
-        // A frame of lag remains and cannot be removed here: the plate is
-        // placed from the MVP of the frame the GL thread finished last. It
-        // shows as the plates trailing very slightly during a fast spin,
-        // which is a different thing from stepping.
-        platePolls = 0
-        platePollWindowNanos = System.nanoTime()
+        // The name plates used to be read here too, and a frame of lag was
+        // the best this route could do - the plate is placed from the MVP of
+        // the frame the GL thread finished last. They are drawn in GL now,
+        // in the frame they were projected for, which is why they are gone
+        // from this loop.
         launch(AndroidUiDispatcher.CurrentThread) {
             while (isActive) {
                 withFrameNanos { }
-                hudState.tankOverlays = parseTankOverlays(gameRenderer.nativeGetTankOverlays())
                 hudState.floatingLabels = parseFloatingLabels(gameRenderer.nativeGetFloatingLabels())
-                platePolls++
+                // The plan view's camera arrow turns with the camera, so it
+                // belongs here for the same reason the plates do. The tanks
+                // on that map do not - they move on a turn, not on a frame -
+                // and its picture changes a handful of times a round, so both
+                // of those stay on the tick loop below.
+                if (hudState.miniMapVisible) {
+                    hudState.miniMapCamera = gameRenderer.nativeCameraPlanInfo()
+                }
             }
         }
 
@@ -1391,26 +1439,10 @@ class MainActivity : AppCompatActivity() {
             // The picture itself is fetched only when the renderer says it
             // changed - a handful of times a round, against the ten times a
             // second this loop runs - so the usual tick copies nothing.
-            // V9: upstream's arrow picture, read once the engine's data root
-            // exists. Only attempted while it is missing, so a failure costs
-            // one call rather than one a tick.
-            if (hudState.tankArrowImage == null && !tankArrowLoadFailed) {
-                val argb = withContext(Dispatchers.Default) {
-                    gameRenderer.nativeLoadImageArgb(
-                        "data/images/arrow.bmp", "data/images/arrowi.bmp", false,
-                    )
-                }
-                if (argb.size > 2 && argb[0] > 0 && argb[1] > 0 &&
-                    argb.size == 2 + argb[0] * argb[1]
-                ) {
-                    hudState.tankArrowImage = Bitmap.createBitmap(
-                        argb.copyOfRange(2, argb.size), argb[0], argb[1],
-                        Bitmap.Config.ARGB_8888,
-                    ).asImageBitmap()
-                } else {
-                    tankArrowLoadFailed = true
-                }
-            }
+            // The one thing the plate pass cannot do for itself: a picture
+            // of each name. Usually an empty array and nothing more - a name
+            // is asked for once, when a player first has a plate drawn.
+            supplyPlateTexts()
 
             if (hudState.miniMapVisible) {
                 val version = gameRenderer.nativeMiniMapVersion()
@@ -1435,7 +1467,6 @@ class MainActivity : AppCompatActivity() {
                 hudState.miniMapTanks = parseMiniMapTanks(
                     withContext(Dispatchers.Default) { NativeBridge.getMiniMapTanks() }
                 )
-                hudState.miniMapCamera = gameRenderer.nativeCameraPlanInfo()
 
                 // Lines other players have drawn. The version check keeps
                 // this to one cheap int on the overwhelming majority of
@@ -1563,22 +1594,10 @@ class MainActivity : AppCompatActivity() {
                 val fps = stats.getOrNull(0).orEmpty()
                 val calls = stats.getOrNull(1).orEmpty()
                 val targets = stats.getOrNull(2).orEmpty()
-                // How often the name plates actually took a new position in
-                // the last second, next to how often the scene was drawn.
-                // The two should be the same number; when they were not -
-                // plates at ten a second against a 60fps scene - the plates
-                // stepped across the screen as the camera turned, which is
-                // the whole reason this is measured rather than assumed.
-                val elapsed = (System.nanoTime() - platePollWindowNanos) / 1_000_000_000.0
-                if (elapsed >= 1.0) {
-                    platePollRate = (platePolls / elapsed).roundToInt()
-                    platePolls = 0
-                    platePollWindowNanos = System.nanoTime()
-                }
                 hudState.perfLabel = if (fps.isEmpty()) {
                     ""
                 } else {
-                    "$fps fps | $calls draws | $targets targets | $platePollRate plates/s"
+                    "$fps fps | $calls draws | $targets targets"
                 }
             }
             // M6: seed the aiming sliders from where the tank is actually

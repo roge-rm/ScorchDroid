@@ -419,6 +419,15 @@ for any tank that is not yours - and for yours too, once the camera is not
 one of `CamAim`/`CamShot`/`CamTank`/`CamAction`/`CamExplosion`, the five that
 already frame it. Both sit under `OptionsDisplay::getDrawPlayerColor()`.
 
+**2026-09-19:** the name plate and the health bar joined it in GL, and the
+arrow moved with them into that screen-space pass - so what follows describes
+where it started, not where it is. The plate is one column: name, arrow,
+bars, placed in pixels, which is what keeps the arrow between the two at
+every camera distance. The cost is upstream's depth test, described below:
+the arrow no longer hides behind ground in front of it. It did not do so as
+a Compose widget either, so nothing regressed - but it is the one thing that
+pass gives up.
+
 Drawn in GL rather than Compose, unlike the name plate and the health bar
 beside it: those are text, which the renderer has no font for, while this is
 a world-space textured billboard that upstream depth-tests. It keeps

@@ -177,6 +177,7 @@ class GameSettings(context: Context) {
     fun updateShowNamePlates(value: Boolean) {
         showNamePlates = value
         prefs.edit().putBoolean(KEY_PLATES, value).apply()
+        NativeBridge.setShowNamePlates(value)
     }
 
     var showHealthBars by mutableStateOf(prefs.getBoolean(KEY_HEALTH, true))
@@ -185,6 +186,7 @@ class GameSettings(context: Context) {
     fun updateShowHealthBars(value: Boolean) {
         showHealthBars = value
         prefs.edit().putBoolean(KEY_HEALTH, value).apply()
+        NativeBridge.setShowHealthBars(value)
     }
 
     /**
@@ -194,9 +196,9 @@ class GameSettings(context: Context) {
      * useful combinations are not a single ordered scale - wanting arrows
      * without names is as reasonable as the reverse.
      *
-     * Unlike those two this one reaches the renderer rather than the HUD:
-     * the arrow is a world-space billboard in GL, where the name plate and
-     * the health bar are Compose over the top.
+     * All three reach the renderer, which draws the whole plate - name,
+     * arrow and bars - over the finished scene. They were Compose widgets
+     * until the plates moved into GL to stop them lagging the camera.
      */
     var showTankArrows by mutableStateOf(prefs.getBoolean(KEY_ARROWS, true))
         private set
@@ -414,6 +416,9 @@ class GameSettings(context: Context) {
         NativeBridge.setReflectionStyle(reflectionLevel)
         NativeBridge.setEffectsDetail(effectsDetail)
         NativeBridge.setShadowDetail(shadowDetail)
+        NativeBridge.setShowNamePlates(showNamePlates)
+        NativeBridge.setShowHealthBars(showHealthBars)
+        NativeBridge.setShowTankArrows(showTankArrows)
     }
 
     private companion object {
