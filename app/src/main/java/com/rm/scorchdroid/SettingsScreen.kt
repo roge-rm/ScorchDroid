@@ -180,6 +180,16 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             0f..1f,
                         ) { settings.updateEffectsVolume(it) }
                         SwitchRow(
+                            "Countdown beeps",
+                            "The beeps through the last seconds of your move",
+                            settings.countdownSound,
+                        ) { settings.updateCountdownSound(it) }
+                        SwitchRow(
+                            "Message sound",
+                            "The blip when a message arrives",
+                            settings.chatSound,
+                        ) { settings.updateChatSound(it) }
+                        SwitchRow(
                             "Ambient sound",
                             "The landscape's own atmosphere - waves, rain, birds in the trees",
                             settings.ambientEnabled,

@@ -2,6 +2,7 @@ package com.rm.scorchdroid
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
+import android.util.Log
 import android.util.TypedValue
 import android.opengl.GLSurfaceView
 import android.os.Bundle
@@ -194,6 +195,9 @@ class MainActivity : AppCompatActivity() {
     private var lockedMoveId = 0
     // Skip All Moves: which move the countdown belongs to, and when it ends.
     // See GameHudState.skipAllMoves for why the mode itself is not engine state.
+    // A1: which projectile engine loops this side has started, so the ones
+    // that land can be stopped again. Keys are the renderer's.
+    private val projectileLoopKeys = HashSet<String>()
     private var skipAllMoveId = 0
     private var skipAllDeadlineMs = 0L
 
@@ -1311,6 +1315,7 @@ class MainActivity : AppCompatActivity() {
         // same landscape came back.
         ambient?.stop()
         SoundPlayer.stopAllLoops()
+        projectileLoopKeys.clear()
         SoundPlayer.release()
         lastLandscapeTex = ""
         if (::gameSurface.isInitialized) {
@@ -1445,6 +1450,11 @@ class MainActivity : AppCompatActivity() {
             while (isActive) {
                 withFrameNanos { }
                 hudState.floatingLabels = parseFloatingLabels(gameRenderer.nativeGetFloatingLabels())
+                // A1: the shells in flight hum while they fly, and both how
+                // loud and which side change as they travel - so this rides
+                // the frame clock with the things that are pinned to the
+                // world, not the ten-a-second tick.
+                updateProjectileLoops()
                 // The plan view's camera arrow turns with the camera, so it
                 // belongs here for the same reason the plates do. The tanks
                 // on that map do not - they move on a turn, not on a frame -
@@ -1463,17 +1473,20 @@ class MainActivity : AppCompatActivity() {
                 // SoundEventQueue.h) - played via Android's own media
                 // stack, not vendored OpenAL/OGG (see the porting plan).
                 //
-                // "path|gain|priority", where the gain is upstream's own
+                // "path|gain|priority|pan", where the gain is upstream's own
                 // inverse-distance attenuation against the live listener and
                 // the batch has already been cut to the channel budget - so
                 // this loop plays what won a channel, it does not decide.
                 for (event in NativeBridge.pollSoundEvents()) {
                     val parts = event.split('|')
-                    if (parts.size != 3) continue
+                    if (parts.size != 4) continue
                     SoundPlayer.play(
                         parts[0],
                         parts[1].toFloatOrNull() ?: 1.0f,
                         parts[2].toIntOrNull() ?: SoundPlayer.PRIORITY_ACTION,
+                        // A4: where it sits across the stereo field, from the
+                        // listener's own right vector - see panForPosition.
+                        parts[3].toFloatOrNull() ?: 0f,
                     )
                 }
             }
@@ -2117,6 +2130,56 @@ class MainActivity : AppCompatActivity() {
             parseWeaponShop(NativeBridge.getWeaponShop())
         }
         shop.settle(weapon.accessoryId, money, entries)
+    }
+
+    /**
+     * Starts, moves and stops the engine loops for the shells in the air.
+     *
+     * Upstream holds a looping source per shot and lets OpenAL follow it
+     * (MissileActionRenderer). The port's player is keyed rather than
+     * handle-based, so the same thing here is a reconciliation: whatever the
+     * renderer says is flying gets started or moved, and every loop it no
+     * longer names is stopped. Only keys the renderer owns are touched - the
+     * aiming servo keeps its own.
+     */
+    private fun updateProjectileLoops() {
+        val rows = gameRenderer.nativeGetSoundLoops()
+        val live = HashSet<String>(rows.size)
+        for (row in rows) {
+            // The file is a path and can hold anything, so it is parsed from
+            // the ends in: key first, gain and pan last.
+            val first = row.indexOf('|')
+            val lastPipe = row.lastIndexOf('|')
+            val secondLast = if (lastPipe > 0) row.lastIndexOf('|', lastPipe - 1) else -1
+            if (first <= 0 || secondLast <= first) continue
+
+            val key = row.substring(0, first)
+            val file = row.substring(first + 1, secondLast)
+            val gain = row.substring(secondLast + 1, lastPipe).toFloatOrNull() ?: continue
+            val pan = row.substring(lastPipe + 1).toFloatOrNull() ?: 0f
+
+            live.add(key)
+            if (key in projectileLoopKeys) {
+                SoundPlayer.updateLoop(key, gain, pan)
+            } else {
+                SoundPlayer.startLoop(key, file, gain, SoundPlayer.PRIORITY_MISSILE, pan)
+                projectileLoopKeys.add(key)
+                // Same reason the one-shots log: "is that sound wired" should
+                // be answerable from logcat rather than by listening.
+                Log.i("ScorchDroidEngine", "Engine loop: $key ${file.substringAfterLast('/')}")
+            }
+        }
+
+        if (projectileLoopKeys.isNotEmpty()) {
+            val iterator = projectileLoopKeys.iterator()
+            while (iterator.hasNext()) {
+                val key = iterator.next()
+                if (key !in live) {
+                    SoundPlayer.stopLoop(key)
+                    iterator.remove()
+                }
+            }
+        }
     }
 
     /**

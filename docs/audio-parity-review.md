@@ -6,7 +6,9 @@ to get one of these: the ground, the water, the wind, the scene visuals and
 the audio spam of 2026-09-09 happened, a mechanism upstream had, dropped as
 unnecessary, with nothing checking.
 
-Reviewed 2026-09-19 against the pinned upstream commit.
+Reviewed 2026-09-19 against the pinned upstream commit, and everything it
+found was built the same day - see the plan at the end for what each item was
+and how it was checked. A5 (Doppler) is the one deliberate exception.
 
 Sources: upstream's `src/client/sound/` (the mixer, the listener, the virtual
 sources), every `SoundUtils::play*` and `VirtualSoundSource` call site in
@@ -62,9 +64,9 @@ where the gaps are.
 | `GLWChannelView` | the channel's text sound (`misc/text.wav`) | **done** — `ChatStore.cpp` |
 | `Water::explosion` | `misc/splash.wav` for a blast under the sea | **done** — renderer, with X4's splash |
 | `TankKeyboardControlUtil` | `movement/movement.wav` plus the `turn`/`elevate`/`power` loops | **done** — the aiming servo, 2026-09-10 |
-| `MissileActionRenderer` | the projectile's `<enginesound>`, **looped**, positioned, gain 0.25 | **missing — A1** |
-| `Wall::wallHit` | `shield/hit2.wav` where a shot hits the arena wall | **missing — A2** |
-| `ClientStartGameHandler` | `misc/play.wav` as a new game commences | **missing — A3** |
+| `MissileActionRenderer` | the projectile's `<enginesound>`, **looped**, positioned, gain 0.25 | **done — A1** |
+| `Wall::wallHit` | `shield/hit2.wav` where a shot hits the arena wall | **done — A2** |
+| `ClientStartGameHandler` | `misc/play.wav` when a move of yours is granted | **done — A3** |
 | `MainCamera` | `misc/camera.wav` | **not applicable** — it is the screenshot key's sound, and this port has no screenshot key |
 
 ## 3. The mixer
@@ -76,7 +78,7 @@ where the gaps are.
 | Priorities | `eAction` 10000, `eRotation` 500, `eText` 100 (and bands this port has no subsystem for) | the same three | match |
 | Attenuation | OpenAL inverse-distance from reference distance and rolloff | the same formula, clamped at the source gain | match |
 | Listener position | the camera, every frame | the camera, read on the GL thread before the engine lock | match |
-| **Listener orientation** | set every frame; OpenAL pans with it | **not used — every sound plays centred** | **gap — A4** |
+| **Listener orientation** | set every frame; OpenAL pans with it | the camera's right vector, projected onto each sound (A4) | match |
 | **Velocity / Doppler** | listener and source velocities are set | not used | gap — A5 |
 | Master gain | `SoundVolume` on the listener | effects volume on every stream | match |
 
@@ -107,8 +109,8 @@ its own switch and volume (M21).
 | `NoAmbientSound` | "Ambient sound" switch |
 | `AmbientSoundVolume` | "Ambient volume" |
 | `SoundChannels` | fixed at upstream's default of 8, not exposed |
-| `NoCountDownSound` | **no equivalent — A6** |
-| `NoChannelTextSound` | **no equivalent — A6** |
+| `NoCountDownSound` | "Countdown beeps" switch (A6) |
+| `NoChannelTextSound` | "Message sound" switch (A6) |
 | `NoBoidSound` | confirmed non-gap: it is `depricatedNoBoidSound_` upstream and nothing reads it |
 
 Music has a switch and a volume here, which upstream keeps in `music.xml`'s
@@ -116,7 +118,7 @@ gains rather than in options.
 
 ## The plan
 
-### A1 — the projectile engine sound
+### A1 — the projectile engine sound — **done 2026-09-19**
 
 The headline. `WeaponProjectile::engineSound_` **defaults to
 `data/wav/misc/rocket.wav`**, and of the 55 projectile weapons in the base
@@ -126,31 +128,41 @@ on the shell, at gain 0.25 and `eMissile` priority — and this port is silent
 for all of them. It is the most-heard sound in the game and the one nobody
 noticed was missing, which is the sort of thing this review exists to catch.
 
-What it needs: a looping, moving sound. Everything the port plays today is a
-one-shot fired at a position, so this is the first sound that has to start,
-follow a shot and stop when it lands — the shot positions are already
-published to the renderer (patch 0009), and `SoundPlayer` already runs loops
-for the aiming servo, so both halves exist.
+What it needed was a looping, *moving* sound, where everything the port played
+before was a one-shot fired at a position. The renderer publishes what is in
+the air each frame and the UI reconciles that list against the loops it has
+running: new shells start, live ones move, landed ones stop. A shell's key is
+its tank, its sound and how many of that pair are already flying, which is
+stable without the engine having to hand out shot ids - two shells of the same
+weapon from the same tank can swap keys as they cross, which is inaudible.
+Capped at four, because loops hold their channels for a whole flight where
+one-shots do not.
 
-### A2 — the arena wall hit
+### A2 — the arena wall hit — **done 2026-09-19**
 
 `Wall::wallHit` plays `shield/hit2.wav` where a shot strikes the arena wall.
 V8 drew that flash without ever playing it. The event already reaches the
 renderer, so this is a line beside the flash.
 
-### A3 — a new game commences
+### A3 — the sound of your turn — **done 2026-09-19**
 
-`ClientStartGameHandler` plays `misc/play.wav` once as a game starts. The port
-knows the same moment — it is where the music already switches state.
+`ClientStartGameHandler::startGame` plays `misc/play.wav`, and its own comment
+- "a new game is commencing" - is wrong, which this review repeated before
+checking. The function hangs off `TankStartMoveSimAction`: it runs when a move
+of *yours* is granted, so it is the sound of your turn arriving, and a player
+hears it every round rather than once a game. The port raises it from where it
+already tracks that same moment, next to the countdown beeps.
 
-### A4 — stereo
+### A4 — stereo — **done 2026-09-19**
 
 Upstream hands OpenAL a listener orientation, so a shell landing on your left
 is heard on your left. Every sound here plays centred: distance is honoured,
 direction is not. `SoundPool.play` takes a left and a right volume, and the
-renderer already publishes the camera basis, so this is a pan computed from
-the camera's right vector against the sound's direction — one small change in
-the queue, and it affects every sound at once.
+renderer already publishes the camera basis, so the pan is the cosine between
+the camera's right vector and the direction to the sound - computed in the
+queue, beside the attenuation it belongs with, and applied to every sound and
+every loop at once. A sound with no position is upstream's relative case and
+stays centred, because something at the listener has no side.
 
 ### A5 — Doppler
 
@@ -159,24 +171,37 @@ has a playback-rate parameter, so it is *possible*, but it only matters for
 sounds that move, which today is nothing and after A1 is the shell. Worth a
 look once A1 lands, not before.
 
-### A6 — the two missing mutes
+### A6 — the two missing mutes — **done 2026-09-19**
 
 `NoCountDownSound` and `NoChannelTextSound` turn off exactly the beep and the
 chat blip without silencing the game. Two switches beside the audio ones.
 
 ## Order
 
-1. **A1**, which is most of what a player would notice.
-2. **A4**, which changes every sound rather than one.
-3. A2 and A3, a line each.
-4. A6.
-5. A5, only if A1 makes it worth it.
+Built in this order on 2026-09-19: A4 first (it is what the others are heard
+through), then A1, then A2, A3 and A6. A5 is still open and still only worth
+it if the shells' hum turns out to want it.
 
-## Verifying any of this
+## How these were verified
 
-There are no host-tests for audio and there cannot usefully be: what these
-would assert is that a file was named, which is what the logcat line already
-says. The port logs one line per drained batch naming each file, so "is that
-sound wired" is answerable from `adb logcat` without listening — that is how
-the table above was checked, and it is the right check for A2 and A3. A1 and
-A4 are about *how* something sounds, and want ears on a phone.
+There are no host-tests for audio and there cannot usefully be: what they
+would assert is that a file was named, which is what the log line already
+says. The port logs one line per drained batch naming each file, and that line
+now carries the gain **and the pan**, so "is that sound wired", "why was it
+quiet" and "why did it come from the wrong ear" are all answerable from
+`adb logcat` without listening. Each loop logs when it starts, for the same
+reason.
+
+On Pixel_5-2, from those lines: a volley starts three `rocket.wav` loops, one
+per shell in the air, and the next volley starts three more - so they stop
+when the shells land. `shoot/small.wav` and `explosions/small.wav` arrive at
+pans of +0.52, +0.38, +0.29 and -0.01 while `play.wav` and `text.wav` stay at
++0.00, which is the relative case staying centred. `play.wav` plays once per
+move granted. With "Message sound" off, a game start that previously logged
+six `text.wav` logged none, while everything else still played.
+
+Two things are wired but unheard: A2's wall hit needs a shot that reaches the
+arena wall, which no emulator round has thrown yet, and the countdown mute
+needs a game with a shot clock - the quick-game presets have none. Both are
+the same one-line gate as the message sound, which is proven above, but
+neither has been heard.

@@ -37,6 +37,14 @@ class GameRenderer : GLSurfaceView.Renderer {
      */
     external fun nativePickTankPlate(screenX: Float, screenY: Float): Int
 
+    /**
+     * A1: the projectile engine loops that should be playing, one row each:
+     * `"key|file|gain|pan"`. Upstream keeps one looping, positioned source
+     * per shell in flight; this is that list, already attenuated and panned
+     * against the live listener. Empty whenever nothing is in the air.
+     */
+    external fun nativeGetSoundLoops(): Array<String>
+
     /** dp to px, for the plate layout - only this side knows it. */
     external fun nativeSetUiDensity(density: Float)
 

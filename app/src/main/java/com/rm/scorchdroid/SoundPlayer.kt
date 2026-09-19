@@ -42,6 +42,13 @@ object SoundPlayer {
     /** Upstream's `VirtualSoundPriority::eAction` - see SoundEventQueue.h. */
     const val PRIORITY_ACTION = 10000
 
+    /**
+     * Upstream's `VirtualSoundPriority::eMissile` - the hum a shell carries
+     * while it flies. Below every action on purpose: a shell should be heard
+     * under an explosion, not over it.
+     */
+    const val PRIORITY_MISSILE = 200
+
     private val attributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_GAME)
         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
@@ -128,7 +135,7 @@ object SoundPlayer {
      * saying nothing at all. What makes that harmless upstream is precisely
      * that they are eText and yield to anything else.
      */
-    fun play(filePath: String, gain: Float = 1.0f, priority: Int = PRIORITY_ACTION) {
+    fun play(filePath: String, gain: Float = 1.0f, priority: Int = PRIORITY_ACTION, pan: Float = 0f) {
         if (!enabled) return
         val file = File(filePath)
         if (!file.exists()) return
@@ -138,7 +145,7 @@ object SoundPlayer {
             val existing = sampleIds[filePath]
             if (existing != null) {
                 if (loaded.contains(existing)) {
-                    playLoaded(soundPool, existing, gain, priority)
+                    playLoaded(soundPool, existing, gain, priority, pan)
                 } else {
                     // Still decoding. Keep the loudest request, since that is
                     // the one that would have been audible.
@@ -193,7 +200,7 @@ object SoundPlayer {
      * beat late is worse than not starting it. The one-shot that accompanies
      * it warms the cache anyway.
      */
-    fun startLoop(key: String, filePath: String, gain: Float, priority: Int) {
+    fun startLoop(key: String, filePath: String, gain: Float, priority: Int, pan: Float = 0f) {
         if (!enabled) return
         val soundPool = poolOrCreate()
         synchronized(sampleIds) {
@@ -206,9 +213,9 @@ object SoundPlayer {
                 return
             }
             if (!loaded.contains(sampleId)) return
-            val volume = (gain * masterVolume).coerceIn(0f, 1f)
+            val (left, right) = stereo(gain, pan)
             val streamPriority = priority + (gain.coerceIn(0f, 1f) * 99f).toInt()
-            val stream = soundPool.play(sampleId, volume, volume, streamPriority, -1, 1.0f)
+            val stream = soundPool.play(sampleId, left, right, streamPriority, -1, 1.0f)
             if (stream != 0) loopStreams[key] = stream
         }
     }
@@ -232,8 +239,14 @@ object SoundPlayer {
         loopStreams.remove(key)?.let { pool?.stop(it) }
     }
 
-    private fun playLoaded(soundPool: SoundPool, sampleId: Int, gain: Float, priority: Int) {
-        val volume = (gain * masterVolume).coerceIn(0f, 1f)
+    private fun playLoaded(
+        soundPool: SoundPool,
+        sampleId: Int,
+        gain: Float,
+        priority: Int,
+        pan: Float = 0f,
+    ) {
+        val (left, right) = stereo(gain, pan)
         // Band-major, loudness-minor: the band separates eAction from eText
         // outright, and the gain orders sounds within a band by how near they
         // are. 99 rather than 100 so a band can never reach into the next.
@@ -241,8 +254,40 @@ object SoundPlayer {
         // Ranked on the gain, not the volume: turning the master down should
         // not reorder which sounds matter.
         val streamPriority = priority + (gain.coerceIn(0f, 1f) * 99f).toInt()
-        soundPool.play(sampleId, volume, volume, streamPriority, 0, 1.0f)
+        soundPool.play(sampleId, left, right, streamPriority, 0, 1.0f)
     }
+
+    /**
+     * A gain and a pan as the two channel volumes SoundPool wants. Linear,
+     * because the pan it is given is already the cosine of the angle between
+     * the listener's right and the sound (see panForPosition): -1 puts it
+     * hard left, 0 centres it, +1 hard right.
+     */
+    private fun stereo(gain: Float, pan: Float): Pair<Float, Float> {
+        val volume = (gain * masterVolume).coerceIn(0f, 1f)
+        val p = pan.coerceIn(-1f, 1f)
+        return Pair(
+            volume * minOf(1f, 1f - p),
+            volume * minOf(1f, 1f + p),
+        )
+    }
+
+    /**
+     * Moves a loop that is already playing: a projectile's engine sound
+     * travels with the shell, so its distance and its side change every
+     * frame. Does nothing for a key that is not playing, which is how a
+     * caller can update without tracking what started.
+     */
+    fun updateLoop(key: String, gain: Float, pan: Float) {
+        synchronized(sampleIds) {
+            val stream = loopStreams[key] ?: return
+            val (left, right) = stereo(gain, pan)
+            pool?.setVolume(stream, left, right)
+        }
+    }
+
+    /** The keys with a loop playing right now. */
+    fun loopKeys(): Set<String> = synchronized(sampleIds) { loopStreams.keys.toSet() }
 
     /**
      * Drops every decoded sample. Called when a game ends: the next one may be

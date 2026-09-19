@@ -379,6 +379,14 @@ object NativeBridge {
      * equivalents apart as well.
      */
     /**
+     * A6: upstream's NoCountDownSound and NoChannelTextSound - the two sounds
+     * it lets you silence on their own. Both default on, as upstream's do.
+     */
+    external fun setCountdownSound(on: Boolean)
+
+    external fun setChatSound(on: Boolean)
+
+    /**
      * Whether a tank wears its name and its health bar. They reach the
      * renderer rather than the HUD now that it draws the plates itself.
      */

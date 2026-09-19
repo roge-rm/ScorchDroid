@@ -777,6 +777,28 @@ namespace
 	std::mutex g_platePickMutex;
 	std::vector<PlatePick> g_platePicks;
 
+	// A1: the engine sound every projectile in flight carries. Upstream holds
+	// one looping, positioned source per shot (MissileActionRenderer), and
+	// WeaponProjectile's <enginesound> *defaults* to rocket.wav - of the 55
+	// projectiles in the base mod exactly two turn it off - so nearly every
+	// shell hums while it flies. Published from the frame that knows where
+	// the shells are; the gain and the side are worked out where the
+	// listener is known, like every other sound.
+	struct ProjectileLoop {
+		std::string key;    // stable while this shell is in the air
+		std::string file;
+		float x = 0.0f, y = 0.0f, z = 0.0f;   // engine space
+	};
+	std::mutex g_projectileLoopMutex;
+	std::vector<ProjectileLoop> g_projectileLoops;
+
+	// Upstream's own gain for this sound (MissileActionRenderer sets 0.25),
+	// and a ceiling on how many hum at once. Four rather than the eight a
+	// channel budget would allow: these are loops, not one-shots, so they
+	// hold their channels for the whole flight.
+	const float kProjectileEngineGain = 0.25f;
+	const int   kMaxProjectileLoops   = 4;
+
 	// The one thing this renderer still cannot do for itself is *text*:
 	// upstream has a GL font atlas here and the port has none. So the UI
 	// layer draws each string once into a bitmap and hands the pixels over,
@@ -4840,6 +4862,12 @@ namespace
 					wallHitOffsetCycle += 0.02f;
 					if (wallHitOffsetCycle > 0.4f) wallHitOffsetCycle = 0.1f;
 					wallHits.push_back(hit);
+					// A2: and the sound. Wall::wallHit plays this beside the
+					// flash it sets, at the point of impact - the flash has
+					// been drawn here since V8 without it.
+					ScorchDroidAudio::pushSoundEventAt(
+						S3D::getModFile("data/wav/shield/hit2.wav"),
+						event.x, event.y, event.z);
 				}
 				break;
 			}
@@ -6657,6 +6685,22 @@ bool renderListenerEnginePosition(float &x, float &y, float &z) {
 	return true;
 }
 
+bool renderListenerEngineBasis(float &x, float &y, float &z,
+							   float &rightX, float &rightY, float &rightZ) {
+	std::lock_guard<std::mutex> lock(g_pickMutex);
+	if (!g_pickCamera.valid) return false;
+	x = g_pickCamera.eyeX;
+	y = engineYFromWorldZ(g_pickCamera.eyeZ);
+	z = g_pickCamera.eyeY;
+	// Render space to engine space for a *direction*: the same swap
+	// renderNormalFromEngine makes, read the other way, and without the
+	// translation worldZFromEngineY carries for a position.
+	rightX = g_pickCamera.rightX;
+	rightY = -g_pickCamera.rightZ;
+	rightZ = g_pickCamera.rightY;
+	return true;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	logGpuCapabilities();
@@ -7375,6 +7419,38 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		shotPositionsRaw, explosionPositionsRaw, &shotPlayerIds, &shotVelocities, &shotWeapons);
 	ctx->getActionController().getRollerPositions(
 		rollerPositions, rollerRotations, rollerWeapons, rollerPlayerIds);
+
+	// A1: what is humming, and where. One entry per shell, keyed by the tank
+	// that fired it, the sound it carries and how many of that pair are
+	// already in the air - so a shell keeps its key from frame to frame
+	// without the engine having to hand out shot ids. Two shells of the same
+	// weapon from the same tank can swap keys as they cross, which is
+	// inaudible: they are the same sound at nearly the same place.
+	{
+		std::vector<ProjectileLoop> loops;
+		std::map<std::string, int> slots;
+		for (size_t i = 0; i < shotPositionsRaw.size() && i < shotWeapons.size(); i++) {
+			WeaponProjectile *weapon = shotWeapons[i];
+			if (!weapon) continue;
+			const char *engineSound = weapon->getEngineSound();
+			if (!engineSound || 0 == strcmp("none", engineSound)) continue;
+
+			char group[192];
+			snprintf(group, sizeof(group), "%u:%s",
+					 (i < shotPlayerIds.size() ? shotPlayerIds[i] : 0u), engineSound);
+			const int slot = slots[group]++;
+
+			ProjectileLoop loop;
+			loop.key  = std::string("shot:") + group + ":" + std::to_string(slot);
+			loop.file = S3D::getModFile(engineSound);
+			loop.x = shotPositionsRaw[i][0].asFloat();
+			loop.y = shotPositionsRaw[i][1].asFloat();
+			loop.z = shotPositionsRaw[i][2].asFloat();
+			loops.push_back(loop);
+		}
+		std::lock_guard<std::mutex> lock(g_projectileLoopMutex);
+		g_projectileLoops.swap(loops);
+	}
 
 	bool haveMyTank = false;
 	bool myTankAlive = false;
@@ -9996,6 +10072,61 @@ Java_com_rm_scorchdroid_GameRenderer_nativePickTerrain(JNIEnv *env, jobject, jfl
 		previous = travelled;
 	}
 	return env->NewStringUTF("");
+}
+
+// A1: the projectile engine loops that should be playing right now, one row
+// each: "key|file|gain|pan". The renderer publishes what is in the air (see
+// g_projectileLoops); this is where the listener turns that into how loud and
+// which side, with the same attenuation and the same panning every one-shot
+// gets.
+//
+// Upstream plays these at a quarter gain and eMissile priority, which is
+// below every action and above the ambient band - a shell should be heard
+// under an explosion, not over it. The list is capped so a cluster weapon
+// cannot spend the whole pool on its own hum; upstream's channel arbitration
+// does the same thing by a different route, since eMissile loses every
+// channel it is competing for.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_GameRenderer_nativeGetSoundLoops(JNIEnv *env, jobject) {
+	std::vector<ProjectileLoop> loops;
+	{
+		std::lock_guard<std::mutex> lock(g_projectileLoopMutex);
+		loops = g_projectileLoops;
+	}
+	if (loops.empty()) return env->NewObjectArray(0, env->FindClass("java/lang/String"), nullptr);
+
+	float lx = 0.0f, ly = 0.0f, lz = 0.0f, rx = 1.0f, ry = 0.0f, rz = 0.0f;
+	const bool haveListener = renderListenerEngineBasis(lx, ly, lz, rx, ry, rz);
+
+	struct Row { float gain; std::string text; };
+	std::vector<Row> rows;
+	rows.reserve(loops.size());
+	for (size_t i = 0; i < loops.size(); i++) {
+		const ProjectileLoop &loop = loops[i];
+		const float gain = kProjectileEngineGain * ScorchDroidAudio::gainForPosition(
+			loop.x, loop.y, loop.z, haveListener, lx, ly, lz);
+		if (gain < 0.01f) continue;
+		const float pan = ScorchDroidAudio::panForPosition(
+			loop.x, loop.y, loop.z, haveListener, lx, ly, lz, rx, ry, rz);
+
+		char buffer[512];
+		snprintf(buffer, sizeof(buffer), "%s|%s|%.4f|%.3f",
+				 loop.key.c_str(), loop.file.c_str(), gain, pan);
+		Row row;
+		row.gain = gain;
+		row.text = buffer;
+		rows.push_back(row);
+	}
+
+	std::sort(rows.begin(), rows.end(),
+			  [](const Row &a, const Row &b) { return a.gain > b.gain; });
+	if (rows.size() > (size_t) kMaxProjectileLoops) rows.resize(kMaxProjectileLoops);
+
+	jobjectArray result = env->NewObjectArray((jsize) rows.size(), env->FindClass("java/lang/String"), nullptr);
+	for (size_t i = 0; i < rows.size(); i++) {
+		env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(rows[i].text.c_str()));
+	}
+	return result;
 }
 
 // Whose plate is at this point on screen, or 0 for none. The rectangles
