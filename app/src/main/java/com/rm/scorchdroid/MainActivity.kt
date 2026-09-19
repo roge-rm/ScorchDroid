@@ -185,6 +185,10 @@ class MainActivity : AppCompatActivity() {
     // nothing is committed. The Fire button's locked state hangs off it - see
     // the tick loop, which cannot use "there is a move id" on its own.
     private var lockedMoveId = 0
+    // Skip All Moves: which move the countdown belongs to, and when it ends.
+    // See GameHudState.skipAllMoves for why the mode itself is not engine state.
+    private var skipAllMoveId = 0
+    private var skipAllDeadlineMs = 0L
 
     // M6: whether the aiming sliders have been seeded from the tank's real
     // starting turret rotation yet (see the tick loop). One-shot, so it
@@ -1534,6 +1538,39 @@ class MainActivity : AppCompatActivity() {
                 lockedMoveId = 0
             }
 
+            // Skip All Moves, the countdown half. While the mode is on and a
+            // shot move of ours is live and uncommitted, five seconds run and
+            // then the move is skipped - upstream's own window
+            // (SkipAllDialog::simulate waits 5). Driven from this loop rather
+            // than the frame clock because it is a move, not a picture, and
+            // everything it needs is already here: the move id says whose
+            // turn it is, shotLocked says whether we have already answered,
+            // and buyingPhase keeps it away from the shop, which upstream's
+            // skip does not touch either.
+            if (hudState.skipAllMoves && moveId != 0 && !hudState.shotLocked &&
+                !hudState.buyingPhase
+            ) {
+                if (skipAllMoveId != moveId) {
+                    skipAllMoveId = moveId
+                    skipAllDeadlineMs = System.currentTimeMillis() + SKIP_ALL_SECONDS * 1000L
+                }
+                val remaining = skipAllDeadlineMs - System.currentTimeMillis()
+                if (remaining <= 0) {
+                    hudState.skipAllSeconds = -1
+                    skipAllMoveId = 0
+                    submitMoveAsync(MoveType.SKIP)
+                } else {
+                    // Rounded up, so a fresh countdown reads "5s" rather than
+                    // starting at four.
+                    hudState.skipAllSeconds = ((remaining + 999) / 1000).toInt()
+                }
+            } else if (hudState.skipAllSeconds >= 0) {
+                // Not our move any more, or the move has been answered - by
+                // the countdown itself, or by the player firing anyway.
+                hudState.skipAllSeconds = -1
+                skipAllMoveId = 0
+            }
+
             val seconds = withContext(Dispatchers.Default) { NativeBridge.getPhaseSecondsRemaining() }
             hudState.statusText = if (seconds >= 0) "${seconds}s | $baseStatus" else baseStatus
             // M6: drives the contextual "done buying" button - it only
@@ -2248,6 +2285,34 @@ class MainActivity : AppCompatActivity() {
             (if (hudState.hudHidden) "Show HUD" else "Hide HUD") to {
                 hudState.hudHidden = !hudState.hudHidden
                 hudState.dialog = HudDialog.None
+            },
+            // Upstream's third button in the same dialog as Resign
+            // (SkipDialog): it skips this move and every later one of yours
+            // until it is cancelled. Reversible in one tap from the
+            // countdown banner, so unlike Resign it needs no confirmation
+            // of its own - but it does skip the move you are on, which is
+            // upstream's behaviour and worth being asked about first.
+            (if (hudState.skipAllMoves) "Stop skipping moves" else "Skip all moves...") to {
+                if (hudState.skipAllMoves) {
+                    hudState.skipAllMoves = false
+                    hudState.skipAllSeconds = -1
+                    hudState.dialog = HudDialog.None
+                } else {
+                    hudState.dialog = HudDialog.ListChoice(
+                        title = "Skip this move and the rest?",
+                        items = listOf("Yes, skip my moves"),
+                        cancelLabel = "Cancel",
+                        onSelect = {
+                            hudState.skipAllMoves = true
+                            // Upstream skips the current move as it sets the
+                            // flag (SkipDialog::buttonDown falls through to
+                            // skipShot for both buttons).
+                            submitMoveAsync(MoveType.SKIP)
+                            hudState.dialog = HudDialog.None
+                        },
+                        onCancel = { hudState.dialog = HudDialog.None },
+                    )
+                }
             },
             "Resign round..." to {
                 hudState.dialog = HudDialog.ListChoice(
@@ -3006,6 +3071,10 @@ class MainActivity : AppCompatActivity() {
         // a Wi-Fi Direct peer that advertised no service record and so never
         // told us its port - a real result carries its own.
         const val DEFAULT_SERVER_PORT = 27270
+
+        // How long Skip All Moves waits before passing a move, which is
+        // upstream's own five seconds (SkipAllDialog::simulate).
+        const val SKIP_ALL_SECONDS = 5
 
         // Bluetooth's "let other devices see this one" dialog, and the
         // system's own "turn Bluetooth on?" prompt.
