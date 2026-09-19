@@ -18,6 +18,8 @@
 #include <simactions/TankAccessorySimAction.hpp>
 #include <tankai/TankAIAdder.hpp>
 #include <coms/ComsGiftMoneyMessage.hpp>
+#include <engine/SaveGame.hpp>
+#include <coms/ComsLoadLevelMessage.hpp>
 #include <simactions/TankGiftSimAction.hpp>
 #include <target/TargetContainer.hpp>
 #include <tank/Tank.hpp>
@@ -970,6 +972,49 @@ namespace
 			delete added;
 			server->getServerDestinations().removeDestination(kSecondDestinationId);
 		}
+	}
+
+	// Saving a game (engine_jni.cpp's saveGame mechanism).
+	//
+	// The save is the server's own level message, written by upstream's
+	// SaveGame::saveFile - which is why only a process that *is* the server
+	// can save at all. What is pinned here is that the file this port writes
+	// is one upstream's own loader accepts: loadFile refuses anything whose
+	// leading protocol version is not this build's, which is the check that
+	// would catch a save written by a different Scorched3D.
+	void testSaveGame()
+	{
+		printf("saving a game (engine_jni.cpp's saveGame mechanism):\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+
+		// A save *is* the level message, which ServerSimulator builds at the
+		// start of each round - and which is null until then. These tests
+		// never run the state machine that far, so build it here the way
+		// ServerStateNewGame does, on the landscape the deformation test
+		// generated. Saving without it is a null dereference, which is what
+		// this test did the first time it ran: the port's own gate (playing
+		// or scoring, as upstream's SaveDialog requires) is what keeps a
+		// real game away from that.
+		server->getServerSimulator().newLevel();
+
+		const std::string path = S3D::getSaveFile("host-tests.s3d");
+		check(SaveGame::saveFile(path), "the running game writes a save file");
+
+		FILE *written = fopen(path.c_str(), "rb");
+		check(written != nullptr, "...which is really on disk");
+		if (written)
+		{
+			fseek(written, 0, SEEK_END);
+			check(ftell(written) > 0, "...and is not empty");
+			fclose(written);
+		}
+
+		ComsLoadLevelMessage message;
+		check(SaveGame::loadFile(path, message),
+			"...and reads back through upstream's own loader, version and all");
+
+		unlink(path.c_str());
 	}
 
 	// M6: proof that terrain destruction is already live in our build, not
@@ -4814,6 +4859,7 @@ int main(int argc, char **argv)
 	testNonShotMoves();
 	testGiftMoney();
 	testTerrainDeformation();
+	testSaveGame();
 	testCameraPickRay();
 	testSkyDescription();
 	testTreeGeometry();

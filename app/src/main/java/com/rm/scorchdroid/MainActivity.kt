@@ -2326,7 +2326,29 @@ class MainActivity : AppCompatActivity() {
                     onCancel = { hudState.dialog = HudDialog.None },
                 )
             },
-        )
+        ) + if (!hudState.isHost) {
+            // A game you joined cannot be saved: the save is the server's own
+            // level message, and the server is someone else's process. That
+            // is upstream's rule too - its SaveDialog is only registered when
+            // this client is not connected to a server.
+            emptyList()
+        } else {
+            listOf<Pair<String, () -> Unit>>(
+                "Save game" to {
+                    CoroutineScope(Dispatchers.Main).launch {
+                        val saved = withContext(Dispatchers.Default) { NativeBridge.saveGame() }
+                        notifyPlayer(
+                            if (saved.isEmpty()) {
+                                "Nothing to save until a round is under way"
+                            } else {
+                                "Saved as $saved"
+                            },
+                        )
+                    }
+                    hudState.dialog = HudDialog.None
+                },
+            )
+        }
 
         hudState.dialog = HudDialog.ListChoice(
             title = "More actions",

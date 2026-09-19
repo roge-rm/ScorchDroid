@@ -14,6 +14,8 @@ std::mutex g_engineMutex;
 #include <server/ScorchedServer.hpp>
 #include <server/ScorchedServerSettings.hpp>
 #include <server/ServerState.hpp>
+#include <engine/SaveGame.hpp>
+#include <common/DefinesScorched.hpp>
 #include <server/ServerFileServer.hpp>
 #include <server/ServerChannelManager.hpp>
 #include <server/ServerTimedMessage.hpp>
@@ -793,6 +795,40 @@ Java_com_rm_scorchdroid_NativeBridge_useDefense(JNIEnv *env, jobject /* this */,
         return JNI_TRUE;
     }
     return g_clientContext->sendGameMessage(message) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Write the game out, and answer with the file it went to (empty if it did
+// not). Upstream's SaveDialog gates this two ways and both are kept: only a
+// process that *is* the server can save, because SaveGame::saveFile
+// serializes ScorchedServer's own level message, and only while the game is
+// playing or scoring, which is when there is a round worth resuming.
+//
+// The name is the time, as upstream's own dialog suggests by default, so
+// nothing has to be typed on a phone. S3D::getSaveFile puts it in the
+// settings directory's saves/ folder and creates that folder if it has to;
+// initEngine has already set the settings directory.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_rm_scorchdroid_NativeBridge_saveGame(JNIEnv *env, jobject /* this */) {
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    if (g_mode != EngineMode::kHost || !ScorchedServer::serverStarted()) {
+        return env->NewStringUTF("");
+    }
+
+    const ServerState::ServerStateEnum state =
+        (ServerState::ServerStateEnum) ScorchedServer::instance()->getServerState().getState();
+    if (state != ServerState::ServerPlayingState && state != ServerState::ServerScoreState) {
+        return env->NewStringUTF("");
+    }
+
+    char name[64];
+    snprintf(name, sizeof(name), "saved-%u.s3d", (unsigned int) time(nullptr));
+    const std::string path = S3D::getSaveFile(name);
+    if (!SaveGame::saveFile(path)) {
+        LOGE("saveGame: could not write %s", path.c_str());
+        return env->NewStringUTF("");
+    }
+    LOGI("saveGame: wrote %s", path.c_str());
+    return env->NewStringUTF(name);
 }
 
 // Who this player may gift money to, one row each:

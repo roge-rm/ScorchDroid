@@ -397,13 +397,17 @@ fun HudDialogHost(dialog: HudDialog) {
             onDismissRequest = dialog.onCancel,
             title = { Text("Shop - \$${dialog.money}") },
             text = { ShopContent(dialog) },
-            confirmButton = {
+            // Close sits in the confirm slot and the gift in the dismiss one,
+            // which is back to front by the names and right by the buttons:
+            // this dialog's own way out belongs in the corner the thumb
+            // finds, and the gift - the rarer thing - to its left.
+            confirmButton = { TextButton(onClick = dialog.onCancel) { Text("Close") } },
+            dismissButton = {
                 val onGift = dialog.onGift
                 if (onGift != null) {
                     TextButton(onClick = onGift) { Text("Gift money...") }
                 }
             },
-            dismissButton = { TextButton(onClick = dialog.onCancel) { Text("Close") } },
         )
 
         is HudDialog.Scores -> AlertDialog(

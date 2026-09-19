@@ -140,6 +140,14 @@ object NativeBridge {
     external fun useDefense(accessoryId: Int, change: Int): Boolean
 
     /**
+     * Write the game out, answering with the file name it went to, or "" if
+     * it could not. Only a game this device hosts can be saved - the save is
+     * the server's own state - and only while it is playing or scoring,
+     * which are upstream's own conditions.
+     */
+    external fun saveGame(): String
+
+    /**
      * Who this player may give money to, one row each:
      * `"playerId|name|money|r,g,b"`. Empty whenever a gift would be refused -
      * outside the buying phase, or with nobody eligible - so the Shop can ask
