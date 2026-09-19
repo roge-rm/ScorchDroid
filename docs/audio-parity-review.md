@@ -8,7 +8,7 @@ unnecessary, with nothing checking.
 
 Reviewed 2026-09-19 against the pinned upstream commit, and everything it
 found was built the same day - see the plan at the end for what each item was
-and how it was checked. A5 (Doppler) is the one deliberate exception.
+and how it was checked.
 
 Sources: upstream's `src/client/sound/` (the mixer, the listener, the virtual
 sources), every `SoundUtils::play*` and `VirtualSoundSource` call site in
@@ -25,11 +25,11 @@ play. Every request becomes a `VirtualSoundSource` carrying a priority, a
 position, a gain, a reference distance and a rolloff; `Sound::updateSources`
 sorts the playing ones by priority and then by distance and hands the real
 channels to the winners. The listener is the **camera**, updated every frame
-from `MainCamera` with a position, an orientation and a velocity, so OpenAL
-attenuates with distance, pans with direction and shifts pitch with velocity.
-
-This port reproduces the first half exactly and the second half partly, which
-is the theme of what follows.
+from `MainCamera` with a position and an orientation, so OpenAL attenuates
+with distance and pans with direction. It sets a listener *velocity* too, and
+that one goes nowhere: `SoundListener::setVelocity`'s body is commented out
+upstream, "to prevent linux crackling sounds". Source velocities are set for
+real, so upstream's doppler shift is the source's alone.
 
 ## 1. Sounds raised from `src/common` — all wired
 
@@ -79,7 +79,7 @@ where the gaps are.
 | Attenuation | OpenAL inverse-distance from reference distance and rolloff | the same formula, clamped at the source gain | match |
 | Listener position | the camera, every frame | the camera, read on the GL thread before the engine lock | match |
 | **Listener orientation** | set every frame; OpenAL pans with it | the camera's right vector, projected onto each sound (A4) | match |
-| **Velocity / Doppler** | listener and source velocities are set | not used | gap — A5 |
+| Velocity / Doppler | the **source's** velocity is set; the listener's is commented out upstream | the same shift, from the source's velocity alone (A5) | match |
 | Master gain | `SoundVolume` on the listener | effects volume on every stream | match |
 
 ## 4. Music
@@ -164,12 +164,23 @@ queue, beside the attenuation it belongs with, and applied to every sound and
 every loop at once. A sound with no position is upstream's relative case and
 stays centred, because something at the listener has no side.
 
-### A5 — Doppler
+### A5 — Doppler — **done 2026-09-19**
 
-Upstream sets velocities on both the listener and each source. `SoundPool`
-has a playback-rate parameter, so it is *possible*, but it only matters for
-sounds that move, which today is nothing and after A1 is the shell. Worth a
-look once A1 lands, not before.
+Worth doing once A1 gave it something that moves, and worth *reading* first:
+upstream sets a velocity on each source but not on the listener, because
+`SoundListener::setVelocity` is commented out with a note about Linux
+crackling. So its doppler shift is the source's own motion and nothing else,
+and matching that is both simpler and more faithful than computing a listener
+term upstream throws away.
+
+OpenAL's formula, with the listener term at zero:
+
+    f' = f * (c - DF*vls) / (c - DF*vss),  vls = 0
+
+where `vss` is the shell's speed along the direction from it to the listener,
+`c` is 343.3 and `DF` is 1 - both OpenAL defaults, neither of which upstream
+changes. `SoundPool` takes a playback rate, clamped to 0.5..2, which is also
+what keeps a shell at the speed of sound from dividing by zero.
 
 ### A6 — the two missing mutes — **done 2026-09-19**
 
@@ -179,8 +190,8 @@ chat blip without silencing the game. Two switches beside the audio ones.
 ## Order
 
 Built in this order on 2026-09-19: A4 first (it is what the others are heard
-through), then A1, then A2, A3 and A6. A5 is still open and still only worth
-it if the shells' hum turns out to want it.
+through), then A1, then A2, A3 and A6, and A5 last - once the shells were
+humming there was something for it to shift.
 
 ## How these were verified
 
@@ -199,6 +210,10 @@ pans of +0.52, +0.38, +0.29 and -0.01 while `play.wav` and `text.wav` stay at
 +0.00, which is the relative case staying centred. `play.wav` plays once per
 move granted. With "Message sound" off, a game start that previously logged
 six `text.wav` logged none, while everything else still played.
+
+A shell's hum also rises as it comes at the camera and falls as it goes away:
+the loops start at rates up to 1.104 and end as low as 0.93, logged at both
+ends for exactly this reason.
 
 Two things are wired but unheard: A2's wall hit needs a shot that reaches the
 arena wall, which no emulator round has thrown yet, and the countdown mute

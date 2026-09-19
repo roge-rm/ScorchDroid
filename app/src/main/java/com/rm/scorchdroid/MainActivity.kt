@@ -198,6 +198,10 @@ class MainActivity : AppCompatActivity() {
     // A1: which projectile engine loops this side has started, so the ones
     // that land can be stopped again. Keys are the renderer's.
     private val projectileLoopKeys = HashSet<String>()
+
+    // The doppler rate each of those was last given, for the line that says
+    // what it ended on - see updateProjectileLoops.
+    private val projectileLoopRates = HashMap<String, Float>()
     private var skipAllMoveId = 0
     private var skipAllDeadlineMs = 0L
 
@@ -1316,6 +1320,7 @@ class MainActivity : AppCompatActivity() {
         ambient?.stop()
         SoundPlayer.stopAllLoops()
         projectileLoopKeys.clear()
+        projectileLoopRates.clear()
         SoundPlayer.release()
         lastLandscapeTex = ""
         if (::gameSurface.isInitialized) {
@@ -2147,26 +2152,32 @@ class MainActivity : AppCompatActivity() {
         val live = HashSet<String>(rows.size)
         for (row in rows) {
             // The file is a path and can hold anything, so it is parsed from
-            // the ends in: key first, gain and pan last.
+            // the ends in: key first, then gain, pan and rate off the back.
             val first = row.indexOf('|')
-            val lastPipe = row.lastIndexOf('|')
-            val secondLast = if (lastPipe > 0) row.lastIndexOf('|', lastPipe - 1) else -1
-            if (first <= 0 || secondLast <= first) continue
+            val rateAt = row.lastIndexOf('|')
+            val panAt = if (rateAt > 0) row.lastIndexOf('|', rateAt - 1) else -1
+            val gainAt = if (panAt > 0) row.lastIndexOf('|', panAt - 1) else -1
+            if (first <= 0 || gainAt <= first) continue
 
             val key = row.substring(0, first)
-            val file = row.substring(first + 1, secondLast)
-            val gain = row.substring(secondLast + 1, lastPipe).toFloatOrNull() ?: continue
-            val pan = row.substring(lastPipe + 1).toFloatOrNull() ?: 0f
+            val file = row.substring(first + 1, gainAt)
+            val gain = row.substring(gainAt + 1, panAt).toFloatOrNull() ?: continue
+            val pan = row.substring(panAt + 1, rateAt).toFloatOrNull() ?: 0f
+            val rate = row.substring(rateAt + 1).toFloatOrNull() ?: 1f
 
             live.add(key)
+            projectileLoopRates[key] = rate
             if (key in projectileLoopKeys) {
-                SoundPlayer.updateLoop(key, gain, pan)
+                SoundPlayer.updateLoop(key, gain, pan, rate)
             } else {
-                SoundPlayer.startLoop(key, file, gain, SoundPlayer.PRIORITY_MISSILE, pan)
+                SoundPlayer.startLoop(key, file, gain, SoundPlayer.PRIORITY_MISSILE, pan, rate)
                 projectileLoopKeys.add(key)
                 // Same reason the one-shots log: "is that sound wired" should
                 // be answerable from logcat rather than by listening.
-                Log.i("ScorchDroidEngine", "Engine loop: $key ${file.substringAfterLast('/')}")
+                Log.i(
+                    "ScorchDroidEngine",
+                    "Engine loop: $key ${file.substringAfterLast('/')} rate=$rate",
+                )
             }
         }
 
@@ -2176,6 +2187,13 @@ class MainActivity : AppCompatActivity() {
                 val key = iterator.next()
                 if (key !in live) {
                     SoundPlayer.stopLoop(key)
+                    // The rate it ended on, beside the one it started at:
+                    // two numbers are what show the doppler shift moving
+                    // rather than merely being computed once.
+                    Log.i(
+                        "ScorchDroidEngine",
+                        "Engine loop ends: $key rate=${projectileLoopRates.remove(key)}",
+                    )
                     iterator.remove()
                 }
             }
