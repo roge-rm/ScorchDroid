@@ -140,6 +140,21 @@ object NativeBridge {
     external fun useDefense(accessoryId: Int, change: Int): Boolean
 
     /**
+     * Who this player may give money to, one row each:
+     * `"playerId|name|money|r,g,b"`. Empty whenever a gift would be refused -
+     * outside the buying phase, or with nobody eligible - so the Shop can ask
+     * once and get both the answer and the list. See [parseGiftTargets].
+     */
+    external fun getGiftTargets(): Array<String>
+
+    /**
+     * Hand [amount] to another player. Upstream's own rules decide whether it
+     * lands (TankGiftSimAction), so a true here means the action was sent, not
+     * that the money moved.
+     */
+    external fun giftMoney(toPlayerId: Int, amount: Int): Boolean
+
+    /**
      * M6 parity: "my tank"'s currently-active defenses as
      * "shieldName|parachuteName", either side empty if none is up.
      */
@@ -676,6 +691,31 @@ data class PlayerEntry(
     /** M16: path to this player's avatar image, relative to the data root. */
     val avatar: String,
 )
+
+/** One player this tank may gift money to - see [NativeBridge.getGiftTargets]. */
+data class GiftTarget(
+    val playerId: Int,
+    val name: String,
+    val money: Int,
+    val colorArgb: Int,
+)
+
+fun parseGiftTargets(rows: Array<String>): List<GiftTarget> = rows.mapNotNull { row ->
+    // The colour is last, so the name is the field that may contain anything.
+    val parts = row.split("|", limit = 4)
+    if (parts.size != 4) return@mapNotNull null
+    val rgb = parts[3].split(",")
+    if (rgb.size != 3) return@mapNotNull null
+    GiftTarget(
+        playerId = parts[0].toIntOrNull() ?: return@mapNotNull null,
+        name = parts[1],
+        money = parts[2].toIntOrNull() ?: 0,
+        colorArgb = (0xFF shl 24) or
+            ((rgb[0].toIntOrNull() ?: 255) shl 16) or
+            ((rgb[1].toIntOrNull() ?: 255) shl 8) or
+            (rgb[2].toIntOrNull() ?: 255),
+    )
+}
 
 fun parsePlayerList(rows: Array<String>): List<PlayerEntry> = rows.mapNotNull { row ->
     // The avatar is a file name and comes last, so it is the only field that

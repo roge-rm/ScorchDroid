@@ -2337,6 +2337,72 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    /**
+     * Upstream's GiftMoneyDialog: pick someone, pick an amount. Both lists are
+     * upstream's own - the recipients are whoever the engine says may be given
+     * money (see getGiftTargets), and the amounts are the ladder
+     * GiftMoneyDialog offers, cut to what this player actually holds.
+     *
+     * Whether the gift lands is not decided here: TankGiftSimAction checks the
+     * teams, the phase and the money again when it runs, so this is a request,
+     * not a transfer.
+     */
+    private fun showGiftMoney(targets: List<GiftTarget>, money: Int) {
+        hudState.dialog = HudDialog.ListChoice(
+            title = "Give money to",
+            items = targets.map { "${it.name}  (has \$${it.money})" },
+            cancelLabel = "Cancel",
+            onSelect = { index ->
+                val target = targets[index]
+                val amounts = GIFT_AMOUNTS.filter { it <= money }
+                if (amounts.isEmpty()) {
+                    notifyPlayer("You have nothing to give")
+                    hudState.dialog = HudDialog.None
+                    return@ListChoice
+                }
+                hudState.dialog = HudDialog.ListChoice(
+                    title = "Give how much to ${target.name}?",
+                    items = amounts.map { "\$$it" },
+                    cancelLabel = "Cancel",
+                    onSelect = { amountIndex ->
+                        val amount = amounts[amountIndex]
+                        CoroutineScope(Dispatchers.Main).launch {
+                            val before = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
+                            val sent = withContext(Dispatchers.Default) {
+                                NativeBridge.giftMoney(target.playerId, amount)
+                            }
+                            if (!sent) notifyPlayer("Couldn't send that money")
+                            // Back to the shop, which is where this came from,
+                            // straight away rather than after the wait below.
+                            showWeaponShop()
+                            if (!sent) return@launch
+                            notifyPlayer("Sent \$$amount to ${target.name}")
+
+                            // A gift is a queued simulator action, like a
+                            // purchase: the money does not move on this tick,
+                            // and a shop reopened before it lands shows the
+                            // player what they had before they gave it away.
+                            // Same wait, and the same reason, as awaitPurchase.
+                            repeat(34) {
+                                delay(120)
+                                val now = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
+                                if (now != before) {
+                                    val entries = withContext(Dispatchers.Default) {
+                                        parseWeaponShop(NativeBridge.getWeaponShop())
+                                    }
+                                    (hudState.dialog as? HudDialog.Shop)?.settle(0, now, entries)
+                                    return@launch
+                                }
+                            }
+                        }
+                    },
+                    onCancel = { hudState.dialog = HudDialog.None },
+                )
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+    }
+
     // M4 economy, M6 parity: exercises the
     // getMyMoney/getWeaponShop/buyAccessory/selectWeapon JNI surface (see
     // engine_jni.cpp) - lets the human player buy accessories with real
@@ -2356,10 +2422,22 @@ class MainActivity : AppCompatActivity() {
             val weapons = withContext(Dispatchers.Default) {
                 parseWeaponShop(NativeBridge.getWeaponShop())
             }
+            // Upstream's gift button lives in this dialog and nowhere else -
+            // the buying phase is the only time a gift is accepted. An empty
+            // list is the engine saying "not now, or nobody", and the button
+            // simply does not appear.
+            val giftTargets = withContext(Dispatchers.Default) {
+                parseGiftTargets(NativeBridge.getGiftTargets())
+            }
 
             hudState.dialog = HudDialog.Shop(
                 money = money,
                 entries = weapons,
+                onGift = if (giftTargets.isEmpty()) {
+                    null
+                } else {
+                    { showGiftMoney(giftTargets, money) }
+                },
                 onSelect = { weapon ->
                     CoroutineScope(Dispatchers.Main).launch {
                         if (weapon.isOwned) {
@@ -3071,6 +3149,11 @@ class MainActivity : AppCompatActivity() {
         // a Wi-Fi Direct peer that advertised no service record and so never
         // told us its port - a real result carries its own.
         const val DEFAULT_SERVER_PORT = 27270
+
+        // The amounts upstream's GiftMoneyDialog offers, in its own order.
+        // Not this port's numbers to pick: they are what a Scorched3D player
+        // sees in that dialog.
+        val GIFT_AMOUNTS = listOf(1000, 2500, 5000, 10000, 15000, 20000, 25000, 50000, 100000)
 
         // How long Skip All Moves waits before passing a move, which is
         // upstream's own five seconds (SkipAllDialog::simulate).
