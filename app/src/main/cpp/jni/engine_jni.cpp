@@ -348,6 +348,46 @@ JNI_OnLoad(JavaVM *vm, void * /* reserved */) {
     return JNI_VERSION_1_6;
 }
 
+// Brings up the interface this host will listen on, for whichever of the two
+// transports the player chose. Shared by a fresh game and a loaded one -
+// resuming a save is hosting like any other hosting, and the save says
+// nothing about which radio it should come back on.
+//
+// A Bluetooth game is not also a LAN game: one NetInterface per process is
+// the rule (see NetBridge.hpp), so this *replaces* the TCP one startServer()
+// built rather than joining it. The port is reported as zero afterwards
+// because there genuinely is not one - nothing to type into another device,
+// which is the point.
+static bool bringUpHostInterface(JNIEnv *env, bool overBluetooth) {
+    const int port = ScorchedServer::instance()->getOptionsGame().getPortNo();
+    g_hostingPort = port;
+
+    if (overBluetooth) {
+        auto *transport = new JniTransport(env);
+        if (!transport->valid()) {
+            LOGE("Bluetooth hosting: the Kotlin transport is not available");
+            delete transport;
+            return false;
+        }
+        auto *bridge = new NetBridge(transport);
+        ScorchedServer::instance()->getContext().setNetInterface(bridge);
+        // Re-set, not set: startServerInternal() handed the message handler
+        // to the interface it built, and replacing the interface means
+        // handing it over again. host-tests does exactly this.
+        bridge->setMessageHandler(&ScorchedServer::instance()->getComsMessageHandler());
+        g_hostingPort = 0;
+        g_hostingListening = bridge->start(0);
+        LOGI("NetBridge::start() over Bluetooth -> %d", g_hostingListening);
+        if (!g_hostingListening) {
+            LOGE("Bluetooth hosting failed to start listening");
+        }
+    } else {
+        g_hostingListening = ScorchedServer::instance()->getContext().getNetInterface().start(port);
+        LOGI("NetInterface::start(%d) -> %d", port, g_hostingListening);
+    }
+    return true;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
         JNIEnv *env, jobject /* this */, jboolean overBluetooth) {
@@ -429,37 +469,7 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
          options.getNoRounds(), options.getNoTurns(),
          options.getStartMoney());
 
-    int port = ScorchedServer::instance()->getOptionsGame().getPortNo();
-    g_hostingPort = port;
-
-    if (overBluetooth) {
-        // A Bluetooth game is not also a LAN game: one NetInterface per
-        // process is the rule (see NetBridge.hpp), so this replaces the TCP
-        // one startServer() built rather than joining it. The port is
-        // reported as zero afterwards because there genuinely isn't one -
-        // nothing to type into another device, which is the point.
-        auto *transport = new JniTransport(env);
-        if (!transport->valid()) {
-            LOGE("Bluetooth hosting: the Kotlin transport is not available");
-            delete transport;
-            return JNI_FALSE;
-        }
-        auto *bridge = new NetBridge(transport);
-        ScorchedServer::instance()->getContext().setNetInterface(bridge);
-        // Re-set, not set: startServerInternal() handed the message handler
-        // to the interface it built, and replacing the interface means
-        // handing it over again. host-tests does exactly this.
-        bridge->setMessageHandler(&ScorchedServer::instance()->getComsMessageHandler());
-        g_hostingPort = 0;
-        g_hostingListening = bridge->start(0);
-        LOGI("NetBridge::start() over Bluetooth -> %d", g_hostingListening);
-        if (!g_hostingListening) {
-            LOGE("Bluetooth hosting failed to start listening");
-        }
-    } else {
-        g_hostingListening = ScorchedServer::instance()->getContext().getNetInterface().start(port);
-        LOGI("NetInterface::start(%d) -> %d", port, g_hostingListening);
-    }
+    if (!bringUpHostInterface(env, overBluetooth == JNI_TRUE)) return JNI_FALSE;
     if (!g_hostingListening) {
         // Not fatal - matches upstream's own single-player-vs-loopback
         // fallback in spirit: local practice against bots still works
@@ -467,7 +477,7 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
         // another instance on this device), it just isn't joinable over
         // the network. ServerMain.cpp's own dialogExit() on this same
         // failure is too harsh for an interactive app.
-        LOGE("Failed to bind port %d - continuing without LAN hosting", port);
+        LOGE("Failed to bind port %d - continuing without LAN hosting", g_hostingPort);
     }
 
     addHumanTank();
@@ -501,7 +511,7 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
 //    carry - so adding one first would only have it deleted again.
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_rm_scorchdroid_NativeBridge_startLoadedGame(JNIEnv *env, jobject /* this */,
-                                                     jstring jName) {
+                                                     jstring jName, jboolean overBluetooth) {
     std::lock_guard<std::mutex> lock(g_engineMutex);
     if (g_mode != EngineMode::kNone) {
         LOGE("startLoadedGame: engine already started (mode=%d)", (int) g_mode);
@@ -564,12 +574,15 @@ Java_com_rm_scorchdroid_NativeBridge_startLoadedGame(JNIEnv *env, jobject /* thi
          ScorchedServer::instance()->getOptionsTransient().getCurrentRoundNo(),
          ScorchedServer::instance()->getTargetContainer().getNoOfTanks());
 
-    int port = options.getPortNo();
-    g_hostingPort = port;
-    g_hostingListening = ScorchedServer::instance()->getContext().getNetInterface().start(port);
-    LOGI("NetInterface::start(%d) -> %d", port, g_hostingListening);
+    // The same bring-up a fresh game gets, over whichever transport was
+    // chosen: a resumed game is hosted like any other, and a save carries
+    // the game rather than the radio it was played over.
+    if (!bringUpHostInterface(env, overBluetooth == JNI_TRUE)) {
+        ScorchedServer::stopServer();
+        return JNI_FALSE;
+    }
     if (!g_hostingListening) {
-        LOGE("Failed to bind port %d - continuing without LAN hosting", port);
+        LOGE("Loaded game: nothing is listening - it will not be joinable");
     }
 
     g_humanPromoted = false;

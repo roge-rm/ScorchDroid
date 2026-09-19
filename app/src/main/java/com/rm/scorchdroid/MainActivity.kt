@@ -192,6 +192,11 @@ class MainActivity : AppCompatActivity() {
     // Which save the next started game comes from, or null for a fresh one.
     // Read by startAsHost, which is the one place either kind of game begins.
     private var savedGameToLoad: String? = null
+
+    // Which screen the save picker was opened from, which is also the
+    // question of intent: a game loaded from Single Player publishes
+    // nothing, one loaded from Multiplayer hosts like any other host.
+    private var loadGameForOthers = false
     private var lockedMoveId = 0
     // Skip All Moves: which move the countdown belongs to, and when it ends.
     // See GameHudState.skipAllMoves for why the mode itself is not engine state.
@@ -245,7 +250,8 @@ class MainActivity : AppCompatActivity() {
                     // The only screen two levels down; back should undo one
                     // step, not both.
                     AppScreen.QUICK_GAME -> appScreen = AppScreen.SINGLE_PLAYER
-                    AppScreen.LOAD_GAME -> appScreen = AppScreen.SINGLE_PLAYER
+                    AppScreen.LOAD_GAME -> appScreen =
+                        if (loadGameForOthers) AppScreen.MULTIPLAYER else AppScreen.SINGLE_PLAYER
                     else -> appScreen = AppScreen.MENU
                 }
             }
@@ -258,6 +264,11 @@ class MainActivity : AppCompatActivity() {
                     },
                     onMultiplayer = {
                         requestNearbyPermissionOnce()
+                        // Read on the way in, not on the tap: whether Load
+                        // Game is even offered depends on there being a
+                        // save, and a game saved a minute ago was written
+                        // after this list was last read.
+                        savedGames = parseSavedGames(NativeBridge.listSavedGames())
                         appScreen = AppScreen.MULTIPLAYER
                     },
                     onSettings = { appScreen = AppScreen.SETTINGS },
@@ -267,7 +278,10 @@ class MainActivity : AppCompatActivity() {
                     onQuickGame = { openQuickGame() },
                     quickGameEnabled = presets.isNotEmpty(),
                     onNewGame = { openSetup("New Game") },
-                    onLoadGame = { appScreen = AppScreen.LOAD_GAME },
+                    onLoadGame = {
+                        loadGameForOthers = false
+                        appScreen = AppScreen.LOAD_GAME
+                    },
                     loadGameEnabled = savedGames.isNotEmpty(),
                     onTutorial = { startTutorial() },
                     tutorialEnabled = true,
@@ -277,7 +291,13 @@ class MainActivity : AppCompatActivity() {
                     saves = savedGames,
                     onPick = { startSavedGame(it) },
                     onDelete = { confirmDeleteSave(it) },
-                    onBack = { appScreen = AppScreen.SINGLE_PLAYER },
+                    onBack = {
+                        appScreen = if (loadGameForOthers) {
+                            AppScreen.MULTIPLAYER
+                        } else {
+                            AppScreen.SINGLE_PLAYER
+                        }
+                    },
                 )
                 AppScreen.QUICK_GAME -> QuickGameScreen(
                     presets = presets,
@@ -287,6 +307,11 @@ class MainActivity : AppCompatActivity() {
                 AppScreen.MULTIPLAYER -> MultiplayerScreen(
                     onHost = { openSetup("Host Game", forOthers = true) },
                     onHostBluetooth = { startBluetoothHostFlow() },
+                    onLoadGame = {
+                        loadGameForOthers = true
+                        appScreen = AppScreen.LOAD_GAME
+                    },
+                    loadGameEnabled = savedGames.isNotEmpty(),
                     onJoin = { startJoinFlow() },
                     onJoinBluetooth = { requireBluetooth { startJoinFlow(overBluetooth = true) } },
                     onBack = { appScreen = AppScreen.MENU },
@@ -594,7 +619,13 @@ class MainActivity : AppCompatActivity() {
                 savedGames = parseSavedGames(NativeBridge.listSavedGames())
                 hudState.dialog = HudDialog.None
                 // Nothing left to show, so this screen has nothing to be.
-                if (savedGames.isEmpty()) appScreen = AppScreen.SINGLE_PLAYER
+                if (savedGames.isEmpty()) {
+                    appScreen = if (loadGameForOthers) {
+                        AppScreen.MULTIPLAYER
+                    } else {
+                        AppScreen.SINGLE_PLAYER
+                    }
+                }
             },
             onCancel = { hudState.dialog = HudDialog.None },
         )
@@ -607,8 +638,54 @@ class MainActivity : AppCompatActivity() {
      */
     private fun startSavedGame(save: SavedGame) {
         if (gameJob != null) return
+        if (!loadGameForOthers) {
+            // Solo: the game runs a server as every game here does, and
+            // publishes nothing - no service record, no Wi-Fi Direct group.
+            savedGameToLoad = save.name
+            hostForOthers = false
+            hostOverBluetooth = false
+            startGame()
+            return
+        }
+
+        // Hosted: the engine has one network interface, so which radio it
+        // comes back on has to be settled before the game starts - the same
+        // reason Host Game and Host over Bluetooth are two buttons rather
+        // than one with an option inside it.
+        val transports = buildList {
+            add("Over Wi-Fi, a hotspot, or Wi-Fi Direct" to false)
+            if (BluetoothTransport.isSupported(applicationContext)) {
+                add("Over Bluetooth" to true)
+            }
+        }
+        if (transports.size == 1) {
+            startHostedSavedGame(save, overBluetooth = false)
+            return
+        }
+        hudState.dialog = HudDialog.ListChoice(
+            title = "Host it how?",
+            items = transports.map { it.first },
+            cancelLabel = "Cancel",
+            onSelect = { index ->
+                hudState.dialog = HudDialog.None
+                val overBluetooth = transports[index].second
+                if (overBluetooth) {
+                    requireBluetooth { startHostedSavedGame(save, overBluetooth = true) }
+                } else {
+                    startHostedSavedGame(save, overBluetooth = false)
+                }
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+    }
+
+    /** The hosted half of [startSavedGame], once the transport is settled. */
+    private fun startHostedSavedGame(save: SavedGame, overBluetooth: Boolean) {
+        if (gameJob != null) return
         savedGameToLoad = save.name
-        hostOverBluetooth = false
+        hostForOthers = true
+        hostOverBluetooth = overBluetooth
+        bluetoothVisibilityAsked = false
         startGame()
     }
 
@@ -1348,7 +1425,7 @@ class MainActivity : AppCompatActivity() {
             if (save == null) {
                 NativeBridge.startLocalGame(hostOverBluetooth)
             } else {
-                NativeBridge.startLoadedGame(save)
+                NativeBridge.startLoadedGame(save, hostOverBluetooth)
             }
         }
         if (!gameOk) {

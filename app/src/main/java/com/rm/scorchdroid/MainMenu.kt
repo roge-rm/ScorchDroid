@@ -329,6 +329,8 @@ fun QuickGameScreen(
 fun MultiplayerScreen(
     onHost: () -> Unit,
     onHostBluetooth: () -> Unit,
+    onLoadGame: () -> Unit,
+    loadGameEnabled: Boolean,
     onJoin: () -> Unit,
     onJoinBluetooth: () -> Unit,
     onBack: () -> Unit,
@@ -347,6 +349,16 @@ fun MultiplayerScreen(
             "No Wi-Fi at all - for two devices side by side",
             onClick = onHostBluetooth,
             enabled = bluetoothEnabled,
+        )
+        // A saved game is hosted like any other - what it carries is the
+        // game, not the radio it was played over - so the transport is asked
+        // for after a save is picked, the same choice the two buttons above
+        // make before one is.
+        MenuButton(
+            "Load Game",
+            if (loadGameEnabled) "Carry on a saved game with others" else "No saved games yet",
+            enabled = loadGameEnabled,
+            onClick = onLoadGame,
         )
         MenuButton("Join Game", "Find a game on the network", onClick = onJoin)
         // Its own search, not a row in the other one. A Bluetooth scan
