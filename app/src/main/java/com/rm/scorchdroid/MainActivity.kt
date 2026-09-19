@@ -118,6 +118,10 @@ class MainActivity : AppCompatActivity() {
     // modinfo.xml. Read once, after the engine has a data root - the list
     // cannot change while the app is running.
     private var presets by mutableStateOf<List<GamePreset>>(emptyList())
+    // The saves on disk, refreshed on the way into Single Player rather than
+    // once at startup: one is written mid-game, and the menu is the next
+    // thing the player sees afterwards.
+    private var savedGames by mutableStateOf<List<SavedGame>>(emptyList())
     // M16: where the extracted data lives, so the settings screen can show
     // the avatar images and the score table can show them again.
     private var dataRootPath by mutableStateOf("")
@@ -184,6 +188,9 @@ class MainActivity : AppCompatActivity() {
     // The move id this turn's committed move was submitted against, or 0 if
     // nothing is committed. The Fire button's locked state hangs off it - see
     // the tick loop, which cannot use "there is a move id" on its own.
+    // Which save the next started game comes from, or null for a fresh one.
+    // Read by startAsHost, which is the one place either kind of game begins.
+    private var savedGameToLoad: String? = null
     private var lockedMoveId = 0
     // Skip All Moves: which move the countdown belongs to, and when it ends.
     // See GameHudState.skipAllMoves for why the mode itself is not engine state.
@@ -230,13 +237,17 @@ class MainActivity : AppCompatActivity() {
                     // The only screen two levels down; back should undo one
                     // step, not both.
                     AppScreen.QUICK_GAME -> appScreen = AppScreen.SINGLE_PLAYER
+                    AppScreen.LOAD_GAME -> appScreen = AppScreen.SINGLE_PLAYER
                     else -> appScreen = AppScreen.MENU
                 }
             }
             when (appScreen) {
                 AppScreen.SPLASH -> SplashScreen(splashStatus, null)
                 AppScreen.MENU -> MainMenuScreen(
-                    onSinglePlayer = { appScreen = AppScreen.SINGLE_PLAYER },
+                    onSinglePlayer = {
+                        savedGames = parseSavedGames(NativeBridge.listSavedGames())
+                        appScreen = AppScreen.SINGLE_PLAYER
+                    },
                     onMultiplayer = {
                         requestNearbyPermissionOnce()
                         appScreen = AppScreen.MULTIPLAYER
@@ -248,9 +259,17 @@ class MainActivity : AppCompatActivity() {
                     onQuickGame = { openQuickGame() },
                     quickGameEnabled = presets.isNotEmpty(),
                     onNewGame = { openSetup("New Game") },
+                    onLoadGame = { appScreen = AppScreen.LOAD_GAME },
+                    loadGameEnabled = savedGames.isNotEmpty(),
                     onTutorial = { startTutorial() },
                     tutorialEnabled = true,
                     onBack = { appScreen = AppScreen.MENU },
+                )
+                AppScreen.LOAD_GAME -> LoadGameScreen(
+                    saves = savedGames,
+                    onPick = { startSavedGame(it) },
+                    onDelete = { confirmDeleteSave(it) },
+                    onBack = { appScreen = AppScreen.SINGLE_PLAYER },
                 )
                 AppScreen.QUICK_GAME -> QuickGameScreen(
                     presets = presets,
@@ -374,7 +393,7 @@ class MainActivity : AppCompatActivity() {
             // invisible, which is how "Host over Bluetooth" came to do nothing
             // at all when the radio was switched off.
             if (appScreen == AppScreen.SINGLE_PLAYER || appScreen == AppScreen.QUICK_GAME ||
-                appScreen == AppScreen.MULTIPLAYER
+                appScreen == AppScreen.MULTIPLAYER || appScreen == AppScreen.LOAD_GAME
             ) {
                 HudDialogHost(hudState.dialog)
             }
@@ -552,6 +571,39 @@ class MainActivity : AppCompatActivity() {
      * writing a second "forget everything" path that would need to stay in
      * step with the first.
      */
+    /**
+     * Deleting a save asks first - it is the one action on these menus that
+     * destroys something, and there is no undoing it.
+     */
+    private fun confirmDeleteSave(save: SavedGame) {
+        hudState.dialog = HudDialog.ListChoice(
+            title = "Delete this saved game?",
+            items = listOf("Yes, delete it"),
+            cancelLabel = "Keep it",
+            onSelect = {
+                val deleted = NativeBridge.deleteSavedGame(save.name)
+                if (!deleted) notifyPlayer("Couldn't delete that save")
+                savedGames = parseSavedGames(NativeBridge.listSavedGames())
+                hudState.dialog = HudDialog.None
+                // Nothing left to show, so this screen has nothing to be.
+                if (savedGames.isEmpty()) appScreen = AppScreen.SINGLE_PLAYER
+            },
+            onCancel = { hudState.dialog = HudDialog.None },
+        )
+    }
+
+    /**
+     * Resume a save: the same path a fresh game takes - the GL surface, then
+     * the host coroutine - with the file named for [startAsHost] to load
+     * instead of building a new game.
+     */
+    private fun startSavedGame(save: SavedGame) {
+        if (gameJob != null) return
+        savedGameToLoad = save.name
+        hostOverBluetooth = false
+        startGame()
+    }
+
     private fun startGame() {
         if (gameJob != null) return
 
@@ -1266,6 +1318,7 @@ class MainActivity : AppCompatActivity() {
         }
         hudState.reset()
         lockedMoveId = 0
+        savedGameToLoad = null
         tutorial = null
         music?.setState(MusicPlayer.State.WAIT)
         aimSeeded = false
@@ -1276,8 +1329,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun CoroutineScope.startAsHost() {
-        hudState.statusText = "Starting local game..."
-        val gameOk = withContext(Dispatchers.Default) { NativeBridge.startLocalGame(hostOverBluetooth) }
+        val save = savedGameToLoad
+        hudState.statusText = if (save == null) "Starting local game..." else "Loading saved game..."
+        val gameOk = withContext(Dispatchers.Default) {
+            // A loaded game is a hosted game in every other respect - the
+            // difference is only where the options, the landscape and the
+            // players come from, and that is decided inside the engine.
+            if (save == null) {
+                NativeBridge.startLocalGame(hostOverBluetooth)
+            } else {
+                NativeBridge.startLoadedGame(save)
+            }
+        }
         if (!gameOk) {
             hudState.statusText = "Failed to start local game (see logcat)"
             return

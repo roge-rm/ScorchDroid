@@ -2491,6 +2491,21 @@ namespace
 	{
 		if (groundTextureBuilt) return;
 
+		// Nothing to build from yet. This gets one attempt per landscape -
+		// see groundTextureBuilt below, which latches whether the build
+		// worked or not - so an attempt made before the heightmap exists
+		// would pin an empty texture in place for the whole round, and the
+		// ground would draw black under a perfectly good sky.
+		//
+		// A game started from the setup screen never sees that: its level is
+		// generated before the first frame. A *loaded* game does, because the
+		// server comes up from the save file first and the landscape arrives
+		// with the round after it. buildTerrainIfNeeded has guarded the same
+		// way all along, which is why the shape was right while the colour
+		// was not.
+		HeightMap &heightMap = ctx.getLandscapeMaps().getGroundMaps().getHeightMap();
+		if (heightMap.getMapWidth() <= 0 || heightMap.getMapHeight() <= 0) return;
+
 		if (!groundJobRunning) {
 			// Sun lighting and terrain self-shadowing are baked in - before
 			// the upload, exactly where upstream does it (Landscape.cpp,
@@ -2512,6 +2527,21 @@ namespace
 			groundJobRunning = true;
 			LOGI("Ground texture: building %dx%d on a worker%s", groundJob.size, groundJob.size,
 				 groundJob.bake ? " with the light map" : "");
+			// What it is building *from*. A texture can come out black for
+			// several reasons that look identical on screen - no texture
+			// definition at all, layer images that did not load, a sun
+			// below the horizon - and this is the line that tells them
+			// apart without a second build.
+			LOGI("Ground texture inputs: type=%d map=%dx%d tex0=\"%s\" rockside=\"%s\" file=\"%s\" "
+				 "sun=(%.1f,%.1f,%.1f) ambience=(%.2f,%.2f,%.2f) diffuse=(%.2f,%.2f,%.2f)",
+				 groundJob.inputs.textureType,
+				 groundJob.inputs.map.width, groundJob.inputs.map.height,
+				 groundJob.inputs.texture0.c_str(), groundJob.inputs.rockside.c_str(),
+				 groundJob.inputs.texture.c_str(),
+				 groundJob.inputs.sunPosition[0], groundJob.inputs.sunPosition[1],
+				 groundJob.inputs.sunPosition[2],
+				 groundJob.inputs.ambience[0], groundJob.inputs.ambience[1], groundJob.inputs.ambience[2],
+				 groundJob.inputs.diffuse[0], groundJob.inputs.diffuse[1], groundJob.inputs.diffuse[2]);
 			groundThread = std::thread([]() {
 				// Everything below reads only the job's own copies.
 				LandscapeTextureBuilder::Inputs inputs;

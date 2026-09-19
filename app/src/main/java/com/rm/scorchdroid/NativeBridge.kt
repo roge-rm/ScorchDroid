@@ -140,6 +140,22 @@ object NativeBridge {
     external fun useDefense(accessoryId: Int, change: Int): Boolean
 
     /**
+     * Resume a saved game. Like [startLocalGame] this device becomes the
+     * host, but the options, the landscape and the players all come out of
+     * the file. Mutually exclusive with the other two starts.
+     */
+    external fun startLoadedGame(name: String): Boolean
+
+    /** Throw a saved game away. The name comes from [listSavedGames]. */
+    external fun deleteSavedGame(name: String): Boolean
+
+    /**
+     * The saved games on this device, newest first:
+     * `"name|epochSeconds|bytes"`. See [parseSavedGames].
+     */
+    external fun listSavedGames(): Array<String>
+
+    /**
      * Write the game out, answering with the file name it went to, or "" if
      * it could not. Only a game this device hosts can be saved - the save is
      * the server's own state - and only while it is playing or scoring,
@@ -699,6 +715,23 @@ data class PlayerEntry(
     /** M16: path to this player's avatar image, relative to the data root. */
     val avatar: String,
 )
+
+/** One saved game on this device - see [NativeBridge.listSavedGames]. */
+data class SavedGame(
+    val name: String,
+    val savedAtSeconds: Long,
+    val bytes: Long,
+)
+
+fun parseSavedGames(rows: Array<String>): List<SavedGame> = rows.mapNotNull { row ->
+    val parts = row.split("|")
+    if (parts.size != 3) return@mapNotNull null
+    SavedGame(
+        name = parts[0],
+        savedAtSeconds = parts[1].toLongOrNull() ?: return@mapNotNull null,
+        bytes = parts[2].toLongOrNull() ?: 0L,
+    )
+}
 
 /** One player this tank may gift money to - see [NativeBridge.getGiftTargets]. */
 data class GiftTarget(
