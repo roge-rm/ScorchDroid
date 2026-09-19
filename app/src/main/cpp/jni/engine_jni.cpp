@@ -81,6 +81,8 @@ std::mutex g_engineMutex;
 // wind indicator - see useDefense()/getWindInfo() below.
 #include <coms/ComsDefenseMessage.hpp>
 #include <simactions/TankDefenseSimAction.hpp>
+#include <coms/ComsGiftMoneyMessage.hpp>
+#include <simactions/TankGiftSimAction.hpp>
 #include <engine/Wind.hpp>
 #include <target/TargetShield.hpp>
 #include <target/TargetParachute.hpp>
@@ -788,6 +790,86 @@ Java_com_rm_scorchdroid_NativeBridge_useDefense(JNIEnv *env, jobject /* this */,
     if (g_mode == EngineMode::kHost) {
         TankDefenseSimAction *simAction = new TankDefenseSimAction(message);
         ScorchedServer::instance()->getServerSimulator().addSimulatorAction(simAction);
+        return JNI_TRUE;
+    }
+    return g_clientContext->sendGameMessage(message) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Who this player may gift money to, one row each:
+// "playerId|name|money|r,g,b". Empty whenever a gift would be refused, so
+// the UI can ask one question - "is there anyone to give money to?" - and
+// get both the answer and the list.
+//
+// Upstream's own rules decide the list, not this port's. Its GiftMoneyDialog
+// offers the tanks on your own team that are playing, excluding yourself,
+// and TankGiftSimAction::invokeAction enforces the same thing on arrival -
+// which in a game with no teams means everyone, since every tank is then on
+// team 0. The phase gate is your own tank's state rather than the server's:
+// sBuying is what ServerGiftMoneyHandler checks, and it reads correctly in a
+// joined game too, where the server state is not ours to see.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_rm_scorchdroid_NativeBridge_getGiftTargets(JNIEnv *env, jobject /* this */) {
+    std::vector<std::string> rows;
+    {
+        std::lock_guard<std::mutex> lock(g_engineMutex);
+        ScorchedContext *ctx = activeContext();
+        Tank *myTank = findMyTank();
+        if (ctx && myTank && myTank->getState().getState() == TankState::sBuying) {
+            std::map<unsigned int, Tank *> &tanks = ctx->getTargetContainer().getTanks();
+            for (auto &entry : tanks) {
+                Tank *tank = entry.second;
+                if (tank == myTank) continue;
+                if (!tank->getState().getTankPlaying()) continue;
+                if (tank->getTeam() != myTank->getTeam()) continue;
+
+                Vector &colour = tank->getColor();
+                std::ostringstream row;
+                row << tank->getPlayerId() << "|"
+                    << tank->getCStrName() << "|"
+                    << tank->getScore().getMoney() << "|"
+                    << (int) (colour[0] * 255.0f) << ","
+                    << (int) (colour[1] * 255.0f) << ","
+                    << (int) (colour[2] * 255.0f);
+                rows.push_back(row.str());
+            }
+        }
+    }
+
+    jobjectArray result = env->NewObjectArray((jsize) rows.size(), env->FindClass("java/lang/String"), nullptr);
+    for (size_t i = 0; i < rows.size(); i++) {
+        env->SetObjectArrayElement(result, (jsize) i, env->NewStringUTF(rows[i].c_str()));
+    }
+    return result;
+}
+
+// Hand money to another player. The same host/client fork every other player
+// action here takes: the host queues the simulator action the server would
+// have queued on receiving the message, a client sends the message and lets
+// the host do it.
+//
+// The checks that decide whether the gift is fair are upstream's own, inside
+// TankGiftSimAction::invokeAction - both tanks playing, same team, not
+// yourself, not more than you hold - and they run on whichever side ends up
+// invoking the action. What is repeated here is only the phase gate
+// ServerGiftMoneyHandler applies before queuing, which is the same thing
+// submitMove already repeats for a move.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_rm_scorchdroid_NativeBridge_giftMoney(JNIEnv *env, jobject /* this */,
+                                               jint toPlayerId, jint amount) {
+    if (amount <= 0 || toPlayerId <= 0) return JNI_FALSE;
+
+    std::lock_guard<std::mutex> lock(g_engineMutex);
+    Tank *tank = findMyTank();
+    if (!tank) return JNI_FALSE;
+    if (tank->getState().getState() != TankState::sBuying) return JNI_FALSE;
+
+    ComsGiftMoneyMessage message((unsigned int) tank->getPlayerId(),
+                                 (unsigned int) toPlayerId,
+                                 (int) amount);
+    if (g_mode == EngineMode::kHost) {
+        TankGiftSimAction *simAction = new TankGiftSimAction(message);
+        ScorchedServer::instance()->getServerSimulator().addSimulatorAction(simAction);
+        LOGI("giftMoney: %u -> %d, $%d", tank->getPlayerId(), (int) toPlayerId, (int) amount);
         return JNI_TRUE;
     }
     return g_clientContext->sendGameMessage(message) ? JNI_TRUE : JNI_FALSE;

@@ -132,6 +132,14 @@ sealed class HudDialog {
         entries: List<WeaponShopEntry>,
         val onSelect: (WeaponShopEntry) -> Unit,
         val onCancel: () -> Unit,
+        /**
+         * Upstream hangs its gift-money dialog off a button inside the buy
+         * dialog (BuyAccessoryDialog), which is the only phase a gift is
+         * allowed in anyway. Null when there is nobody to give money to, or
+         * when this is not the buying phase, and the button is then absent
+         * rather than present and refusing.
+         */
+        val onGift: (() -> Unit)? = null,
     ) : HudDialog() {
         var money by mutableIntStateOf(money)
         var entries by mutableStateOf(entries)
@@ -389,7 +397,12 @@ fun HudDialogHost(dialog: HudDialog) {
             onDismissRequest = dialog.onCancel,
             title = { Text("Shop - \$${dialog.money}") },
             text = { ShopContent(dialog) },
-            confirmButton = {},
+            confirmButton = {
+                val onGift = dialog.onGift
+                if (onGift != null) {
+                    TextButton(onClick = onGift) { Text("Gift money...") }
+                }
+            },
             dismissButton = { TextButton(onClick = dialog.onCancel) { Text("Close") } },
         )
 

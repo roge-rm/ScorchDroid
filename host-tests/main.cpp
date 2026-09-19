@@ -17,6 +17,8 @@
 #include <simactions/TankAddSimAction.hpp>
 #include <simactions/TankAccessorySimAction.hpp>
 #include <tankai/TankAIAdder.hpp>
+#include <coms/ComsGiftMoneyMessage.hpp>
+#include <simactions/TankGiftSimAction.hpp>
 #include <target/TargetContainer.hpp>
 #include <tank/Tank.hpp>
 #include <tank/TankScore.hpp>
@@ -845,6 +847,129 @@ namespace
 		server->getSimulator().simulate();
 		check(server->getTargetContainer().getTankById(tank->getPlayerId()) != nullptr,
 			"the server survived all three non-shot moves (routing is well-formed)");
+	}
+
+	// Gifting money to another player (engine_jni.cpp's giftMoney mechanism).
+	//
+	// The rules are entirely upstream's, in TankGiftSimAction::invokeAction:
+	// both tanks playing, the same team, not yourself, not more than you
+	// hold. The port repeats none of them - it queues the same action the
+	// server would queue on receiving ComsGiftMoneyMessage - so what is
+	// pinned here is that each rule still bites through that route, and that
+	// a legal gift really does move the money.
+	void testGiftMoney()
+	{
+		printf("gift money (engine_jni.cpp's giftMoney mechanism):\n");
+
+		ScorchedServer *server = ScorchedServer::instance();
+		ScorchedContext &context = server->getContext();
+
+		// A second tank, added the same way the human one was (see
+		// testHumanTankHasNoAI) - the suite has only one by this point, and
+		// a gift needs somewhere to go.
+		const unsigned int kSecondDestinationId = 2;
+		unsigned int addedTankId = 0;
+		if (server->getTargetContainer().getTanks().size() < 2)
+		{
+			server->getServerDestinations().addDestination(kSecondDestinationId, 0);
+			std::set<unsigned int> takenPlayerIds;
+			addedTankId = TankAIAdder::getNextTankId("", server->getContext(), takenPlayerIds);
+			server->getServerSimulator().addSimulatorAction(new TankAddSimAction(
+				addedTankId, kSecondDestinationId, "", "", "", 0, LANG_STRING("Giftee"), ""));
+			simulateUntil(server, [&] { return server->getTargetContainer().getTankById(addedTankId) != nullptr; },
+				"a second tank to gift to");
+		}
+
+		Tank *from = nullptr, *to = nullptr;
+		std::map<unsigned int, Tank *> &tanks = server->getTargetContainer().getTanks();
+		for (auto &entry : tanks)
+		{
+			Tank *tank = entry.second;
+			if (!from) from = tank;
+			else if (!to) { to = tank; break; }
+		}
+		check(from != nullptr && to != nullptr, "two tanks to gift between");
+		if (!from || !to) return;
+
+		// Both playing, which is what TankGiftSimAction asks of them.
+		// TankState::setState only honours the transitions in its own table,
+		// and a tank added here is sLoading - which reaches sNormal through
+		// sDead, not directly. Going straight at sNormal is silently ignored,
+		// which is what made this test fail the first time.
+		const TankState::State fromState = from->getState().getState();
+		const TankState::State toState = to->getState().getState();
+		for (Tank *tank : { from, to })
+		{
+			if (tank->getState().getState() == TankState::sLoading)
+			{
+				tank->getState().setState(TankState::sDead);
+			}
+			tank->getState().setState(TankState::sNormal);
+		}
+		check(from->getState().getTankPlaying() && to->getState().getTankPlaying(),
+			"both tanks are playing, which is what a gift requires");
+
+		// Same team, which in a game with no teams is what every tank
+		// already is - team 0.
+		const unsigned int fromTeam = from->getTeam(), toTeam = to->getTeam();
+		to->setTeam(fromTeam);
+		from->getScore().setMoney(10000);
+		to->getScore().setMoney(500);
+
+		{
+			ComsGiftMoneyMessage message(from->getPlayerId(), to->getPlayerId(), 2500);
+			TankGiftSimAction action(message);
+			action.invokeAction(context);
+			check(from->getScore().getMoney() == 7500 && to->getScore().getMoney() == 3000,
+				"a legal gift moves the money out of one tank and into the other");
+		}
+
+		{
+			// More than the sender holds: upstream drops it whole rather
+			// than giving what there is.
+			const int before = from->getScore().getMoney();
+			ComsGiftMoneyMessage message(from->getPlayerId(), to->getPlayerId(), before + 1);
+			TankGiftSimAction action(message);
+			action.invokeAction(context);
+			check(from->getScore().getMoney() == before,
+				"a gift larger than the sender's money is refused outright");
+		}
+
+		{
+			const int before = from->getScore().getMoney();
+			ComsGiftMoneyMessage message(from->getPlayerId(), from->getPlayerId(), 100);
+			TankGiftSimAction action(message);
+			action.invokeAction(context);
+			check(from->getScore().getMoney() == before, "a gift to yourself is refused");
+		}
+
+		{
+			// The one rule that only shows itself in a team game.
+			to->setTeam(fromTeam + 1);
+			const int beforeFrom = from->getScore().getMoney();
+			const int beforeTo = to->getScore().getMoney();
+			ComsGiftMoneyMessage message(from->getPlayerId(), to->getPlayerId(), 100);
+			TankGiftSimAction action(message);
+			action.invokeAction(context);
+			check(from->getScore().getMoney() == beforeFrom && to->getScore().getMoney() == beforeTo,
+				"a gift across teams is refused");
+		}
+
+		to->setTeam(toTeam);
+		from->getState().setState(fromState);
+		to->getState().setState(toState);
+
+		// Put the roster back. The tests after this one share this server,
+		// and testClientJoin hands a real client process the next free
+		// destination - a spare tank and a registered destination left lying
+		// here got that client disconnected by the host, which is exactly
+		// what happened the first time this test ran.
+		if (addedTankId != 0)
+		{
+			Target *added = server->getTargetContainer().removeTarget(addedTankId);
+			delete added;
+			server->getServerDestinations().removeDestination(kSecondDestinationId);
+		}
 	}
 
 	// M6: proof that terrain destruction is already live in our build, not
@@ -4687,6 +4812,7 @@ int main(int argc, char **argv)
 	testGameMessagesReachTheChatLog();
 	testDefenseAccessories();
 	testNonShotMoves();
+	testGiftMoney();
 	testTerrainDeformation();
 	testCameraPickRay();
 	testSkyDescription();
