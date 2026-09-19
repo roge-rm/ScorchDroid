@@ -983,6 +983,12 @@ Java_com_rm_scorchdroid_NativeBridge_setCountdownSound(JNIEnv *, jobject, jboole
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_rm_scorchdroid_NativeBridge_setTurnSound(JNIEnv *, jobject, jboolean on) {
+    ScorchDroidAudio::turnSoundEnabled = (on == JNI_TRUE);
+    LOGI("Turn sound: %s", ScorchDroidAudio::turnSoundEnabled ? "on" : "off");
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_rm_scorchdroid_NativeBridge_setChatSound(JNIEnv *, jobject, jboolean on) {
     ScorchDroidAudio::chatSoundEnabled = (on == JNI_TRUE);
     LOGI("Chat sound: %s", ScorchDroidAudio::chatSoundEnabled ? "on" : "off");
@@ -1379,7 +1385,7 @@ static void trackPhaseTime(ScorchedServer *server, fixed frameTime)
         // comment calls it "a new game is commencing" and is wrong: the
         // action it hangs off is a tank's move starting, so it is the sound
         // of your turn. Relative and eText, exactly as upstream plays it.
-        if (moveId != 0 && moveId != g_lastMoveId) {
+        if (moveId != 0 && moveId != g_lastMoveId && ScorchDroidAudio::turnSoundEnabled) {
             ScorchDroidAudio::pushSoundEvent(
                 S3D::getModFile("data/wav/misc/play.wav"), ScorchDroidAudio::kPriorityText);
         }

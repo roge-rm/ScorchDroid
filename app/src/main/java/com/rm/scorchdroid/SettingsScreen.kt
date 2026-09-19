@@ -185,6 +185,11 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.countdownSound,
                         ) { settings.updateCountdownSound(it) }
                         SwitchRow(
+                            "Turn sound",
+                            "The cue when it becomes your move",
+                            settings.turnSound,
+                        ) { settings.updateTurnSound(it) }
+                        SwitchRow(
                             "Message sound",
                             "The blip when a message arrives",
                             settings.chatSound,

@@ -45,6 +45,13 @@ namespace ScorchDroidAudio
 	// on, as upstream's do.
 	extern bool countdownSoundEnabled;
 	extern bool chatSoundEnabled;
+
+	// And one upstream does not have: the cue when a move of yours is
+	// granted (misc/play.wav). Upstream gives it no switch of its own, but
+	// it is the one sound here that plays every single round, so it gets
+	// the same treatment as its two neighbours rather than being silenced
+	// only by turning the game quiet.
+	extern bool turnSoundEnabled;
 	const int kDefaultSoundChannels = 8;
 
 	// Upstream's VirtualSoundSource constructor defaults. Every sound but

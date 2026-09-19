@@ -387,6 +387,13 @@ object NativeBridge {
     external fun setChatSound(on: Boolean)
 
     /**
+     * The cue when a move of yours is granted (`misc/play.wav`). Upstream has
+     * no switch for this one - it is the port's, because that sound plays
+     * every round and some people will want it gone without going quiet.
+     */
+    external fun setTurnSound(on: Boolean)
+
+    /**
      * Whether a tank wears its name and its health bar. They reach the
      * renderer rather than the HUD now that it draws the plates itself.
      */
