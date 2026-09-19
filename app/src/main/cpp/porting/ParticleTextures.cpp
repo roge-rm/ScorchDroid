@@ -13,6 +13,46 @@ namespace
 {
 	using namespace ScorchDroidParticleTextures;
 
+	// Every particle here is drawn small at least some of the time, and a
+	// small quad samples a high mip level - where the hardware has averaged
+	// the layer's colour *without* regard to its alpha. A sprite whose
+	// transparent texels carry black RGB therefore turns grey and then
+	// almost black as it shrinks, and since a whole mip texel is one flat
+	// colour it lands on screen as a hard little square rather than a soft
+	// dot.
+	//
+	// That is exactly what rain and snow looked like: upstream's own white
+	// specks, drawn as dark squares scattered across the sky, because they
+	// are 0.2 units across and never sample anything but the small mips.
+	//
+	// So the colour under the transparency is filled in with the average of
+	// what is actually visible in the layer. Alpha still decides what shows;
+	// this only stops the averaging from dragging the colour somewhere the
+	// sprite never was. (The alternative is premultiplied alpha, which would
+	// mean changing the blend of every particle pass; this is the same fix
+	// confined to the data.)
+	void bleedColourIntoTransparency(unsigned char *layer)
+	{
+		long sumR = 0, sumG = 0, sumB = 0;
+		long visible = 0;
+		for (int i = 0; i < kSize * kSize; i++) {
+			const unsigned char *texel = layer + (size_t) i * 4;
+			if (texel[3] == 0) continue;
+			sumR += texel[0]; sumG += texel[1]; sumB += texel[2];
+			visible++;
+		}
+		if (visible == 0) return;
+
+		const unsigned char r = (unsigned char) (sumR / visible);
+		const unsigned char g = (unsigned char) (sumG / visible);
+		const unsigned char b = (unsigned char) (sumB / visible);
+		for (int i = 0; i < kSize * kSize; i++) {
+			unsigned char *texel = layer + (size_t) i * 4;
+			if (texel[3] != 0) continue;
+			texel[0] = r; texel[1] = g; texel[2] = b;
+		}
+	}
+
 	// Nearest resample of one image into a 128-square RGBA layer. Sizes
 	// upstream ships: explosions 128, smoke and ring 64, the particle 32.
 	void appendLayer(Atlas &atlas, Image &image)
@@ -36,6 +76,7 @@ namespace
 					: src[0];
 			}
 		}
+		bleedColourIntoTransparency(dst);
 		atlas.layers++;
 	}
 
