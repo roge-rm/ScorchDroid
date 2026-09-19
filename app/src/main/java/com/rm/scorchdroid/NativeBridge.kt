@@ -142,9 +142,10 @@ object NativeBridge {
     /**
      * Resume a saved game. Like [startLocalGame] this device becomes the
      * host, but the options, the landscape and the players all come out of
-     * the file. Mutually exclusive with the other two starts.
+     * the file. [overBluetooth] picks the transport it comes back on, which
+     * the save says nothing about. Mutually exclusive with the other starts.
      */
-    external fun startLoadedGame(name: String): Boolean
+    external fun startLoadedGame(name: String, overBluetooth: Boolean): Boolean
 
     /** Throw a saved game away. The name comes from [listSavedGames]. */
     external fun deleteSavedGame(name: String): Boolean
