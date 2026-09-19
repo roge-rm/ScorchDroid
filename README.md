@@ -6,7 +6,10 @@ It is built on [bberberov/scorched3d](https://github.com/bberberov/scorched3d), 
 
 This port uses Scorched3D's ballistics, weapons, terrain deformation, economy, AI, and network protocol code along with the original rules. The interface is fresh, made with Jetpack Compose and OpenGLES3 designed for a touch phone screen instead of a PC with mouse and keyboard. 
 
-At this point I am very close to a 1.0.0 stable release, I just have to do some checking through the Scorched3D code to see what we missed (like the mini map).
+This is 1.0.0. Every subsystem has now been checked through the Scorched3D code feature by feature -
+the ground, the water, the wind, the whole 3D scene, the client layer and the audio - and what that
+turned up is either built or written down as a deliberate departure; the reviews live in `docs/`.
+The mini map is in, and so is drawing on it.
 
 A little bonus - you can join PC hosted games of Scorched3D so long as they are version 44. 
 
@@ -59,7 +62,14 @@ Cheers, enjoy! roge-rm
   arrive in the same place.
 - Admin controls for whoever is hosting: kick, ban, mute, slap, take a player's money, kill, start
   a new game or clear the map.
-- The full shop: weapons and defensive accessories, with purchases acknowledged immediately.
+- The full shop: weapons and defensive accessories, with purchases acknowledged immediately - and
+  Scorched3D's own gift of money to another player, from the same screen it keeps it in.
+- Save a game you are hosting and pick it up later, solo or with other people; the saves list its
+  own, newest first, and a bin beside each one.
+- Skip all your moves at once when you have to walk away, with a five-second countdown each turn
+  that lets you take it back.
+- Hold a tank's name plate for its card: life, shield, lives, score, skill and rank, the same lines
+  Scorched3D shows when you rest the mouse on a tank.
 - A main menu — single player, multiplayer, and an About screen carrying the GPL notice and the
   exact upstream commit the build came from. Games can be left and started again without
   restarting the app.
