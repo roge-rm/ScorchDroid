@@ -9,6 +9,10 @@ Sources are upstream's `src/client` rendering tree (`sky`, `landscape`,
 The HUD, dialogs, fonts and menus are UI, not scene, and are out of scope
 here; so are sound and music.
 
+**Closed 2026-09-19.** Every V-number is built or deliberately not built; see
+the closing section at the end of the plan. The two device observations below
+it are records, not open plan items.
+
 Status words: **match** = same method and numbers; **close** = same effect,
 different means, no visible difference expected; **gap** = visibly
 different; **missing** = not drawn at all.
@@ -512,6 +516,42 @@ shake to about six. At 60fps nothing clamps.
 Verification per step: emulator smoke for shader compile; screenshots
 against PC captures dan can take of the same map, which is the only
 judge of "identical".
+
+## Closed - 2026-09-19
+
+| Item | Disposition |
+|---|---|
+| V1 textured, animated particles | done 2026-09-09, acc9ae0 |
+| V2 textured models | done 2026-09-09, the commit after e3b6717 |
+| V3 model lighting and materials | done 2026-09-09, with V2 |
+| V4 laser | done 2026-09-14, 9831265 and 004c9d3 |
+| V4 lightning | built 2026-09-14, never yet seen in play |
+| V5 shield textures | done 2026-09-14, 6143b54 |
+| V6 second cloud layer on a dome | done 2026-09-14, 0da8705 |
+| V7 recoil | measured and reverted, c15322b - not worth building |
+| V8 arena wall | done 2026-09-14, 493bfa6 |
+| V9 tank arrow | done 2026-09-14, c20f562 |
+| V10 camera shake | done 2026-09-14, 1266c45 |
+| Sky line, mesh LOD, live-wind sea | not planned, for the reasons above |
+
+One thing is built but unwitnessed: **V4's lightning**. Nothing shipped in the
+base mod fires it often, so it has compiled and drawn without anyone yet
+confirming it on screen. That is worth a sighting when a weapon that uses it
+comes up - it is not worth holding a plan open for.
+
+What closing does *not* claim is that nothing about the picture is ever
+surprising again. The two sections that follow are records of what was seen on
+real devices and what was ruled out, kept here because that is where the
+measurements live:
+
+- **Banded water on a Titan Pocket** - not seen since the `textureLod` mip fix,
+  with three cheap tests written down for if it returns.
+- **The pale sky** - every term measured against upstream and each matches, but
+  no capture pair yet taken can separate a real difference from a difference in
+  where the camera was pointed.
+
+Neither blocks anything. If either returns it reopens on its own terms rather
+than as a step of this plan.
 
 ## Open: banded water on a Unihertz Titan Pocket (2026-09-11)
 
