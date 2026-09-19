@@ -8,6 +8,7 @@ namespace ScorchDroidAudio
 	int soundChannels = kDefaultSoundChannels;
 	bool countdownSoundEnabled = true;
 	bool chatSoundEnabled = true;
+	bool turnSoundEnabled = true;
 
 	namespace
 	{

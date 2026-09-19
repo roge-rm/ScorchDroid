@@ -183,6 +183,19 @@ class GameSettings(context: Context) {
         NativeBridge.setCountdownSound(value)
     }
 
+    /**
+     * The turn cue. Not one of upstream's - it has no switch for play.wav -
+     * but it is the sound here that plays most often, so it gets one.
+     */
+    var turnSound by mutableStateOf(prefs.getBoolean(KEY_TURN_SOUND, true))
+        private set
+
+    fun updateTurnSound(value: Boolean) {
+        turnSound = value
+        prefs.edit().putBoolean(KEY_TURN_SOUND, value).apply()
+        NativeBridge.setTurnSound(value)
+    }
+
     var chatSound by mutableStateOf(prefs.getBoolean(KEY_CHAT_SOUND, true))
         private set
 
@@ -458,6 +471,7 @@ class GameSettings(context: Context) {
         NativeBridge.setShadowDetail(shadowDetail)
         NativeBridge.setCountdownSound(countdownSound)
         NativeBridge.setChatSound(chatSound)
+        NativeBridge.setTurnSound(turnSound)
         NativeBridge.setShowNamePlates(showNamePlates)
         NativeBridge.setShowHealthBars(showHealthBars)
         NativeBridge.setShowTankArrows(showTankArrows)
@@ -479,6 +493,7 @@ class GameSettings(context: Context) {
         const val KEY_TANK_INFO = "hud.tankInfo"
         const val KEY_COUNTDOWN_SOUND = "sound.countdown"
         const val KEY_CHAT_SOUND = "sound.chat"
+        const val KEY_TURN_SOUND = "sound.turn"
         const val KEY_TOAST = "hud.chatToastSeconds"
         const val KEY_INVERT = "controls.invertDrag"
         const val KEY_TAP_AIM = "controls.tapToAim"

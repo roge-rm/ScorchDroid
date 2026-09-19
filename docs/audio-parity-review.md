@@ -112,6 +112,7 @@ its own switch and volume (M21).
 | `NoCountDownSound` | "Countdown beeps" switch (A6) |
 | `NoChannelTextSound` | "Message sound" switch (A6) |
 | `NoBoidSound` | confirmed non-gap: it is `depricatedNoBoidSound_` upstream and nothing reads it |
+| *(none)* | "Turn sound" — the port's own, by dan's ask. `play.wav` is the sound heard most often here, once every round, and upstream gives it no switch; this is a client-only change and touches nothing the engine or the wire sees |
 
 Music has a switch and a volume here, which upstream keeps in `music.xml`'s
 gains rather than in options.
