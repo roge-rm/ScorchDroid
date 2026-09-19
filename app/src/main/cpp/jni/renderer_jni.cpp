@@ -787,7 +787,8 @@ namespace
 	struct ProjectileLoop {
 		std::string key;    // stable while this shell is in the air
 		std::string file;
-		float x = 0.0f, y = 0.0f, z = 0.0f;   // engine space
+		float x = 0.0f, y = 0.0f, z = 0.0f;      // engine space
+		float vx = 0.0f, vy = 0.0f, vz = 0.0f;   // and how fast, for A5
 	};
 	std::mutex g_projectileLoopMutex;
 	std::vector<ProjectileLoop> g_projectileLoops;
@@ -798,6 +799,15 @@ namespace
 	// hold their channels for the whole flight.
 	const float kProjectileEngineGain = 0.25f;
 	const int   kMaxProjectileLoops   = 4;
+
+	// A5: OpenAL's own defaults, which upstream never changes - the speed of
+	// sound in world units a second, and the doppler factor. Note what
+	// upstream does *not* do: SoundListener::setVelocity is commented out
+	// ("to prevent linux crackling sounds"), so only the source's own
+	// velocity shifts a pitch there. Matching that is both simpler and more
+	// faithful than computing a listener term upstream throws away.
+	const float kSpeedOfSound  = 343.3f;
+	const float kDopplerFactor = 1.0f;
 
 	// The one thing this renderer still cannot do for itself is *text*:
 	// upstream has a GL font atlas here and the port has none. So the UI
@@ -7446,6 +7456,11 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			loop.x = shotPositionsRaw[i][0].asFloat();
 			loop.y = shotPositionsRaw[i][1].asFloat();
 			loop.z = shotPositionsRaw[i][2].asFloat();
+			if (i < shotVelocities.size()) {
+				loop.vx = shotVelocities[i][0].asFloat();
+				loop.vy = shotVelocities[i][1].asFloat();
+				loop.vz = shotVelocities[i][2].asFloat();
+			}
 			loops.push_back(loop);
 		}
 		std::lock_guard<std::mutex> lock(g_projectileLoopMutex);
@@ -10109,9 +10124,32 @@ Java_com_rm_scorchdroid_GameRenderer_nativeGetSoundLoops(JNIEnv *env, jobject) {
 		const float pan = ScorchDroidAudio::panForPosition(
 			loop.x, loop.y, loop.z, haveListener, lx, ly, lz, rx, ry, rz);
 
+		// A5: OpenAL's doppler shift, with the listener term upstream leaves
+		// switched off. SL is the source-to-listener direction and vss the
+		// shell's speed along it, so a shell coming at you raises its pitch
+		// and one going away drops it:
+		//
+		//   f' = f * (c - DF*vls) / (c - DF*vss), with vls = 0
+		//
+		// Clamped to the rate SoundPool will take, which is also a guard
+		// against the denominator going through zero for a shell travelling
+		// at the speed of sound.
+		float rate = 1.0f;
+		if (haveListener) {
+			const float sx = lx - loop.x, sy = ly - loop.y, sz = lz - loop.z;
+			const float length = sqrtf(sx * sx + sy * sy + sz * sz);
+			if (length > 0.001f) {
+				const float vss =
+					(sx * loop.vx + sy * loop.vy + sz * loop.vz) / length;
+				const float denominator = kSpeedOfSound - kDopplerFactor * vss;
+				if (denominator > 1.0f) rate = kSpeedOfSound / denominator;
+			}
+			rate = std::min(2.0f, std::max(0.5f, rate));
+		}
+
 		char buffer[512];
-		snprintf(buffer, sizeof(buffer), "%s|%s|%.4f|%.3f",
-				 loop.key.c_str(), loop.file.c_str(), gain, pan);
+		snprintf(buffer, sizeof(buffer), "%s|%s|%.4f|%.3f|%.3f",
+				 loop.key.c_str(), loop.file.c_str(), gain, pan, rate);
 		Row row;
 		row.gain = gain;
 		row.text = buffer;

@@ -200,7 +200,14 @@ object SoundPlayer {
      * beat late is worse than not starting it. The one-shot that accompanies
      * it warms the cache anyway.
      */
-    fun startLoop(key: String, filePath: String, gain: Float, priority: Int, pan: Float = 0f) {
+    fun startLoop(
+        key: String,
+        filePath: String,
+        gain: Float,
+        priority: Int,
+        pan: Float = 0f,
+        rate: Float = 1f,
+    ) {
         if (!enabled) return
         val soundPool = poolOrCreate()
         synchronized(sampleIds) {
@@ -215,7 +222,9 @@ object SoundPlayer {
             if (!loaded.contains(sampleId)) return
             val (left, right) = stereo(gain, pan)
             val streamPriority = priority + (gain.coerceIn(0f, 1f) * 99f).toInt()
-            val stream = soundPool.play(sampleId, left, right, streamPriority, -1, 1.0f)
+            val stream = soundPool.play(
+                sampleId, left, right, streamPriority, -1, rate.coerceIn(0.5f, 2f),
+            )
             if (stream != 0) loopStreams[key] = stream
         }
     }
@@ -278,11 +287,14 @@ object SoundPlayer {
      * frame. Does nothing for a key that is not playing, which is how a
      * caller can update without tracking what started.
      */
-    fun updateLoop(key: String, gain: Float, pan: Float) {
+    fun updateLoop(key: String, gain: Float, pan: Float, rate: Float = 1f) {
         synchronized(sampleIds) {
             val stream = loopStreams[key] ?: return
             val (left, right) = stereo(gain, pan)
             pool?.setVolume(stream, left, right)
+            // A5: the doppler shift of a shell that is still travelling -
+            // computed where the listener is, see nativeGetSoundLoops.
+            pool?.setRate(stream, rate.coerceIn(0.5f, 2f))
         }
     }
 
