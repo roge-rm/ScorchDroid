@@ -25,6 +25,15 @@ RUN apt-get update \
 WORKDIR /src
 COPY . /src
 
+# Every submodule's .git is a *file* pointing into the superproject's
+# .git/modules, and git apply refuses to run beside a pointer it cannot
+# follow. .dockerignore keeps these out of a local context; a remote git
+# context (dedicated-server/docker-compose.yml builds straight from the
+# repository URL) is checked out by the builder instead, which fetches the
+# submodules and then drops the superproject's .git - leaving exactly those
+# dangling pointers behind. Removing them here covers both.
+RUN find /src -maxdepth 3 -name .git -exec rm -rf {} +
+
 # dedicated-server/ is its own CMake project precisely so a server image
 # never compiles host-tests' 5000-line test binary.
 RUN cmake -S dedicated-server -B /build -DCMAKE_BUILD_TYPE=Release \
