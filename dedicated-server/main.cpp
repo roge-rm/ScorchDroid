@@ -76,6 +76,12 @@ namespace
 		std::string seedConfig   = DEDICATED_SERVER_XML_PATH;
 		std::string controlSocket;
 		std::string serverName;
+		// Whether the name came from --name rather than the environment.
+		// An explicit flag always wins; the environment only seeds a
+		// config that did not exist yet, so a rename from the web admin is
+		// not undone at the next restart by a variable in a .env file
+		// nobody has looked at since installing.
+		bool        serverNameIsExplicit = false;
 		int         port         = 0;  // 0 = whatever the config says
 		bool        dumpOptions  = false;
 		bool        quiet        = false;
@@ -107,7 +113,9 @@ namespace
 			"                           (SCORCHDROID_SEED_CONFIG).\n"
 			"  --control-socket PATH    Unix socket for the web admin\n"
 			"                           (SCORCHDROID_CONTROL_SOCKET). Off unless set.\n"
-			"  --name NAME              Server name (SCORCHDROID_SERVER_NAME).\n"
+			"  --name NAME              Server name. The environment's\n"
+			"                           SCORCHDROID_SERVER_NAME only names a config\n"
+			"                           being created; this always wins.\n"
 			"  --quiet                  Do not print the periodic status line.\n"
 			"  --dump-options           Print every server option as JSON and exit.\n"
 			"  --help                   This text.\n",
@@ -139,7 +147,12 @@ namespace
 			else if (flag == "--state-dir" && hasValue) { settings.stateDir = value; i++; }
 			else if (flag == "--seed" && hasValue) { settings.seedConfig = value; i++; }
 			else if (flag == "--control-socket" && hasValue) { settings.controlSocket = value; i++; }
-			else if (flag == "--name" && hasValue) { settings.serverName = value; i++; }
+			else if (flag == "--name" && hasValue)
+			{
+				settings.serverName = value;
+				settings.serverNameIsExplicit = true;
+				i++;
+			}
 			else if (flag[0] != '-' && atoi(flag.c_str()) > 0)
 			{
 				// The original interface was a bare port number as argv[1].
@@ -274,7 +287,8 @@ int main(int argc, char **argv)
 	// engine_jni.cpp) - found the hard way there too.
 	Logger::addLogger(&g_log);
 
-	if (!fileExists(settings.configPath))
+	const bool freshConfig = !fileExists(settings.configPath);
+	if (freshConfig)
 	{
 		if (!seedConfig(settings.configPath, settings.seedConfig))
 		{
@@ -291,7 +305,14 @@ int main(int argc, char **argv)
 	// does not provide produces a game that loads its landscape and then
 	// waits forever for a bot that can never be created.
 	ScorchDroidSetup::ensureBotsValidForMod(settings.dataRoot);
-	if (!settings.serverName.empty()) ScorchDroidSetup::setAny("ServerName", settings.serverName);
+	// Only on a config this run just created, unless --name said so
+	// outright. Otherwise the config file - which the web admin writes -
+	// is what names the server.
+	if (!settings.serverName.empty() && (freshConfig || settings.serverNameIsExplicit))
+	{
+		ScorchDroidSetup::setAny("ServerName", settings.serverName);
+		ScorchDroidSetup::writeSessionFile(settings.configPath);
+	}
 
 	if (settings.dumpOptions)
 	{

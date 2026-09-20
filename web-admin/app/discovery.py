@@ -41,24 +41,52 @@ class Advertiser:
     def start(self):
         if not self.enabled or self._zeroconf is not None:
             return
+
+        zeroconf = None
         try:
             from zeroconf import ServiceInfo, Zeroconf
 
-            address = socket.inet_aton(_lan_address())
+            address = _lan_address()
             self._info = ServiceInfo(
                 SERVICE_TYPE,
                 self._service_name(),
-                addresses=[address],
+                addresses=[socket.inet_aton(address)],
                 port=self.port,
                 properties={"name": self.name},
             )
-            self._zeroconf = Zeroconf()
-            self._zeroconf.register_service(self._info)
-            LOG.info("Advertising %s on port %s", self._service_name(), self.port)
+            # Bound to the one address players reach this machine on, not
+            # to every interface. With the default (all of them) the
+            # responder hears its own announcement come back on loopback or
+            # a docker bridge, decides the name is taken, and refuses to
+            # register - which is what host networking on a machine with
+            # more than one interface looks like, and it is intermittent,
+            # so it will pass in a quick test and fail in the loop.
+            zeroconf = Zeroconf(interfaces=[address])
+            # And if the name really is taken - a second server on the same
+            # LAN - let it rename itself rather than give up. The phone
+            # shows whatever name answers.
+            zeroconf.register_service(self._info, allow_name_change=True)
+            self._zeroconf = zeroconf
+            LOG.info("Advertising %s on %s:%s", self._info.name, address, self.port)
         except Exception as error:
             # Never fatal. A server nobody can auto-discover is still a
             # server, and the bridge compose file runs this way on purpose.
-            LOG.warning("LAN discovery unavailable (%s) - players can still join by address", error)
+            #
+            # The type matters as much as the message: zeroconf's
+            # NonUniqueNameException carries no text at all, so logging
+            # str(error) alone prints empty brackets and says nothing.
+            LOG.warning(
+                "LAN discovery unavailable (%s: %s) - players can still join by address",
+                type(error).__name__, error or "no detail",
+            )
+            if zeroconf is not None:
+                # Closing it matters: a Zeroconf left open keeps its
+                # threads and its sockets, and the next attempt then
+                # collides with the records this one already put out.
+                try:
+                    zeroconf.close()
+                except Exception:
+                    pass
             self._zeroconf = None
             self._info = None
 
