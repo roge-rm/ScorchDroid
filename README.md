@@ -5,7 +5,7 @@ It uses [bberberov/scorched3d](https://github.com/bberberov/scorched3d) as an up
 
 The entire game engine was ported over from Scorched3D so it plays the same as the original game. The UI has been totally redone but the graphics are ~mostly~ the same. The controls have been adapted to work on a touch screen, with sliders and touch buttons to provide the controls the keyboard used to.
 
-Effort has been made to bring every feature from the desktop game to the mobile port, from graphics to audio to network play. Additional network options have been added, allowing you to play over Bluetooth or Ad-Hoc WIFI networks on top of regular LAN play.
+Effort has been made to bring every feature from the desktop game to the mobile port, from graphics to audio to network play. Additional network options have been added, allowing you to play over Bluetooth or Ad-Hoc WIFI networks on top of regular WLAN play.
 
 Requires Android 8.0 or higher.
 
