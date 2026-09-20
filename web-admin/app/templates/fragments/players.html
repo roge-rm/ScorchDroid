@@ -1,0 +1,36 @@
+{% if status.tanks %}
+<table class="players">
+  <thead>
+    <tr><th>Player</th><th>State</th><th class="num">Life</th><th class="num">Score</th>
+        <th class="num">Kills</th><th class="num">Wins</th><th class="num">Money</th>
+        <th class="num">Ping</th><th>Admin</th></tr>
+  </thead>
+  <tbody>
+  {% for tank in status.tanks %}
+    <tr>
+      <td>{{ tank.name }} {% if tank.bot %}<span class="tag">bot</span>{% endif %}</td>
+      <td>{{ tank.state }}</td>
+      <td class="num">{{ tank.life }}</td>
+      <td class="num">{{ tank.score }}</td>
+      <td class="num">{{ tank.kills }}</td>
+      <td class="num">{{ tank.wins }}</td>
+      <td class="num">${{ tank.money }}</td>
+      <td class="num">{% if tank.ping >= 0 %}{{ tank.ping }}{% else %}&mdash;{% endif %}</td>
+      <td class="admin-cell">
+        {% for verb, label, cls in [('kick','Kick',''), ('ban','Ban','danger'), ('mute','Mute',''),
+                                    ('unmute','Unmute',''), ('slap','Slap',''), ('poor','Take money',''),
+                                    ('kill','Kill','danger')] %}
+        <form method="post" action="/admin/{{ verb }}" class="inline">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="player" value="{{ tank.playerId }}">
+          <button class="tiny {{ cls }}">{{ label }}</button>
+        </form>
+        {% endfor %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">Nobody is in the game.</p>
+{% endif %}

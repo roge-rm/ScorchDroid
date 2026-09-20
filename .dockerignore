@@ -1,0 +1,26 @@
+# The build needs third_party/ (upstream + the vendored libraries),
+# patches/, scripts/, cmake/, dedicated-server/, web-admin/ and two
+# directories under app/ - app/src/main/cpp/porting/ is compiled into the
+# server, and app/src/main/assets/ holds this port's own server config.
+# Everything else is the Android app and should stay out of the context.
+
+.git
+.gradle
+.kotlin
+.idea
+build
+app/build
+app/.cxx
+app/src/main/java
+app/src/main/res
+app/src/main/AndroidManifest.xml
+app/src/androidTest
+app/src/test
+app/src/main/cpp/jni
+host-tests/build
+design
+docs
+tools
+*.jks
+local.properties
+**/__pycache__

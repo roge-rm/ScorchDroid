@@ -54,6 +54,9 @@
 #include <server/ServerTimedMessage.hpp>
 #include <server/ServerConnectAuthHandler.hpp>
 #include <server/ServerAdminCommon.hpp>
+#include <common/Logger.hpp>
+#include <ControlServer.hpp>
+#include <LogRing.hpp>
 #include <server/ServerAdminSessions.hpp>
 #include <common/Clock.hpp>
 #include <landscapemap/LandscapeMaps.hpp>
@@ -116,6 +119,8 @@
 #include <cstring>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <algorithm>
 #include <errno.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -3609,6 +3614,177 @@ static void testAdminCommands()
 // not evidence for us.
 //
 // Runs last, deliberately: it destroys the server every other test shares.
+// The dedicated server's control channel - the surface the Docker web admin
+// drives (dedicated-server/ControlServer.cpp).
+//
+// Worth pinning here rather than only in a browser for the usual reason:
+// every one of these commands is a thin wrapper over something upstream
+// already does, and what breaks is the wrapper - a reply that stops being
+// valid JSON, a validation that starts saying yes to everything, an
+// option name that moved. The replies are checked by looking for the text
+// they must contain, which is blunt but needs no JSON parser and fails for
+// the right reason.
+static void testControlChannel()
+{
+	printf("dedicated server control channel (what the web admin talks to):\n");
+
+	const std::string configPath = "/tmp/scorchdroid-host-tests-control.xml";
+	unlink(configPath.c_str());
+
+	LogRing log;
+	log.setEcho(false);  // the test's own output is noisy enough
+	Logger::addLogger(&log);
+	Logger::log("a line for the control channel to tail");
+	Logger::instance()->processLogEntries();
+
+	ControlServer::Config config;
+	config.socketPath = "/tmp/scorchdroid-host-tests-control.sock";
+	config.configPath = configPath;
+	config.dataRoot   = SCORCHED_SUBMODULE_ROOT;
+	config.serverName = "Host Tests";
+	config.port       = 27298;
+
+	bool restartCalled = false;
+	ControlServer::Host host;
+	host.restart  = [&restartCalled]() { restartCalled = true; return true; };
+	host.shutdown = []() {};
+
+	ControlServer control(config, log, host);
+
+	// A reply is one line of JSON, and everything downstream assumes both
+	// halves of that.
+	const std::string ping = control.handle("ping");
+	check(ping.find('\n') == std::string::npos, "a reply is a single line");
+	check(ping.find("\"ok\":true") != std::string::npos &&
+		  ping.find(S3D::ScorchedProtocolVersion) != std::string::npos,
+		"ping answers with the protocol version the clients must match");
+
+	const std::string status = control.handle("status");
+	check(status.find("\"running\":true") != std::string::npos,
+		"status sees the running server");
+	check(status.find("\"tanks\":[") != std::string::npos &&
+		  status.find("\"stateName\"") != std::string::npos,
+		"...with a player list and a readable state name");
+
+	// The schema is what the web form is built from, so the pieces it draws
+	// a control out of have to survive an upstream bump.
+	const std::string schema = control.handle("options");
+	check(schema.find("\"name\":\"NumberOfPlayers\"") != std::string::npos,
+		"the options schema carries every option, not just the phone's curated list");
+	check(schema.find("\"name\":\"ServerName\",\"group\":\"\",\"advanced\":false,\"description\"") != std::string::npos,
+		"...including the string options the phone has no control for");
+	check(schema.find("\"kind\":\"boundedInt\"") != std::string::npos &&
+		  schema.find("\"min\":2,\"max\":24") != std::string::npos,
+		"...with upstream's own type and range, so a slider needs nothing invented");
+	check(schema.find("\"deprecated\":true") != std::string::npos,
+		"...and says which options upstream has retired rather than hiding them");
+
+	// Validation is upstream's, and the answer has to be truthful: a form
+	// that reported "saved" while quietly storing something else would be
+	// worse than one that refused.
+	check(control.handle("options.set\tNumberOfPlayers\t99").find("\"accepted\":false") != std::string::npos,
+		"a bounded int refuses a value outside upstream's range");
+	check(control.handle("options.set\tNumberOfPlayers\t12").find("\"accepted\":true") != std::string::npos,
+		"...and accepts one inside it");
+	check(control.handle("options.set\tNoSuchOption\t1").find("\"accepted\":false") != std::string::npos,
+		"an option that does not exist is refused");
+	// OptionEntryEnum::setValueFromString() answers an unrecognised string
+	// by resetting to the default and reporting success. The channel has to
+	// catch that itself or the web form silently lies.
+	check(control.handle("options.set\tTurnType\tNonsense").find("\"accepted\":false") != std::string::npos,
+		"a value that is not one of an enum's is refused, not silently defaulted");
+	check(control.handle("options.set\tTurnType\tTurnFree").find("\"accepted\":true") != std::string::npos,
+		"...while one of its real values is accepted");
+
+	check(control.handle("options.save").find("\"ok\":true") != std::string::npos,
+		"the options save to the config file the server reads at startup");
+
+	// The round trip is the point: a saved file the server cannot read back
+	// would lose every setting at the next restart.
+	{
+		OptionsGame reread;
+		check(reread.readOptionsFromFile(configPath), "the saved config parses again");
+		OptionEntry *players = nullptr;
+		std::list< OptionEntry * > &entries = reread.getOptions();
+		for (std::list< OptionEntry * >::iterator itor = entries.begin(); itor != entries.end(); ++itor)
+		{
+			if (0 == strcmp((*itor)->getName(), "NumberOfPlayers")) players = *itor;
+		}
+		check(players != nullptr && 0 == strcmp(players->getValueAsString(), "12"),
+			"...holding the value that was set, not the one it started with");
+	}
+
+	// ServerAdminCommon refuses a command against a player who has already
+	// gone rather than failing loudly, which is exactly why the reply
+	// reports acceptance separately from success.
+	check(control.handle("admin\tkick\t12345").find("\"accepted\":false") != std::string::npos,
+		"an admin command against a player who is not there is refused");
+	check(control.handle("admin\tnosuchverb").find("\"ok\":false") != std::string::npos,
+		"an admin verb that does not exist is an error, not a silent no-op");
+
+	const std::string tail = control.handle("log\t0");
+	check(tail.find("a line for the control channel to tail") != std::string::npos,
+		"the log ring hands back what upstream logged");
+	check(control.handle("log\t999999").find("\"lines\":[]") != std::string::npos,
+		"...and nothing at all when the caller is already up to date");
+
+	check(control.handle("mods").find("\"none\"") != std::string::npos,
+		"the mod list is read from the data directory");
+	check(control.handle("bots").find("\"name\":\"Random\"") != std::string::npos,
+		"the bot list leads with upstream's Random, as the setup screen's does");
+
+	check(control.handle("nonsense").find("\"ok\":false") != std::string::npos,
+		"an unknown command is an error rather than an empty reply");
+
+	check(control.handle("restart").find("\"accepted\":true") != std::string::npos && restartCalled,
+		"restart is handed back to the process that owns the main loop");
+
+	// And the socket itself: framing, several commands on one connection,
+	// and a reply per line.
+	{
+		std::string error;
+		if (check(control.start(error), "the control socket binds"))
+		{
+			int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+			struct sockaddr_un address;
+			memset(&address, 0, sizeof(address));
+			address.sun_family = AF_UNIX;
+			strncpy(address.sun_path, config.socketPath.c_str(), sizeof(address.sun_path) - 1);
+			check(connect(fd, (struct sockaddr *) &address, sizeof(address)) == 0,
+				"a client connects to it");
+
+			const std::string request = "ping\nstatus\n";
+			check(write(fd, request.data(), request.size()) == (ssize_t) request.size(),
+				"two commands go in one write");
+
+			// The server only serves from its own loop, so pump it the way
+			// main.cpp does.
+			std::string received;
+			for (int i = 0; i < 200 && std::count(received.begin(), received.end(), '\n') < 2; i++)
+			{
+				control.poll();
+				char buffer[65536];
+				const ssize_t got = recv(fd, buffer, sizeof(buffer), MSG_DONTWAIT);
+				if (got > 0) received.append(buffer, (size_t) got);
+				else usleep(1000);
+			}
+			check(std::count(received.begin(), received.end(), '\n') == 2,
+				"...and two replies come back, one line each");
+			check(received.find("\"running\":true") != std::string::npos,
+				"...the second of them being the status that was asked for");
+
+			close(fd);
+			control.stop();
+		}
+	}
+
+	Logger::remLogger(&log);
+	unlink(configPath.c_str());
+	// Put the shared setup state back where the other tests left it - this
+	// one has been changing player counts and turn types in it.
+	ScorchDroidSetup::reset();
+}
+
 static void testServerRestart()
 {
 	printf("engine restart (M9: quit to menu, then start another game):\n");
@@ -4987,6 +5163,7 @@ int main(int argc, char **argv)
 	testAdminCommands();
 	testServerRestart();
 	testGameSetup();
+	testControlChannel();
 	testPlayerProfile();
 	testSoundMixing();
 	testAmbientSound();

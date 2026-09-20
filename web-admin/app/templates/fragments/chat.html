@@ -1,0 +1,7 @@
+{% if messages %}
+<ol class="chat">
+{% for message in messages %}<li>{{ message.text }}</li>{% endfor %}
+</ol>
+{% else %}
+<p class="muted">No chat yet.</p>
+{% endif %}

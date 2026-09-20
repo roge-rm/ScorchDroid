@@ -1,0 +1,140 @@
+/* ScorchDroid server admin. One stylesheet, no framework, light and dark. */
+
+:root {
+  --bg: #f4f2ee;
+  --panel: #ffffff;
+  --ink: #1d1c1a;
+  --muted: #6b6760;
+  --line: #ddd8d0;
+  --accent: #b4531f;
+  --accent-ink: #ffffff;
+  --danger: #a32a1f;
+  --up: #3f7d3a;
+  --down: #a32a1f;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17161a;
+    --panel: #201f24;
+    --ink: #eceae6;
+    --muted: #9b958c;
+    --line: #322f38;
+    --accent: #e0763a;
+    --accent-ink: #1a1013;
+    --danger: #e0614f;
+    --up: #6dbd63;
+    --down: #e0614f;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+main { max-width: 1100px; margin: 0 auto; padding: 16px 16px 64px; }
+
+.bar {
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 700; text-decoration: none; color: var(--ink); }
+.brand span { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+.bar nav { display: flex; gap: 14px; margin-left: auto; }
+.bar nav a { color: var(--muted); text-decoration: none; padding: 4px 0; border-bottom: 2px solid transparent; }
+.bar nav a:hover { color: var(--ink); }
+.bar nav a.on { color: var(--ink); border-bottom-color: var(--accent); }
+
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; margin: 0 0 16px;
+}
+.card.narrow { max-width: 380px; margin: 48px auto; }
+.card-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.card-head h2, .card-head h3 { margin: 0; font-size: 16px; }
+.card-head .actions { margin-left: auto; }
+
+.columns { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+@media (max-width: 760px) { .columns { grid-template-columns: 1fr; } }
+
+h1 { font-size: 20px; margin: 0 0 4px; }
+.muted { color: var(--muted); }
+.hint { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+code { font-family: var(--mono); font-size: 0.92em; }
+
+.flash { padding: 10px 12px; border-radius: 8px; margin: 0 0 14px; }
+.flash.notice { background: color-mix(in srgb, var(--up) 16%, var(--panel)); border: 1px solid var(--up); }
+.flash.error { background: color-mix(in srgb, var(--danger) 16%, var(--panel)); border: 1px solid var(--danger); }
+
+button, .button {
+  font: inherit; padding: 7px 13px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  text-decoration: none; display: inline-block;
+}
+button:hover, .button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+button.danger { border-color: var(--danger); color: var(--danger); }
+button.danger:hover { background: var(--danger); color: var(--accent-ink); }
+button.quiet { color: var(--muted); }
+button.tiny { padding: 3px 7px; font-size: 12px; }
+
+.inline { display: inline; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.row input[name="text"] { flex: 1 1 240px; }
+
+input[type=text], input[type=password], input[type=number], select, textarea {
+  font: inherit; padding: 6px 9px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink); width: 100%;
+}
+textarea { font-family: var(--mono); font-size: 13px; }
+label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+
+.status { display: flex; gap: 14px; align-items: flex-start; }
+.dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 5px; flex: none; }
+.dot.up { background: var(--up); }
+.dot.down { background: var(--down); }
+.status .grid { display: grid; gap: 10px 24px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); flex: 1; }
+.status dt { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.status dd { margin: 2px 0 0; font-weight: 600; }
+
+table.players { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.players th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 4px 8px; }
+table.players td { padding: 6px 8px; border-top: 1px solid var(--line); vertical-align: middle; }
+table.players .num { text-align: right; }
+.admin-cell { display: flex; gap: 4px; flex-wrap: wrap; }
+.tag { font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted); }
+.tag.warn { border-color: var(--danger); color: var(--danger); }
+
+.scroller { max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg); }
+.scroller.tall { max-height: 60vh; }
+ol.log, ol.chat { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 12.5px; }
+ol.log li, ol.chat li { padding: 1px 0; word-break: break-word; }
+ol.log .when { color: var(--muted); }
+
+.options { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.option.retired { opacity: .6; }
+.option .range { font-size: 12px; color: var(--muted); margin-left: 6px; }
+details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }
+summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+details .options { margin-top: 12px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.chip { display: flex; align-items: baseline; gap: 6px; border: 1px solid var(--line); border-radius: 999px;
+        padding: 5px 12px; font-weight: 500; cursor: pointer; margin: 0; }
+.chip:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+.chip input { width: auto; }
+.chip em { font-style: normal; color: var(--muted); font-size: 12px; }
+.chips.dense .chip { padding: 3px 9px; font-size: 13px; }
+
+.presets { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.preset { margin: 0; }
+
+.card.sticky { position: sticky; bottom: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+               box-shadow: 0 4px 18px rgb(0 0 0 / .16); }

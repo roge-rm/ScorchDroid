@@ -1,0 +1,22 @@
+<div id="status" hx-get="/fragments/status" hx-trigger="every 3s" hx-swap="outerHTML" class="card status">
+  {% if status.running %}
+    <span class="dot up" title="Running"></span>
+    <div class="grid">
+      <div><dt>Server</dt><dd>{{ status.serverName }}</dd></div>
+      <div><dt>State</dt><dd>{{ status.stateName }}</dd></div>
+      <div><dt>Round</dt><dd>{{ status.round }} of {{ status.rounds }} &middot; turn {{ status.turn }}</dd></div>
+      <div><dt>Players</dt><dd>{{ status.humans }} human, {{ status.bots }} bot ({{ status.maxPlayers }} max)</dd></div>
+      <div><dt>Map</dt><dd>{{ status.landscape }}</dd></div>
+      <div><dt>Mod</dt><dd>{{ status.mod }}</dd></div>
+      <div><dt>Port</dt><dd>{{ status.port }}</dd></div>
+      <div><dt>Version</dt><dd>{{ status.gameVersion }} ({{ status.protocolVersion }})</dd></div>
+      <div><dt>Uptime</dt><dd>{{ (status.uptime // 3600) }}h {{ ((status.uptime % 3600) // 60) }}m</dd></div>
+    </div>
+  {% else %}
+    <span class="dot down" title="Not running"></span>
+    <div>
+      <strong>The server is not answering.</strong>
+      <p class="muted">{{ status.down or "It may be starting up or restarting." }}</p>
+    </div>
+  {% endif %}
+</div>

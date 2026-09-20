@@ -1,0 +1,128 @@
+{% set show_nav = true %}{% set page = 'settings' %}
+{% extends "base.html" %}
+{% block body %}
+
+{% if down %}
+<section class="card">
+  <h2>The server is not answering</h2>
+  <p class="muted">{{ down }} Settings can only be read from a running server.</p>
+</section>
+{% else %}
+
+<section class="card">
+  <div class="card-head"><h2>Mod</h2></div>
+  <p class="muted">A mod brings its own weapons, tanks, maps and bots. Changing it restarts the
+    server &mdash; upstream loads a mod partway through its own startup, so it cannot be swapped
+    under a running game.</p>
+  <form method="post" action="/settings/mod" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <select name="mod">
+      {% for name in mods.mods %}
+      <option value="{{ name }}" {% if name == mods.selected %}selected{% endif %}>{{ name }}</option>
+      {% endfor %}
+    </select>
+    <button class="danger">Switch mod and restart</button>
+  </form>
+
+  {% if presets %}
+  <div class="card-head"><h3>Ready-made games</h3></div>
+  <p class="muted">The games this mod defines in its own <code>modinfo.xml</code>. Loading one
+    replaces every setting below.</p>
+  <div class="presets">
+    {% for preset in presets %}
+    <form method="post" action="/settings/preset" class="preset">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <input type="hidden" name="gamefile" value="{{ preset.gamefile }}">
+      <button class="quiet">{{ preset.name }}</button>
+      <p class="hint">{{ preset.description }}</p>
+    </form>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>Bots</h2></div>
+  <p class="muted">Which AI fills the slots no human is in. Pick more than one for a mixed game &mdash;
+    the slots are filled from the list in turn.</p>
+  <form method="post" action="/settings/bots">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="chips">
+      {% for bot in bots.bots %}
+      <label class="chip">
+        <input type="checkbox" name="bot" value="{{ bot.name }}" {% if bot.name in bots.selected %}checked{% endif %}>
+        <span>{{ bot.name }}</span>
+        <em>{{ bot.description }}</em>
+      </label>
+      {% endfor %}
+    </div>
+    <button class="primary">Save bots</button>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-head"><h2>Maps</h2></div>
+  <p class="muted">Tick none to use every map, which is what a fresh config does.</p>
+  <form method="post" action="/settings/landscapes">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div class="chips dense">
+      {% for name in landscapes.landscapes %}
+      <label class="chip">
+        <input type="checkbox" name="landscape" value="{{ name }}" {% if name in landscapes.selected %}checked{% endif %}>
+        <span>{{ name }}</span>
+      </label>
+      {% endfor %}
+    </div>
+    <button class="primary">Save maps</button>
+  </form>
+</section>
+
+<form method="post" action="/settings">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+
+  {% for group, options in groups %}
+  <section class="card">
+    <div class="card-head"><h2>{{ group }}</h2></div>
+    <div class="options">
+      {% for option in options if not option.advanced and not option.deprecated %}
+        {% include "_option.html" %}
+      {% endfor %}
+    </div>
+    {% set advanced = options | selectattr('advanced') | rejectattr('deprecated') | list %}
+    {% if advanced %}
+    <details>
+      <summary>Advanced &mdash; {{ advanced | length }} more</summary>
+      <div class="options">
+        {% for option in advanced %}{% include "_option.html" %}{% endfor %}
+      </div>
+    </details>
+    {% endif %}
+    {% set retired = options | selectattr('deprecated') | list %}
+    {% if retired %}
+    <details>
+      <summary>Retired by upstream &mdash; {{ retired | length }}, and they do nothing</summary>
+      <div class="options">
+        {% for option in retired %}{% include "_option.html" %}{% endfor %}
+      </div>
+    </details>
+    {% endif %}
+  </section>
+  {% endfor %}
+
+  <div class="card sticky">
+    <button class="primary" name="action" value="apply">Save &mdash; applies next round</button>
+    <button class="danger" name="action" value="restart">Save and restart now</button>
+    <span class="muted">{{ all_options | length }} options, straight from the engine.</span>
+  </div>
+</form>
+
+<section class="card">
+  <form method="post" action="/settings/reset" class="inline"
+        onsubmit="return confirm('Discard unsaved changes and reload the config file?')">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="quiet">Reload from the config file on disk</button>
+  </form>
+</section>
+
+{% endif %}
+{% endblock %}
