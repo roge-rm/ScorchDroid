@@ -1,19 +1,16 @@
 # ScorchDroid
 
-ScorchDroid is an Android port of [Scorched3D](https://www.scorched3d.co.uk/), the 3D
-artillery game, based on the classic Scorched Earth. 
-It is built on [bberberov/scorched3d](https://github.com/bberberov/scorched3d), a maintained fork of the original source.
+ScorchDroid is an Android port of [Scorched3D](https://www.scorched3d.co.uk/), the 3D artillery game, based on the classic Scorched Earth. 
+It uses [bberberov/scorched3d](https://github.com/bberberov/scorched3d) as an upstream source (you'll see upstream referred to constantly) and even boasts cross-compatability with it, at least currently.
 
-This port uses Scorched3D's ballistics, weapons, terrain deformation, economy, AI, and network protocol code along with the original rules. The interface is fresh, made with Jetpack Compose and OpenGLES3 designed for a touch phone screen instead of a PC with mouse and keyboard. 
+The entire game engine was ported over from Scorched3D so it plays the same as the original game. The UI has been totally redone but the graphics are ~mostly~ the same. The controls have been adapted to work on a touch screen, with sliders and touch buttons to provide the controls the keyboard used to.
 
-This is 1.0.0. Every subsystem has now been checked through the Scorched3D code feature by feature -
-the ground, the water, the wind, the whole 3D scene, the client layer and the audio - and what that
-turned up is either built or written down as a deliberate departure; the reviews live in `docs/`.
-The mini map is in, and so is drawing on it.
+Effort has been made to bring every feature from the desktop game to the mobile port, from graphics to audio to network play. Additional network options have been added, allowing you to play over Bluetooth or Ad-Hoc WIFI networks on top of regular LAN play.
 
-A little bonus - you can join PC hosted games of Scorched3D so long as they are version 44. 
+Requires Android 8.0 or higher.
 
-Cheers, enjoy! roge-rm
+Enjoy!
+Dan
 
 <img src="docs/shot-menu.png" alt="The ScorchDroid main menu: the title over Single Player, Multiplayer, Settings and About" width="180" /> <img src="docs/shot-setup.png" alt="The New Game setup screen on its Players tab: tabs for Game, Players, Arms and World, Scorched3D's own sliders for the number of players, lives and teams, and the team-balance modes as a row of chips" width="180" /> <img src="docs/shot-settings.png" alt="The Settings screen on its Player tab: name, tank model, a grid of tank colours and a grid of avatars, with tabs for Player, Audio, Display and Controls" width="180" />
 
