@@ -10,7 +10,12 @@
 # submodules present:
 #     git clone --recurse-submodules https://github.com/roge-rm/ScorchDroid.git
 
-FROM debian:bookworm-slim AS build
+# Trixie rather than bookworm, and the same on both stages so the C++ ABI
+# matches: upstream's Vector.hpp calls std::sinf/std::cosf/std::sqrtf, and
+# libstdc++ only gained the C++17 float overloads in GCC 13. Bookworm's GCC
+# 12 fails to compile it. The NDK's clang and any recent host GCC are fine,
+# which is why nothing else in this repo hit it.
+FROM debian:trixie-slim AS build
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -27,7 +32,7 @@ RUN cmake -S dedicated-server -B /build -DCMAKE_BUILD_TYPE=Release \
  && strip /build/dedicated_server
 
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends zlib1g \

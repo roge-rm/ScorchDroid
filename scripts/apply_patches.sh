@@ -46,6 +46,16 @@ apply_patches_for() {
         if [ -f "$marker" ]; then
             return 0
         fi
+
+        # A .git that git could not read is a dangling pointer, not a
+        # missing one - and git apply refuses to run beside it even though
+        # it needs no repository. Say so, because git's own message names
+        # only the path it could not find.
+        if [ -e ".git" ]; then
+            echo "third_party/$submodule_name/.git points at a repository that is not here." >&2
+            echo "In a Docker build, exclude **/.git from the context (see .dockerignore)." >&2
+            return 1
+        fi
     fi
 
     shopt -s nullglob

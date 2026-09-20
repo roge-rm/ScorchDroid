@@ -106,7 +106,7 @@ Everything worth keeping is in the `config` volume: `server.xml`, the ban list
 and any saved games.
 
 ```bash
-docker run --rm -v scorchdroid_config:/config -v "$PWD":/out debian:bookworm-slim \
+docker run --rm -v scorchdroid_config:/config -v "$PWD":/out debian:trixie-slim \
     tar czf /out/scorchdroid-config.tar.gz -C /config .
 ```
 
@@ -121,7 +121,7 @@ Set these in `.env`.
 | Variable | Default | What it does |
 |---|---|---|
 | `ADMIN_PASSWORD` | *(none)* | Required. The web admin refuses to start without one rather than come up open. |
-| `SERVER_NAME` | `ScorchDroid` | What players see in their Join Game list. |
+| `SERVER_NAME` | `ScorchDroid` | What players see in their Join Game list. It names the config the first time the server starts; after that the Settings page owns the name, so a rename there survives a restart. |
 | `GAME_PORT` | `27270` | Upstream's port. Anything else means players type `address:port`. |
 | `WEB_PORT` | `8080` | The admin page. |
 | `WEB_BIND` | `0.0.0.0` | `127.0.0.1` to keep the page to that machine and reach it over an SSH tunnel. |

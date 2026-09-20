@@ -45,6 +45,12 @@ async def lifespan(app):
     )
     app.state.advertiser = advertiser
 
+    # Every one of these hops to a worker thread, and it has to. Both the
+    # control socket and python-zeroconf are blocking APIs, and zeroconf
+    # goes further: called from a thread that has a running event loop it
+    # refuses outright with EventLoopBlocked rather than blocking it. On a
+    # loop thread this whole task fails every 15 seconds and advertises
+    # nothing.
     async def keep_advertising():
         # The server names itself, and an operator can rename it from the
         # settings page, so the advertised name follows the server rather
@@ -53,15 +59,18 @@ async def lifespan(app):
             try:
                 status = await asyncio.to_thread(control.status)
                 if status.get("running"):
-                    advertiser.update(status.get("serverName") or advertiser.name,
-                                      int(status.get("port") or advertiser.port))
-                    advertiser.start()
+                    await asyncio.to_thread(
+                        advertiser.update,
+                        status.get("serverName") or advertiser.name,
+                        int(status.get("port") or advertiser.port),
+                    )
+                    await asyncio.to_thread(advertiser.start)
                 else:
-                    advertiser.stop()
+                    await asyncio.to_thread(advertiser.stop)
             except ServerDown:
-                advertiser.stop()
+                await asyncio.to_thread(advertiser.stop)
             except Exception as error:
-                LOG.warning("discovery refresh failed: %s", error)
+                LOG.warning("discovery refresh failed: %s: %s", type(error).__name__, error)
             await asyncio.sleep(15)
 
     task = asyncio.create_task(keep_advertising())
@@ -69,7 +78,9 @@ async def lifespan(app):
         yield
     finally:
         task.cancel()
-        advertiser.stop()
+        # Unregistering politely means phones drop the server from their
+        # list at once instead of waiting for the record to age out.
+        await asyncio.to_thread(advertiser.stop)
 
 
 app = FastAPI(title="ScorchDroid server admin", lifespan=lifespan)

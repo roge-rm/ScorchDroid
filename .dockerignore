@@ -5,6 +5,11 @@
 # Everything else is the Android app and should stay out of the context.
 
 .git
+# Every submodule's .git too - it is a *file* pointing into the
+# superproject's .git/modules, which is not in the context, so it would
+# arrive as a dangling pointer. git apply works perfectly well with no
+# repository at all, but not next to a .git it cannot follow.
+**/.git
 .gradle
 .kotlin
 .idea
