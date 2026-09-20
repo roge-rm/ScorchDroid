@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <dirent.h>
 #include <fstream>
+#include <cstring>
 
 namespace
 {
@@ -119,7 +120,11 @@ namespace
 		return nullptr;
 	}
 
-	bool describe(OptionEntry *entry, ScorchDroidSetup::Option &out)
+	// [full] is the dedicated server's view: every option, including the
+	// retired ones and the free-text ones, because a server operator's web
+	// admin is exactly where those belong. The phone's setup screen passes
+	// false and gets the curated, drawable subset it always got.
+	bool describe(OptionEntry *entry, ScorchDroidSetup::Option &out, bool full = false)
 	{
 		// Upstream keeps its retired options in the list, flagged rather than
 		// deleted, so a config file written years ago still parses. They read
@@ -127,11 +132,14 @@ namespace
 		// end up on this screen by mistake - MaxArmsLevel, ScoreType and
 		// AutoBallanceTeams all look like live options and none of them does
 		// anything any more.
-		if (entry->getData() & OptionEntry::DataDepricated) return false;
+		out.deprecated = (entry->getData() & OptionEntry::DataDepricated) != 0;
+		out.restricted = (entry->getData() & OptionEntry::DataProtected) != 0;
+		if (out.deprecated && !full) return false;
 
 		out.name = entry->getName();
 		out.description = entry->getDescription();
 		out.value = entry->getValueAsString();
+		if (full) out.defaultValue = entry->getDefaultValueAsString();
 
 		switch (entry->getEntryType())
 		{
@@ -167,13 +175,45 @@ namespace
 		case OptionEntry::OptionEntryBoolType:
 			out.kind = ScorchDroidSetup::eBool;
 			return true;
-		default:
-			// Strings, vectors and the rest have no control to draw yet, and
-			// silently showing one as a number would be worse than omitting
-			// it. Mod selection, the one string option worth having, gets its
-			// own path rather than being forced through this one.
-			return false;
+		case OptionEntry::OptionEntryStringType:
+		case OptionEntry::OptionEntryTextType:
+			if (!full) break;
+			out.kind = (entry->getEntryType() == OptionEntry::OptionEntryTextType)
+				? ScorchDroidSetup::eText
+				: ScorchDroidSetup::eString;
+			return true;
+		case OptionEntry::OptionEntryStringEnumType:
+		{
+			if (!full) break;
+			OptionEntryStringEnum *enumEntry = (OptionEntryStringEnum *) entry;
+			out.kind = ScorchDroidSetup::eStringEnum;
+			// Terminated by an empty string, like the integer enums above -
+			// see OptionEntryStringEnum::setValue.
+			for (OptionEntryStringEnum::EnumEntry *choice = enumEntry->getEnums();
+				choice->value[0];
+				choice++)
+			{
+				ScorchDroidSetup::Choice added;
+				added.label = choice->value;
+				out.choices.push_back(added);
+			}
+			return true;
 		}
+		case OptionEntry::OptionEntryFloatType:
+			if (!full) break;
+			out.kind = ScorchDroidSetup::eFloat;
+			return true;
+		default:
+			break;
+		}
+
+		// Strings, vectors and the rest have no control to draw on a phone,
+		// and silently showing one as a number would be worse than omitting
+		// it. Mod selection, the one string option worth having there, gets
+		// its own path rather than being forced through this one. Vectors
+		// and fixed-point vectors are left out of both views: they are
+		// colours and coordinates, and none of them is a game rule.
+		return false;
 	}
 }
 
@@ -203,6 +243,56 @@ namespace ScorchDroidSetup
 			if (describe(entry, option)) result.push_back(option);
 		}
 		return result;
+	}
+
+	std::vector<Option> allOptions()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		std::vector<Option> result;
+		if (!g_options) return result;
+
+		std::list<OptionEntry *> &entries = g_options->getOptions();
+		for (std::list<OptionEntry *>::iterator itor = entries.begin();
+			itor != entries.end();
+			++itor)
+		{
+			Option option;
+			// The curated table is the only place that says which tab an
+			// option belongs on and whether it is an everyday one, so the
+			// web form inherits that judgement for the fifty it covers
+			// rather than inventing a second grouping for them.
+			for (int i = 0; kExposed[i].name; i++)
+			{
+				if (0 == strcmp(kExposed[i].name, (*itor)->getName()))
+				{
+					option.group = kExposed[i].group;
+					option.advanced = kExposed[i].advanced;
+					break;
+				}
+			}
+			if (describe(*itor, option, true)) result.push_back(option);
+		}
+		return result;
+	}
+
+	bool setAny(const std::string &name, const std::string &value)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return false;
+
+		OptionEntry *entry = findEntry(*g_options, name);
+		if (!entry) return false;
+		if (!entry->setValueFromString(value)) return false;
+
+		// The same pairing set() explains below, for the same reason: a
+		// maximum raised without its minimum changes nothing a player can
+		// see.
+		if (name == "NumberOfPlayers")
+		{
+			OptionEntry *minimum = findEntry(*g_options, "NumberOfMinPlayers");
+			if (minimum) minimum->setValueFromString(value);
+		}
+		return true;
 	}
 
 	bool set(const std::string &name, const std::string &value)
@@ -712,6 +802,21 @@ namespace ScorchDroidSetup
 			OptionEntry *target = findEntry(options.getMainOptions(), kExposed[i].name);
 			if (!chosen || !target) continue;
 			target->setValueFromString(chosen->getValueAsString());
+		}
+	}
+
+	void applyAllTo(OptionsScorched &options)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (!g_options) return;
+		std::list<OptionEntry *> &entries = g_options->getOptions();
+		for (std::list<OptionEntry *>::iterator itor = entries.begin();
+			itor != entries.end();
+			++itor)
+		{
+			OptionEntry *target = findEntry(options.getMainOptions(), (*itor)->getName());
+			if (!target) continue;
+			target->setValueFromString((*itor)->getValueAsString());
 		}
 	}
 }

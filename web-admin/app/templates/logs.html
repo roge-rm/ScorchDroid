@@ -1,0 +1,14 @@
+{% set show_nav = true %}{% set page = 'logs' %}
+{% extends "base.html" %}
+{% block body %}
+<section class="card">
+  <div class="card-head">
+    <h2>Server log</h2>
+    <div class="actions"><a class="button quiet" href="/logs/download">Download</a></div>
+  </div>
+  <p class="muted">The last 2000 lines the server has logged. It keeps no more than that.</p>
+  <div id="log" class="scroller tall" hx-get="/fragments/log?limit=400" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    <p class="muted">Loading&hellip;</p>
+  </div>
+</section>
+{% endblock %}

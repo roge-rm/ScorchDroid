@@ -35,6 +35,17 @@ namespace ScorchDroidSetup
 		eInt,             // a plain number
 		eBool,            // a switch
 		eEnum,            // a choice among `choices`
+		// The four below are reached only through allOptions(), never
+		// through options(): the phone's setup screen has no control for a
+		// free string and never asks for one. They exist for the dedicated
+		// server's web admin, which does have to offer every knob a server
+		// operator expects - server name, message of the day, publishing
+		// addresses and the rest. Appended rather than inserted so the JNI
+		// protocol's integer kind keeps meaning what it meant.
+		eString,          // one line of free text
+		eText,            // several lines of free text
+		eStringEnum,      // a choice among `choices`, by label
+		eFloat,           // a decimal number
 	};
 
 	struct Choice
@@ -60,8 +71,21 @@ namespace ScorchDroidSetup
 		std::string description;  // upstream's own one-line description
 		Kind kind = eInt;
 		std::string value;        // current value, as a string
+		// What upstream compiles in as this option's default. Only
+		// allOptions() fills it; the setup screen has no "reset this one"
+		// affordance to spend it on, but a two-hundred-option web form very
+		// much does.
+		std::string defaultValue;
 		int minValue = 0, maxValue = 0, stepValue = 1;
-		std::vector<Choice> choices;   // eEnum only
+		std::vector<Choice> choices;   // eEnum and eStringEnum
+		// Upstream retires options by flagging them, not by deleting them,
+		// so a config written years ago still parses. options() drops them
+		// outright; allOptions() reports them so a web form can show them
+		// struck through rather than pretend a stale config file is empty.
+		bool deprecated = false;
+		// OptionEntry::DataProtected - upstream will not send it to a
+		// client and treats it as the server operator's business alone.
+		bool restricted = false;
 	};
 
 	// Loads the shipped config if it hasn't been loaded yet. Safe to call
@@ -73,11 +97,26 @@ namespace ScorchDroidSetup
 	// server-administration details that mean nothing on a phone.
 	std::vector<Option> options();
 
+	// Every option upstream defines, in OptionsGame's own order, for the
+	// dedicated server's web admin - where those server-administration
+	// details are exactly the point. Entries that also appear in the curated
+	// list carry its `group` and `advanced`; the rest have an empty group.
+	//
+	// Vectors and fixed-point vectors are still left out: they are colours
+	// and coordinates with no sensible control, and none of them is a game
+	// rule.
+	std::vector<Option> allOptions();
+
 	// Returns false if the name isn't one of the exposed options, or if the
 	// value is rejected by upstream's own validation (out of range for a
 	// bounded int, not one of an enum's values). Rejection is upstream's
 	// decision, not a rule invented here.
 	bool set(const std::string &name, const std::string &value);
+
+	// set() without the curated-list gate, for allOptions()' callers. The
+	// validation is identical and still upstream's; the only difference is
+	// which names are allowed through.
+	bool setAny(const std::string &name, const std::string &value);
 
 	// Forget every choice and go back to what the config file says.
 	void reset();
@@ -232,6 +271,13 @@ namespace ScorchDroidSetup
 	// "changed" while holding the file's value, which is exactly as confusing
 	// as it sounds - it cost an afternoon when the debug money flag hit it.
 	void applyTo(OptionsScorched &options);
+
+	// applyTo() over every option rather than the curated fifty, for the
+	// dedicated server. Carries exactly the same obligation: the caller
+	// must follow it with OptionsScorched::updateChangeSet(), or
+	// ServerStateNewGame::commitChanges() undoes all of it at the next
+	// round.
+	void applyAllTo(OptionsScorched &options);
 }
 
 #endif  // SCORCHDROID_GAME_SETUP_H

@@ -20,3 +20,8 @@ local.properties
 # repository is the key compromised.
 *.jks
 *.keystore
+
+# Dedicated server: the operator's own secrets and the Python bytecode the
+# web admin leaves behind. .env.example is the tracked template.
+/.env
+__pycache__/

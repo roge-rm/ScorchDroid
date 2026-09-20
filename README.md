@@ -59,6 +59,10 @@ Dan
   arrive in the same place.
 - Admin controls for whoever is hosting: kick, ban, mute, slap, take a player's money, kill, start
   a new game or clear the map.
+- A **dedicated server** you can leave running on a spare machine, as two containers anyone can
+  start with `docker compose up` — the same engine, plus a browser admin page for its settings,
+  its players, its chat and its log. Phones on the same network find it by themselves. See
+  [docs/dedicated-server.md](docs/dedicated-server.md).
 - The full shop: weapons and defensive accessories, with purchases acknowledged immediately - and
   Scorched3D's own gift of money to another player, from the same screen it keeps it in.
 - Save a game you are hosting and pick it up later, solo or with other people; the saves list its
@@ -118,6 +122,17 @@ TCP sockets, and once over a Unix socket pair through the same transport bridge 
 with no TCP anywhere. It runs in seconds, which is why it, rather than an emulator, is where
 behaviour is pinned down.
 
+The dedicated server builds from the same library, on its own:
+
+```bash
+cmake -S dedicated-server -B build/server -DCMAKE_BUILD_TYPE=Release
+cmake --build build/server -j
+./build/server/dedicated_server --help
+```
+
+Or as the two containers, which is how it is meant to be run —
+`cp .env.example .env`, set `ADMIN_PASSWORD`, then `docker compose up --build`.
+
 ## Architecture
 
 - `third_party/scorched3d/` — upstream, as a submodule pinned to an exact commit. **Never edited
@@ -139,8 +154,14 @@ behaviour is pinned down.
   (`NativeBridge`), LAN discovery, sound, and first-run asset extraction.
 - `host-tests/` — a plain CMake project building the same engine natively, with an assert-based
   runner.
-- `dedicated-server/` — a standalone Linux server built from the same sources, for testing real
-  cross-machine play.
+- `dedicated-server/` — a standalone Linux server built from the same sources: its own CMake
+  project, its `main.cpp`, and `ControlServer.cpp`, the local Unix-socket channel the web admin
+  drives. No part of it touches the game's wire protocol.
+- `cmake/ScorchedCommon.cmake` — the `scorched_common` library definition, shared by `host-tests/`
+  and `dedicated-server/` so it is written once.
+- `web-admin/` — the server's browser admin: FastAPI, Jinja and htmx, no build step. It owns no
+  game state; every page is a rendering of a control-channel reply.
+- `docker/`, `docker-compose.yml` — the two images and how they are run together.
 
 Two conventions are worth knowing before reading the renderer, because both have caused real bugs
 here: the engine's fire angle is measured **counter-clockwise** while wind and sun bearings are

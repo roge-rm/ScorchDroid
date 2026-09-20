@@ -1,0 +1,72 @@
+# A ScorchDroid dedicated server, in two containers:
+#
+#   server  - the game itself, the same engine the phone runs, listening on
+#             27270 for ScorchDroid and desktop Scorched3D 44.3 clients.
+#   web     - a browser admin page: settings, players, chat, logs, restart.
+#
+# Quick start:
+#   cp .env.example .env     # and set ADMIN_PASSWORD
+#   docker compose up --build
+#
+# Then open http://<this machine>:8080.
+#
+# Host networking is the default because that is what makes a phone find
+# this server by itself: the web container publishes the same
+# `_scorchdroid._tcp.` mDNS service an Android host publishes, and multicast
+# cannot cross a bridge network. It also means the ports below are taken on
+# the host directly rather than published. On Docker Desktop, or if you want
+# explicit port mapping, use the bridge override instead:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.bridge.yml up --build
+#
+# That costs auto-discovery and nothing else - players type the address.
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    image: scorchdroid-server
+    container_name: scorchdroid-server
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      SCORCHDROID_PORT: "${GAME_PORT:-27270}"
+      SCORCHDROID_SERVER_NAME: "${SERVER_NAME:-ScorchDroid}"
+    volumes:
+      # Settings, ban list and saved games. Back this up and you have the
+      # server; delete it and the next start writes a fresh, fully
+      # commented config with upstream's defaults.
+      - config:/config
+      # The control socket the web admin talks to. Never on the network.
+      - control:/run/scorchdroid
+      # Extra mods, if you have any. A mod is a directory of its own under
+      # globalmods; drop one in, then pick it on the Settings page.
+      # - ./mods/mymod:/opt/scorchdroid/data/globalmods/mymod:ro
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    image: scorchdroid-web
+    container_name: scorchdroid-web
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set - see .env.example}"
+      SERVER_NAME: "${SERVER_NAME:-ScorchDroid}"
+      GAME_PORT: "${GAME_PORT:-27270}"
+      WEB_PORT: "${WEB_PORT:-8080}"
+      WEB_BIND: "${WEB_BIND:-0.0.0.0}"
+      LAN_DISCOVERY: "${LAN_DISCOVERY:-1}"
+      # Set to 1 only when something in front of this terminates TLS -
+      # otherwise the session cookie is marked Secure and never comes back.
+      HTTPS: "${HTTPS:-0}"
+    volumes:
+      - control:/run/scorchdroid
+
+volumes:
+  config:
+  control:

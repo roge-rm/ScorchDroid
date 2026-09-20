@@ -1,0 +1,40 @@
+{# One option, drawn as whatever control upstream's own type asks for. The
+   description is upstream's; nothing here writes its own wording. #}
+<div class="option{% if option.deprecated %} retired{% endif %}">
+  <label for="opt-{{ option.name }}">
+    {{ option.name }}
+    {% if option.deprecated %}<span class="tag warn">retired</span>{% endif %}
+    {% if option.restricted %}<span class="tag">not sent to clients</span>{% endif %}
+  </label>
+
+  {% if option.kind == 'bool' %}
+    <input type="hidden" name="shown.{{ option.name }}" value="1">
+    <input id="opt-{{ option.name }}" type="checkbox" name="opt.{{ option.name }}"
+           {% if option.value|lower == 'on' %}checked{% endif %}>
+
+  {% elif option.kind in ('enum', 'stringEnum') %}
+    <select id="opt-{{ option.name }}" name="opt.{{ option.name }}">
+      {% for choice in option.choices %}
+        <option value="{{ choice.label }}" {% if choice.label == option.value %}selected{% endif %}>{{ choice.label }}</option>
+      {% endfor %}
+    </select>
+
+  {% elif option.kind == 'boundedInt' %}
+    <input id="opt-{{ option.name }}" type="number" name="opt.{{ option.name }}"
+           value="{{ option.value }}" min="{{ option.min }}" max="{{ option.max }}"
+           step="{{ option.step if option.step > 0 else 1 }}">
+    <span class="range">{{ option.min }}&ndash;{{ option.max }}</span>
+
+  {% elif option.kind == 'text' %}
+    <textarea id="opt-{{ option.name }}" name="opt.{{ option.name }}" rows="3">{{ option.value }}</textarea>
+
+  {% elif option.kind == 'string' %}
+    <input id="opt-{{ option.name }}" type="{{ 'password' if option.restricted else 'text' }}"
+           name="opt.{{ option.name }}" value="{{ option.value }}">
+
+  {% else %}
+    <input id="opt-{{ option.name }}" type="text" name="opt.{{ option.name }}" value="{{ option.value }}">
+  {% endif %}
+
+  <p class="hint">{{ option.description }}{% if option.default %} <span class="muted">Default: {{ option.default }}</span>{% endif %}</p>
+</div>

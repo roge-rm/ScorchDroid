@@ -1,0 +1,23 @@
+# Bridge networking instead of host networking, for Docker Desktop or for
+# anyone who wants the ports mapped explicitly.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.bridge.yml up --build
+#
+# The one thing this costs is LAN auto-discovery: mDNS is multicast, and
+# multicast does not cross a bridge, so phones will not see the server in
+# their Join Game list. Players enter the address by hand instead, which
+# works exactly as it does for a desktop Scorched3D server.
+
+services:
+  server:
+    network_mode: bridge
+    ports:
+      - "${GAME_PORT:-27270}:27270/tcp"
+
+  web:
+    network_mode: bridge
+    environment:
+      LAN_DISCOVERY: "0"
+      WEB_PORT: "8080"
+    ports:
+      - "${WEB_PORT:-8080}:8080/tcp"

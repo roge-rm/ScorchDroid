@@ -1,0 +1,14 @@
+{% set show_nav = false %}
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block body %}
+<section class="card narrow">
+  <h1>Sign in</h1>
+  <p class="muted">The admin password from this server's <code>.env</code>.</p>
+  <form method="post" action="/login">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" autofocus required>
+    <button class="primary">Sign in</button>
+  </form>
+</section>
+{% endblock %}
