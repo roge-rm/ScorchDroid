@@ -10,6 +10,11 @@ so a ScorchDroid client, or a desktop Scorched3D 44.3 client, connects to it
 exactly as it would to any other Scorched3D server. Nothing about the game is
 different because it is running in a container.
 
+This is the design note — how the thing is built and why each decision went the
+way it did. For running one, see
+[dedicated-server/README.md](../dedicated-server/README.md), which covers the
+standalone compose file that needs no checkout at all.
+
 ## Quick start
 
 ```bash

@@ -9,6 +9,8 @@ Effort has been made to bring every feature from the desktop game to the mobile 
 
 Requires Android 8.0 or higher.
 
+Questions, bug reports, or looking for a game? **[Join the Discord](https://discord.gg/9Wun47jGC6)**.
+
 Enjoy!
 Dan
 
@@ -62,7 +64,7 @@ Dan
 - A **dedicated server** you can leave running on a spare machine, as two containers anyone can
   start with `docker compose up` — the same engine, plus a browser admin page for its settings,
   its players, its chat and its log. Phones on the same network find it by themselves. See
-  [docs/dedicated-server.md](docs/dedicated-server.md).
+  [dedicated-server/README.md](dedicated-server/README.md).
 - The full shop: weapons and defensive accessories, with purchases acknowledged immediately - and
   Scorched3D's own gift of money to another player, from the same screen it keeps it in.
 - Save a game you are hosting and pick it up later, solo or with other people; the saves list its
@@ -86,6 +88,28 @@ Dan
 - A settings screen in four tabs: who you are (name, tank model, colour and avatar), sound and
   music, what is drawn, and how the controls behave, including left-hand mode.
 - Portrait and landscape, switchable mid-game.
+
+## Dedicated server
+
+Beyond a phone hosting a game, there is a **dedicated server** you can leave running on a spare
+machine. It is the same engine, built from the same sources without SDL or OpenAL, so ScorchDroid
+clients and desktop Scorched3D 44.3 clients both connect to it the way they would to any other
+Scorched3D server. Beside it runs a browser admin page: every setting the engine defines with
+upstream's own descriptions and validation, the connected players with kick, ban, mute and the
+rest, the live log and chat, and a restart button. Phones on the same network find the server by
+themselves.
+
+It is two containers, and there is nothing to clone — the compose file builds straight from this
+repository:
+
+```bash
+curl -O https://raw.githubusercontent.com/roge-rm/ScorchDroid/master/dedicated-server/docker-compose.yml
+echo 'ADMIN_PASSWORD=pick-something' > .env
+docker compose up -d --build
+```
+
+Setup, configuration, mods and backups: **[dedicated-server/README.md](dedicated-server/README.md)**.
+How it is built, and why: [docs/dedicated-server.md](docs/dedicated-server.md).
 
 ## Requirements
 
@@ -167,6 +191,11 @@ Two conventions are worth knowing before reading the renderer, because both have
 here: the engine's fire angle is measured **counter-clockwise** while wind and sun bearings are
 clockwise compass angles; and engine coordinates `(x, y, height)` map to world `(x, height,
 mapHeight − y)`, subtracting rather than negating so the world stays in the same box.
+
+## Discussion and support
+
+There is a Discord for the project: **[discord.gg/9Wun47jGC6](https://discord.gg/9Wun47jGC6)** —
+questions about playing it, help running a server, bug reports, or arranging a game.
 
 ## Attribution
 
