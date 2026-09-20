@@ -1,12 +1,11 @@
 *.iml
 .gradle
 /local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
+
+# Android Studio's per-machine project state, all of it. None of it is shared:
+# it holds this box's JDK name, the device picked from the deploy dropdown and
+# the local VCS mappings.
+/.idea/
 .DS_Store
 /build
 /host-tests/build
