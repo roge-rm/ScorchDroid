@@ -455,10 +455,23 @@ std::string ControlServer::handleSay(const std::vector<std::string> &args)
 	const std::string text = arg(args, 1);
 	if (text.empty()) return Json::error("nothing to say");
 
-	ServerAdminSessions::Credential &credential =
-		ScorchedServer::instance()->getServerAdminSessions().getLocalUserCredentials();
-	const bool accepted = ServerAdminCommon::adminSay(credential, channel.c_str(), text.c_str());
-	return Json::Object().set("ok", true).set("accepted", accepted).text();
+	// ServerAdminCommon::adminSay in all but the name. That labels the line
+	// with the credential's username, which upstream hardcodes as
+	// "localaccount" for the local account - accurate, and a strange thing
+	// for a player to be spoken to by. Players already know this server by
+	// its name, so that is what the operator speaks as.
+	//
+	// Nothing upstream changes: setAdminPlayer is a field upstream leaves to
+	// its caller, and the message goes out through the same
+	// ServerChannelManager::sendText with the same filtering and logging.
+	std::string who = ScorchedServer::instance()->getOptionsGame().getServerName();
+	if (who.empty()) who = config_.serverName;
+	if (who.empty()) who = "Server";
+
+	ChannelText channelText(channel, LANG_STRING(text));
+	channelText.setAdminPlayer(who);
+	ScorchedServer::instance()->getServerChannelManager().sendText(channelText, true);
+	return Json::Object().set("ok", true).set("accepted", true).text();
 }
 
 std::string ControlServer::handleAdmin(const std::vector<std::string> &args)
