@@ -129,7 +129,7 @@ index 8a34eb94..a4a2fa8d 100644
  #ifndef S3D_SERVER
  	#include <sprites/TalkRenderer.hpp>
  	#include <sprites/ExplosionTextures.hpp>
-@@ -63,6 +72,48 @@ void TankSay::init()
+@@ -63,6 +72,50 @@
  			text.setSrcPlayerId(playerId_);
  			ChannelManager::showText(*context_, text);
  		}
@@ -168,12 +168,14 @@ index 8a34eb94..a4a2fa8d 100644
 +				ScorchedServer::instance()->getServerChannelManager().
 +					sendText(text, true);
 +			}
-+			else
-+			{
-+				// Joined-client mode: no server here, and the host is
-+				// broadcasting its own copy already.
-+				ChannelManager::showText(*context_, text);
-+			}
++			// Nothing at all on a joined client, deliberately. The host
++			// broadcasts this same line to every destination as a
++			// ComsChannelTextMessage, and ClientContext pushes that copy
++			// with the speaker's name resolved from its srcPlayerId.
++			// Calling ChannelManager::showText() here as well - which this
++			// used to - showed a bot's taunt twice: once named, and once
++			// without a name, because showText is the path the *game's own*
++			// notices take and sets an empty speaker by design.
 +		}
  #endif // #ifndef S3D_SERVER
  	}

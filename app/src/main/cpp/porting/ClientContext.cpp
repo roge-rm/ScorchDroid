@@ -437,6 +437,17 @@ bool ClientContext::processMessage(NetMessage &message, const char *messageType,
 		// The message carries the speaker's player id, not their name.
 		Tank *tank = getTargetContainer().getTankById(text.getSrcPlayerId());
 		if (tank) line.who = tank->getCStrName();
+		else if (!text.getAdminPlayer().empty())
+		{
+			// An admin talking through the server has no tank, so the id
+			// resolves to nothing and the line used to arrive with no name on
+			// it at all. Upstream carries their name in the ChannelText's own
+			// admin field (ServerAdminCommon::adminSay sets it from the
+			// credential) and labels it "<name> (Admin)" in the server
+			// console - the same label the hosting side already shows, since
+			// pollServerChat parses it straight out of that console line.
+			line.who = text.getAdminPlayer() + " (Admin)";
+		}
 
 		ScorchDroidChat::push(line);
 		return true;
@@ -511,6 +522,17 @@ void ClientContext::sendToServer(ComsMessage &message, unsigned int flags)
 	message.writeMessage(buffer);
 	buffer.addToBuffer(false);  // Not compressed.
 	getNetInterface().sendMessageServer(buffer, flags);
+}
+
+bool ClientContext::sendChat(const std::string &channel, const std::string &text,
+	unsigned int srcPlayerId)
+{
+	if (text.empty()) return false;
+
+	ChannelText channelText(channel, LANG_STRING(text));
+	channelText.setSrcPlayerId(srcPlayerId);
+	ComsChannelTextMessage message(channelText);
+	return sendGameMessage(message);
 }
 
 void ClientContext::subscribeToChatChannels()

@@ -90,6 +90,19 @@ public:
 	// elsewhere in engine_jni.cpp.
 	bool sendGameMessage( ComsMessage& message );
 
+	// Say something on a chat channel, as upstream's
+	// ClientChannelManager::sendText does - including setting srcPlayerId,
+	// without which ServerChannelManager rejects the message as not provably
+	// from this tank.
+	//
+	// Deliberately shows nothing locally. The host fans a message out to
+	// every destination *including the sender*, so this client's own line
+	// arrives back through processMessage() like anyone else's; pushing one
+	// here as well is what once showed the sender their own message twice.
+	// The host's copy is also the filtered one every other player was shown.
+	bool sendChat( const std::string& channel, const std::string& text,
+		unsigned int srcPlayerId );
+
 	// ComsMessageHandlerI - registered for each message type this client
 	// needs to react to (see the constructor).
 	virtual bool processMessage( NetMessage& message, const char* messageType, NetBufferReader& reader );

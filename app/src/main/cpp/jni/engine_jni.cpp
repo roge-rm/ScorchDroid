@@ -3034,22 +3034,15 @@ Java_com_rm_scorchdroid_NativeBridge_sendChat(
     }
 
     if (g_mode == EngineMode::kClient && g_clientContext) {
-        ComsChannelTextMessage message(channelText);
-        // sendGameMessage rather than the private sendToServer: it also
-        // refuses to send before the handshake has reached sJoined, which is
-        // the right answer for chat typed while still connecting.
-        if (!g_clientContext->sendGameMessage(message)) return JNI_FALSE;
-        // Shown locally at once rather than waiting for the host to echo it
-        // back: the round trip is a send boundary away, and a chat box that
-        // appears to swallow what you typed reads as broken. If the host
-        // rejects or filters it, the only cost is a line the others never
-        // saw - the same trade the shop's optimistic "buying..." makes.
-        ScorchDroidChat::Line line;
-        line.channel = channel;
-        line.who = tank->getCStrName();
-        line.text = text;
-        ScorchDroidChat::push(line);
-        return JNI_TRUE;
+        // ClientContext::sendChat rather than a message built here, so the
+        // joined client's whole chat path - send and receive both - lives in
+        // one place that host-tests compiles and testClientJoin() exercises
+        // across two real processes. In particular it shows nothing locally:
+        // the host echoes a message back to the sender along with everyone
+        // else, and pushing a line here as well is what showed the sender
+        // their own message twice.
+        return g_clientContext->sendChat(channel, text, tank->getPlayerId())
+                ? JNI_TRUE : JNI_FALSE;
     }
     return JNI_FALSE;
 }

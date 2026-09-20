@@ -157,6 +157,16 @@ static int netSoakSeconds()
 	return (seconds > 0) ? seconds : 0;
 }
 
+// The three things said during runClientProcess below, and counted coming
+// back. Distinctive so nothing else in the chat log matches them.
+static const char *kChatProbeText = "host-tests chat probe";
+static const char *kBotSayText    = "host-tests bot taunt";
+static const char *kAdminSayText  = "host-tests admin notice";
+// What upstream's server console calls a line from the local admin account
+// (ServerChannelManager::actualSend's "%s (Admin)" branch), which is what the
+// joined client should show too.
+static const char *kAdminWho      = "localaccount (Admin)";
+
 namespace
 {
 	int failures = 0;
@@ -2592,10 +2602,16 @@ namespace
 	// exits in about fifteen seconds. Plus whatever the client intends to
 	// spend soaking (see netSoakSeconds), since it cannot measure steady
 	// play unless the host is still stepping.
-	bool runHostUntilClientExits(ScorchedServer *server, pid_t pid, int &status)
+	// speakAsAdmin: answer the client's chat probe, once, by speaking as the
+	// server's local admin account. Triggered off the probe appearing in the
+	// server's own channel log rather than off a tick count, so the client is
+	// certainly listening by the time it goes out.
+	bool runHostUntilClientExits(ScorchedServer *server, pid_t pid, int &status,
+		bool speakAsAdmin = false)
 	{
 		Clock tickClock;
 		pid_t waited = 0;
+		bool spoken = false;
 		const int hostTickBudget = 700 + netSoakSeconds() * 10;
 		for (int i = 0; i < hostTickBudget; i++)
 		{
@@ -2609,6 +2625,25 @@ namespace
 			server->getServerFileServer().simulate();
 			server->getServerChannelManager().simulate(timeDifference);
 			server->getTimedMessage().simulate();
+
+			if (speakAsAdmin && !spoken)
+			{
+				std::list< ServerChannelManager::MessageEntry > &seen =
+					server->getServerChannelManager().getLastMessages();
+				std::list< ServerChannelManager::MessageEntry >::iterator sitor;
+				for (sitor = seen.begin(); sitor != seen.end(); ++sitor)
+				{
+					if (sitor->message.find(kChatProbeText) == std::string::npos) continue;
+					spoken = true;
+					break;
+				}
+				if (spoken)
+				{
+					ServerAdminSessions::Credential &cred =
+						server->getServerAdminSessions().getLocalUserCredentials();
+					ServerAdminCommon::adminSay(cred, "general", kAdminSayText);
+				}
+			}
 
 			waited = waitpid(pid, &status, WNOHANG);
 			if (waited == pid) break;
@@ -2755,7 +2790,7 @@ namespace
 		// promotes/invokes the resulting TankAddSimAction) while the child
 		// process runs its own handshake.
 		int status = 0;
-		bool joined = runHostUntilClientExits(server, pid, status);
+		bool joined = runHostUntilClientExits(server, pid, status, true);
 		if (!joined)
 		{
 			FILE *resultFile = fopen(resultPath, "r");
@@ -2795,7 +2830,45 @@ namespace
 					" totalin=%u totalout=%u soaksecs=%f",
 					&joinIn, &joinOut, &joinSecs, &peakIn, &peakOut,
 					&totalIn, &totalOut, &soakSecs) == 8;
+			// The bug this pins: a client that says one thing must see one
+			// line, not two. The host sends every destination its own copy
+			// (ServerChannelManager::actualSend over destinationEntries_), so
+			// anything that also shows the line locally at send time doubles
+			// it - see runClientProcess()'s comment.
+			int chatCopies = -1, botCopies = -1, adminOk = -1;
+			float chatEchoSecs = 0.0f;
+			bool chatParsed = trafficParsed &&
+				fscanf(resultFile, " chat copies=%d echosecs=%f botcopies=%d adminok=%d",
+					&chatCopies, &chatEchoSecs, &botCopies, &adminOk) == 4;
 			if (resultFile) fclose(resultFile);
+
+			check(chatParsed && chatCopies == 1,
+				"a joined client sees its own chat message exactly once");
+			if (chatParsed && chatCopies != 1)
+			{
+				fprintf(stderr, "  client saw %d copies of the one message it sent\n",
+					chatCopies);
+			}
+			if (chatParsed && chatCopies >= 1)
+			{
+				fprintf(stderr, "  (the host's echo of the client's own chat came back in %.0f ms)\n",
+					chatEchoSecs * 1000.0f);
+			}
+
+			// A bot's taunt reaches a joined client twice over: once from the
+			// host, named, and once from the TankSay the client replays itself,
+			// which has no speaker. Only the host's copy should survive.
+			check(chatParsed && botCopies == 0,
+				"replaying a bot's TankSay on a joined client adds no chat line of its own");
+			if (chatParsed && botCopies != 0)
+			{
+				fprintf(stderr, "  the client's own TankSay replay added %d line(s)\n", botCopies);
+			}
+
+			// An admin has no tank, so the name has to come from the
+			// ChannelText's admin field or the line arrives anonymous.
+			check(chatParsed && adminOk == 1,
+				"an admin's line reaches a joined client with the admin's name on it");
 
 			if (trafficParsed)
 			{
@@ -3335,6 +3408,33 @@ struct NetTrafficMeter
 // exec: the client then joins over a NetBridge rather than TCP, and `host`
 // and `port` mean nothing. Everything after the connect is identical, which
 // is the claim the bridge test exists to check.
+static int countChatLines(const char *text)
+{
+	int count = 0;
+	std::vector< ScorchDroidChat::Line > lines = ScorchDroidChat::snapshot();
+	for (size_t i = 0; i < lines.size(); i++)
+	{
+		if (lines[i].text == text) count++;
+	}
+	return count;
+}
+
+// The name shown beside a line, or "" when it has not arrived yet.
+static std::string chatWhoFor(const char *text)
+{
+	std::vector< ScorchDroidChat::Line > lines = ScorchDroidChat::snapshot();
+	for (size_t i = 0; i < lines.size(); i++)
+	{
+		if (lines[i].text == text) return lines[i].who;
+	}
+	return "";
+}
+
+static int countChatProbeLines()
+{
+	return countChatLines(kChatProbeText);
+}
+
 static int runClientProcess(const char *host, int port, const char *resultPath, int bridgeFd = -1)
 {
 	if (chdir(SCORCHED_SUBMODULE_ROOT) != 0)
@@ -3391,6 +3491,14 @@ static int runClientProcess(const char *host, int port, const char *resultPath, 
 	unsigned int joinBytesOut = NetInterface::getBytesOut();
 	unsigned int peakInPerSec = 0, peakOutPerSec = 0;
 	float        soakSeconds  = 0.0f;
+	// How many copies of one message this client sees after saying it once,
+	// and how long the host took to send it back.
+	int          chatCopies  = -1;
+	float        chatEchoSeconds = 0.0f;
+	// A bot's taunt replayed here must add nothing, and an admin's line must
+	// arrive with a name on it. -1 means the probe never ran.
+	int          botSayCopies = -1;
+	int          adminAttributed = -1;
 
 	if (joined)
 	{
@@ -3460,6 +3568,89 @@ static int runClientProcess(const char *host, int port, const char *resultPath, 
 			soakSeconds = soakClock.getTimeDifference();
 		}
 
+		// Chat: what a joined client sees after saying one thing once.
+		//
+		// ServerChannelManager::sendText fans a message out through
+		// actualSend(text, destinationEntries_, ...) - every destination, the
+		// sender included - so a client receives its own line back through the
+		// same ComsChannelTextMessage handler that carries everyone else's.
+		// That is why ClientContext::sendChat must not *also* push the line
+		// locally: doing both showed the sender their own message twice, which
+		// is the bug this pins. The host's copy is the one to keep - it
+		// is the filtered one actualSend() produced, which is what every other
+		// player was shown.
+		Tank *ownTank = 0;
+		{
+			std::map<unsigned int, Tank *> &tanks = client.getTargetContainer().getTanks();
+			std::map<unsigned int, Tank *>::iterator itor;
+			for (itor = tanks.begin(); itor != tanks.end(); ++itor)
+			{
+				if (itor->second->getDestinationId() == client.getMyDestinationId())
+				{
+					ownTank = itor->second;
+					break;
+				}
+			}
+		}
+		if (ownTank)
+		{
+			ScorchDroidChat::clear();
+			Clock chatClock;
+			// The same call the app's sendChat() JNI function makes when
+			// joined, which is what makes this a test of the real path.
+			if (client.sendChat("general", kChatProbeText, ownTank->getPlayerId()))
+			{
+				chatCopies = 0;
+				for (int i = 0; i < 100 && chatCopies == 0; i++)
+				{
+					client.tick();
+					chatCopies = countChatProbeLines();
+					if (chatCopies == 0) usleep(50 * 1000);
+				}
+				chatEchoSeconds = chatClock.getTimeDifference();
+				// Keep listening afterwards, for two reasons. A duplicate
+				// arrives *after* the first copy, not instead of it, so a count
+				// taken the moment the first line lands would pass either way;
+				// and the host answers the probe by speaking as the admin, which
+				// is what the attribution check below reads.
+				for (int i = 0; i < 60 && chatWhoFor(kAdminSayText).empty(); i++)
+				{
+					client.tick();
+					usleep(50 * 1000);
+				}
+				chatCopies = countChatProbeLines();
+
+				// An admin speaking through the server has no tank, so the
+				// srcPlayerId resolves to nothing; the name has to come from the
+				// ChannelText's own admin field instead, or the line arrives
+				// with nobody's name against it.
+				std::string adminWho = chatWhoFor(kAdminSayText);
+				adminAttributed = (adminWho == kAdminWho) ? 1 : 0;
+				// Worded for both runs: the bridge join does not ask its host
+				// to speak as the admin, so an empty name there is expected
+				// rather than the failure it would otherwise look like.
+				if (adminWho.empty())
+					fprintf(stderr, "  client saw no admin line\n");
+				else
+					fprintf(stderr, "  client saw the admin line attributed to \"%s\"\n",
+						adminWho.c_str());
+			}
+
+			// A bot's taunt. TankSay is raised inside PlayMovesSimAction, a
+			// sim action a joined client replays, so TankSay::init() runs here
+			// as well as on the host - with no server started, which is the
+			// branch that matters. It must add nothing to the chat log: the
+			// host broadcasts the line itself with the speaker's name on it,
+			// and a copy raised here arrives beside it with no name, because
+			// ChannelManager::showText is the path the game's own notices take
+			// and sets an empty speaker by design.
+			ScorchDroidChat::clear();
+			TankSay botSay(ownTank->getPlayerId(), LANG_STRING(kBotSayText));
+			botSay.setScorchedContext(&client);
+			botSay.init();
+			botSayCopies = countChatLines(kBotSayText);
+		}
+
 		peakInPerSec  = meter.peakInPerSec_;
 		peakOutPerSec = meter.peakOutPerSec_;
 	}
@@ -3486,6 +3677,11 @@ static int runClientProcess(const char *host, int port, const char *resultPath, 
 			" totalin=%u totalout=%u soaksecs=%.3f\n",
 			joinBytesIn, joinBytesOut, joinSeconds, peakInPerSec, peakOutPerSec,
 			NetInterface::getBytesIn(), NetInterface::getBytesOut(), soakSeconds);
+
+		// Third line, same reasoning as the second: a chat probe that failed
+		// to run should not be able to fail the join assertions.
+		fprintf(f, "chat copies=%d echosecs=%.3f botcopies=%d adminok=%d\n",
+			chatCopies, chatEchoSeconds, botSayCopies, adminAttributed);
 	}
 	else
 	{
