@@ -9,7 +9,7 @@ Effort has been made to bring every feature from the desktop game to the mobile 
 
 Requires Android 8.0 or higher.
 
-Questions, bug reports, suggestions, looking for people to play with? Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jGC6)**.
+Questions, bug reports, suggestions, looking for people to play with?<br>Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jGC6)**.
 
 Enjoy!
 Dan
@@ -194,7 +194,8 @@ mapHeight − y)`, subtracting rather than negating so the world stays in the sa
 
 ## Discussion and support
 
-Questions, ideas, bug reports, looking for someone to play with? Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jGC6)**.
+Questions, ideas, bug reports, looking for someone to play with?<br>
+Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jGC6)**.
 
 ## Attribution
 
