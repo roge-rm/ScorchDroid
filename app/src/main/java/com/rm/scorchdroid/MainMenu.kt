@@ -467,7 +467,7 @@ fun AboutScreen(
             AboutHeading("Copyright")
             AboutParagraph(
                 "Scorched3D is Copyright (C) 2000-2011 Gavin Camp and contributors.\n" +
-                    "Android port by roge-rm."
+                    "Android port by Dan Hunke."
             )
             AboutHeading("Licence")
             AboutParagraph(

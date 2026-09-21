@@ -203,7 +203,7 @@ Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jG
   [scorched3d.co.uk](https://www.scorched3d.co.uk/). This port builds on the maintained fork at
   [bberberov/scorched3d](https://github.com/bberberov/scorched3d).
 - The game's data files, models, textures and sounds are upstream's, bundled unmodified.
-- Ported to Android, with a from-scratch OpenGL ES 3 renderer and a new Compose UI, by roge-rm.
+- Ported to Android, with a from-scratch OpenGL ES 3 renderer and a new Compose UI, by Dan Hunke.
 
 ## License
 
