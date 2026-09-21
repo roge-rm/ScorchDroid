@@ -3,13 +3,13 @@
 ScorchDroid is an Android port of [Scorched3D](https://www.scorched3d.co.uk/), the 3D artillery game, based on the classic Scorched Earth. 
 It uses [bberberov/scorched3d](https://github.com/bberberov/scorched3d) as an upstream source (you'll see upstream referred to constantly) and even boasts cross-compatability with it, at least currently.
 
-The entire game engine was ported over from Scorched3D so it plays the same as the original game. The UI has been totally redone but the graphics are ~mostly~ the same. The controls have been adapted to work on a touch screen, with sliders and touch buttons to provide the controls the keyboard used to.
+The entire game engine was ported over from Scorched3D so it plays the same as the original game. The UI has been totally redone but the graphics are *mostly* the same. The controls have been adapted to work on a touch screen, with sliders and touch buttons to provide the controls the keyboard used to.
 
 Effort has been made to bring every feature from the desktop game to the mobile port, from graphics to audio to network play. Additional network options have been added, allowing you to play over Bluetooth or Ad-Hoc WIFI networks on top of regular WLAN play.
 
 Requires Android 8.0 or higher.
 
-Questions, bug reports, suggestions, looking for people to play with?<br>Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jGC6)**.
+Questions, bug reports, suggestions, looking for people to play with? Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jGC6)**.
 
 Enjoy!
 Dan
