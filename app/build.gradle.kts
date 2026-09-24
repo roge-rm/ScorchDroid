@@ -5,10 +5,13 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-val localProperties = Properties().apply {
-    val file = rootProject.file("local.properties")
-    if (file.exists()) file.inputStream().use { load(it) }
-}
+// Release signing comes from ../Keys/scorchdroid-keystore.properties, beside the project rather than
+// in it (the same layout as Acidulous), so neither the keystore nor its passwords can ever be
+// committed. Without that file, e.g. on a fresh clone, the release build is simply unsigned.
+val signingProperties: Properties? = rootProject.file("../Keys/scorchdroid-keystore.properties")
+    .takeIf { it.exists() }
+    ?.let { f -> Properties().apply { f.inputStream().use { load(it) } } }
+val releaseStoreFile = signingProperties?.getProperty("storeFile")
 
 // Staged before `android { }` so the assets source set below can point at
 // it by task provider rather than by path string - see the srcDir call.
@@ -65,19 +68,13 @@ android {
         }
     }
 
-    // Release signing credentials come from local.properties (never
-    // committed) as scorchdroid.release.{storeFile,storePassword,keyAlias,
-    // keyPassword}. Absent them the release build is simply unsigned, so a
-    // plain checkout of this repository still builds.
-    val releaseStoreFile = localProperties.getProperty("scorchdroid.release.storeFile")
-
     signingConfigs {
         if (releaseStoreFile != null) {
             create("release") {
                 storeFile = file(releaseStoreFile)
-                storePassword = localProperties.getProperty("scorchdroid.release.storePassword")
-                keyAlias = localProperties.getProperty("scorchdroid.release.keyAlias")
-                keyPassword = localProperties.getProperty("scorchdroid.release.keyPassword")
+                storePassword = signingProperties?.getProperty("storePassword")
+                keyAlias = signingProperties?.getProperty("keyAlias")
+                keyPassword = signingProperties?.getProperty("keyPassword")
             }
         }
     }
