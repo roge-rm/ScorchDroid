@@ -142,14 +142,14 @@ object WifiDirectTransport {
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 "the nearby devices permission was refused"
             } else {
-                "the location permission was refused - Android ${Build.VERSION.RELEASE} " +
-                    "treats finding nearby devices as a location feature"
+                "the location permission was refused (Android ${Build.VERSION.RELEASE} " +
+                    "needs it to find nearby devices)"
             }
         }
         // Wi-Fi P2P rides the Wi-Fi radio: the point of it is not needing a
         // *network*, but the radio itself still has to be on.
         if (!isWifiEnabled(context)) {
-            return "Wi-Fi is switched off - turn it on, it does not need to join a network"
+            return "Wi-Fi is turned off. Turn it on, it doesn't need to be connected to a network"
         }
         // Below API 33 the permission is not enough on its own: with the
         // master location toggle off, discovery succeeds and then reports
@@ -157,8 +157,8 @@ object WifiDirectTransport {
         // toggle is irrelevant, which is why this is version-gated rather
         // than asked of everyone.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU && !isLocationEnabled(context)) {
-            return "Location is switched off in system settings, which Android " +
-                "${Build.VERSION.RELEASE} needs before it will look for nearby devices"
+            return "Location is turned off, and Android " +
+                "${Build.VERSION.RELEASE} needs it on to find nearby devices"
         }
         return null
     }
@@ -572,8 +572,8 @@ object WifiDirectTransport {
         if (!leaveAnyGroup(context, mgr, ch)) {
             return ConnectResult(
                 null,
-                "this device is still in a Wi-Fi Direct group of its own - turn Wi-Fi " +
-                    "off and on again, or disconnect it under Settings, Wi-Fi, Wi-Fi Direct"
+                "this device is still in another Wi-Fi Direct group. Turn Wi-Fi " +
+                    "off and on, or disconnect it under Settings > Wi-Fi > Wi-Fi Direct"
             )
         }
         // Leaving a group puts the P2P stack through a state change; a
@@ -596,7 +596,7 @@ object WifiDirectTransport {
             if (!awaitPeer(context, mgr, ch, deviceAddress)) {
                 return ConnectResult(
                     null,
-                    "the other device stopped answering - is it still hosting?"
+                    "the other device stopped responding, is it still hosting?"
                 )
             }
             val attempt = attemptConnect(context, mgr, ch, deviceAddress, timeoutMs)
@@ -648,8 +648,8 @@ object WifiDirectTransport {
                                 finish(
                                     ConnectResult(
                                         null,
-                                        "the group formed with this device as owner, so the " +
-                                            "other device is not the one hosting"
+                                        "this device ended up as the group owner, so the " +
+                                            "other device isn't the one hosting"
                                     )
                                 )
                             } else {
@@ -690,8 +690,8 @@ object WifiDirectTransport {
                 finish(
                     ConnectResult(
                         null,
-                        "the other device never answered - it may be showing an invitation " +
-                            "prompt that needs accepting"
+                        "the other device never responded, check it for an invite " +
+                            "to accept"
                     )
                 )
             }, timeoutMs)
@@ -810,7 +810,7 @@ object WifiDirectTransport {
     /** The framework's connect() refusals, as something a player can read. */
     private fun connectFailure(reason: Int): String = when (reason) {
         WifiP2pManager.P2P_UNSUPPORTED -> "this device does not support Wi-Fi Direct"
-        WifiP2pManager.BUSY -> "the Wi-Fi Direct service is busy - try again in a moment"
+        WifiP2pManager.BUSY -> "the Wi-Fi Direct service is busy, try again in a moment"
         WifiP2pManager.NO_SERVICE_REQUESTS -> "there was no service request outstanding"
         else -> "the connection request was refused (reason $reason)"
     }

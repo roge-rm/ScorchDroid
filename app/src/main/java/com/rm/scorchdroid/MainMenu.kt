@@ -216,7 +216,7 @@ fun SinglePlayerScreen(
         // from here is one - so this is where a save comes back to.
         MenuButton(
             "Load Game",
-            if (loadGameEnabled) "Carry on a saved game" else "No saved games yet",
+            if (loadGameEnabled) "Continue a saved game" else "No saved games yet",
             enabled = loadGameEnabled,
             onClick = onLoadGame,
         )
@@ -346,7 +346,7 @@ fun MultiplayerScreen(
         // be made after the fact.
         MenuButton(
             "Host over Bluetooth",
-            "No Wi-Fi at all - for two devices side by side",
+            "No Wi-Fi needed, for two phones side by side",
             onClick = onHostBluetooth,
             enabled = bluetoothEnabled,
         )
@@ -356,7 +356,7 @@ fun MultiplayerScreen(
         // make before one is.
         MenuButton(
             "Load Game",
-            if (loadGameEnabled) "Carry on a saved game with others" else "No saved games yet",
+            if (loadGameEnabled) "Continue a saved game with friends" else "No saved games yet",
             enabled = loadGameEnabled,
             onClick = onLoadGame,
         )
@@ -460,9 +460,9 @@ fun AboutScreen(
             Spacer(Modifier.height(10.dp))
             AboutParagraph(
                 "An Android port of Scorched3D, the 3D artillery game based on the " +
-                    "classic Scorched Earth. The simulation - weapons, physics, terrain " +
-                    "destruction, economy and bot AI - is upstream's own C++ code. The " +
-                    "renderer and the whole interface are new."
+                    "classic Scorched Earth. The game engine (weapons, physics, terrain, " +
+                    "money and bots) is Scorched3D's own code, so it plays the same as the " +
+                    "original. The graphics and the UI have been redone for mobile."
             )
             AboutHeading("Copyright")
             AboutParagraph(
@@ -482,16 +482,16 @@ fun AboutScreen(
             )
             AboutHeading("Source code")
             AboutParagraph(
-                "The complete corresponding source for this build:\n\n" +
+                "The full source for this build:\n\n" +
                     "github.com/roge-rm/ScorchDroid\n\n" +
-                    "It contains this port's own source, the exact upstream commit it is " +
-                    "built against ($upstreamCommit, from github.com/bberberov/scorched3d), " +
-                    "and every patch applied to that checkout, under patches/."
+                    "It has the port's own code, the exact upstream commit it's built on " +
+                    "($upstreamCommit, from github.com/bberberov/scorched3d), and every " +
+                    "patch applied to it, under patches/."
             )
             AboutHeading("Game data")
             AboutParagraph(
-                "The bundled landscapes, models, textures, sounds and language files are " +
-                    "upstream's, included unmodified and under the same licence."
+                "The landscapes, models, textures, sounds and language files all come " +
+                    "from Scorched3D, unmodified and under the same licence."
             )
             AboutHeading("GNU General Public License, version 2")
             Text(

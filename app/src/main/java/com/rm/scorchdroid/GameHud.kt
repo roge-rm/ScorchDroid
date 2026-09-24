@@ -508,7 +508,7 @@ fun GameHud(
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             ) {
                 Text(
-                    "Skipping your move in ${state.skipAllSeconds}s",
+                    "Skipping your turn in ${state.skipAllSeconds}s",
                     color = Color.White,
                     style = MaterialTheme.typography.labelLarge,
                 )

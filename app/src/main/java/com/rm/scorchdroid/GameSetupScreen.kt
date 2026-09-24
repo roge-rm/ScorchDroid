@@ -176,7 +176,7 @@ fun GameSetupScreen(
                     .padding(top = 10.dp),
             ) {
                 Text(
-                    text = "These are Scorched3D's own settings, with its own limits.",
+                    text = "Same settings and limits as Scorched3D.",
                     color = SetupAccent,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -271,9 +271,9 @@ private fun BotRow(bots: List<BotOption>, selected: List<String>, onChange: (Lis
             text = when {
                 selected.size == 1 ->
                     bots.firstOrNull { it.name == selected.first() }?.description
-                        ?: "Which computer players fill the other places"
-                selected.size > 1 -> "The other places are filled from these, in turn"
-                else -> "Which computer players fill the other places"
+                        ?: "Which bots fill the empty spots"
+                selected.size > 1 -> "Empty spots are filled with these, in turn"
+                else -> "Which bots fill the empty spots"
             },
             color = Color.White.copy(alpha = 0.55f),
             style = MaterialTheme.typography.bodySmall,
@@ -356,9 +356,9 @@ private fun LandscapeRow(
         }
         Text(
             text = when {
-                cleared -> "None picked - every landscape until you choose one"
-                selected.isEmpty() -> "Every landscape this mod defines"
-                else -> "${selected.size} of ${landscapes.size} landscapes"
+                cleared -> "None picked, every map is used until you pick one"
+                selected.isEmpty() -> "Every map in this mod"
+                else -> "${selected.size} of ${landscapes.size} maps"
             },
             color = Color.White.copy(alpha = 0.55f),
             style = MaterialTheme.typography.bodySmall,
@@ -566,7 +566,7 @@ private fun ModRow(mods: List<String>, selected: String, onChange: (String) -> U
     Column(modifier = Modifier.fillMaxWidth()) {
         Text("Mod", color = Color.White, style = MaterialTheme.typography.titleSmall)
         Text(
-            text = "Which set of weapons, landscapes and models to play with",
+            text = "Which weapons, maps and models to play with",
             color = Color.White.copy(alpha = 0.55f),
             style = MaterialTheme.typography.bodySmall,
         )

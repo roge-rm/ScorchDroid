@@ -1292,9 +1292,9 @@ Java_com_rm_scorchdroid_NativeBridge_getMyStatusLabel(JNIEnv *env, jobject /* th
             const char *state = tank->getState().getSmallStateString();
             if (0 == strcmp(state, "Loading")) label = "Joining game...";
             else if (0 == strcmp(state, "Spectator")) label = "Spectating";
-            else if (0 == strcmp(state, "Buying")) label = "Buying phase - visit the Shop";
+            else if (0 == strcmp(state, "Buying")) label = "Buying time, visit the Shop";
             else if (0 == strcmp(state, "Alive")) label = "Fire when ready!";
-            else if (0 == strcmp(state, "Dead")) label = "You're out - waiting for next round";
+            else if (0 == strcmp(state, "Dead")) label = "You're out, wait for the next round";
             else label = state;
         }
     }

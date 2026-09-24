@@ -20,87 +20,57 @@ Dan
 
 ## Features
 
-- The real Scorched3D simulation, not an approximation: upstream's weapons, accessories, terrain
-  destruction, wind, shields, parachutes, tank movement, and bot AI.
-- Scorched3D's own picture, method for method: the landscape from the real heightmap with the
-  ground texture built the way upstream builds it, its detail texture and its light; a Tessendorf
-  ocean with choppy crests that grow with the wind, whitecaps, breakers along every shore, and the
-  whole scene reflected in it; the sun as a positional light with its shadow map; the sky dome with
-  the landscape's own gradient, clouds, sun, stars and fog; tanks, scenery, ships and aircraft in
-  their own textures and materials; trees; cavern roofs; rain and snow where a landscape asks.
-- Weapon effects driven by the simulation's own events, drawn with Scorched3D's own particle
-  textures and animations — explosions, napalm, lasers, lightning, shield hits, sky flashes,
-  teleports, smoke that streams downwind, mushroom clouds, thrown debris, arena wall flashes,
-  floating damage numbers and speech bubbles. Rollers bounce and tumble down the landscape, and a
-  tank can go up in Scorched3D's own rising column of light.
-- Scorched3D's own sound and music: its effects raised from the simulation's own events, mixed the
-  way it mixes them — eight channels handed to the nearest and most important sounds, the rest
-  dropped, everything falling away with distance — plus the turn countdown, the servo as the turret
-  swings, and its three music loops keyed to the state of the game by its own `music.xml`.
-- Touch controls: drag to orbit, pinch to zoom, tap to aim, plus angle/elevation/power sliders that
-  don't depend on screen-to-world mapping. One bar fires and picks the weapon — a tap sends the shot,
-  a hold opens the weapon list — and it turns red once the shot is in.
-- Seven camera views including a shot camera that follows the projectile.
-- Multiplayer — host or join over Wi-Fi, a hotspot, Wi-Fi Direct or Bluetooth,
-  with automatic game discovery. Wi-Fi Direct needs no router, hotspot or
-  internet at all, and Bluetooth needs no Wi-Fi either: two phones side by
-  side can play with every other radio switched off. A single-player game
-  announces nothing: it registers no service and forms no Wi-Fi Direct group,
-  even though the engine still runs a server for it.
-- It can also join a **desktop Scorched3D server** and play alongside PC
-  clients — enter the server's address under Join Game. This was never a goal
-  and is not something the port does anything to achieve: it compiles
-  upstream's own protocol code and version constants unchanged, and ships
-  upstream's own data, so the handshake and the mod checksums simply match.
-  It holds only while the two sides agree on Scorched3D's version and protocol
-  (44.3 / "ew" here) and on the contents of the shipped data, so `host_tests`
-  pins both — it cannot prove a desktop client will connect, only fail the
-  moment either foundation moves.
-- In-game chat and a live score table, with each player's avatar, their tank colour and — in a team
-  game — the team totals. The game's own announcements — who killed whom with what, who joined —
-  arrive in the same place.
-- Admin controls for whoever is hosting: kick, ban, mute, slap, take a player's money, kill, start
-  a new game or clear the map.
-- A **dedicated server** you can leave running on a spare machine, as two containers anyone can
-  start with `docker compose up` — the same engine, plus a browser admin page for its settings,
-  its players, its chat and its log. Phones on the same network find it by themselves. See
-  [dedicated-server/README.md](dedicated-server/README.md).
-- The full shop: weapons and defensive accessories, with purchases acknowledged immediately - and
-  Scorched3D's own gift of money to another player, from the same screen it keeps it in.
-- Save a game you are hosting and pick it up later, solo or with other people; the saves list its
-  own, newest first, and a bin beside each one.
-- Skip all your moves at once when you have to walk away, with a five-second countdown each turn
-  that lets you take it back.
-- Hold a tank's name plate for its card: life, shield, lives, score, skill and rank, the same lines
-  Scorched3D shows when you rest the mouse on a tank.
-- A main menu — single player, multiplayer, and an About screen carrying the GPL notice and the
-  exact upstream commit the build came from. Games can be left and started again without
-  restarting the app.
-- A tutorial over a real practice game, and Quick Game: the ready-made games each mod describes in
-  its own `modinfo.xml` — target practice, easy, normal and hard, for the base game and for any mod
-  installed beside it.
-- A setup screen before each game, in four tabs: the shape of the game, the players, the arsenal
-  and the world. Rounds, turns, lives, teams, the bots and how good they are, money, arms levels,
-  weapon speed, gravity, walls and wind — Scorched3D's own options, with its own limits, read from
-  the engine rather than redeclared.
-- Mod support, including the bundled Apocalypse mod with its own weapons, landscapes, models and
-  bots.
-- A settings screen in four tabs: who you are (name, tank model, colour and avatar), sound and
-  music, what is drawn, and how the controls behave, including left-hand mode.
-- Portrait and landscape, switchable mid-game.
+- The real Scorched3D game engine, not a remake. Weapons, accessories, terrain destruction, wind,
+  shields, parachutes, tank movement and the bots all work exactly like they do on desktop.
+- The graphics are rebuilt to match the original as closely as possible. That includes the
+  landscape and its textures, the ocean with waves that grow with the wind and reflect the whole
+  scene, sun shadows, the sky with its clouds, stars and fog, the tank, ship and scenery models,
+  trees, and rain and snow on the maps that have them.
+- Weapon effects use Scorched3D's particle textures and animations, so explosions, napalm, lasers,
+  lightning, shield hits, smoke, mushroom clouds and the rest look like they should.
+- Sound and music are from Scorched3D and mixed the same way it does it, along with the turn
+  countdown and the turret servo sound.
+- Touch controls: drag to move the camera, pinch to zoom, tap to aim, plus sliders for angle,
+  elevation and power. One big bar fires your shot (tap) and picks your weapon (hold), and it turns
+  red once your shot is in.
+- Seven camera views, including one that follows your shot.
+- Multiplayer over Wi-Fi, a hotspot, Wi-Fi Direct or Bluetooth, and games are found automatically.
+  Wi-Fi Direct and Bluetooth don't need a router or internet, so two phones side by side can play
+  anywhere. Single player games don't broadcast anything.
+- You can also join a **desktop Scorched3D server** and play with people on PC, just enter the
+  server's address under Join Game. This works because the port uses Scorched3D's own network code
+  and data unchanged, and it only holds as long as both sides are on the same version (44.3 /
+  "ew"). `host_tests` checks both so I'll know if it ever breaks.
+- In-game chat and a live score table with avatars, tank colours and team totals.
+- Admin controls for the host: kick, ban, mute, slap, take money, kill, start a new game or clear
+  the map.
+- A **dedicated server** you can run on a spare machine with `docker compose up`, with a web page
+  to manage its settings, players, chat and log. Phones on the same network find it on their own.
+  See [dedicated-server/README.md](dedicated-server/README.md).
+- The full shop with weapons and defenses, plus giving money to other players.
+- Save a game you're hosting and load it later, solo or with other people.
+- Skip all your turns if you need to walk away, with a five second countdown each turn so you can
+  change your mind.
+- Hold a tank's name to see its life, shield, lives, score, skill and rank.
+- A tutorial on a real practice game, and Quick Game with ready-made games (target practice, easy,
+  normal and hard) for the base game and any installed mods.
+- A setup screen for new games with all of Scorched3D's options: rounds, turns, lives, teams,
+  bots, money, weapons, gravity, walls, wind, maps and more.
+- Mod support, including the Apocalypse mod which comes bundled.
+- Settings for your name, tank, colour and avatar, sound and music, graphics, and controls
+  (including left-hand mode).
+- Portrait and landscape, and you can switch mid-game.
 
 ## Dedicated server
 
-Beyond a phone hosting a game, there is a **dedicated server** you can leave running on a spare
-machine. It is the same engine, built from the same sources without SDL or OpenAL, so ScorchDroid
-clients and desktop Scorched3D 44.3 clients both connect to it the way they would to any other
-Scorched3D server. Beside it runs a browser admin page: every setting the engine defines with
-upstream's own descriptions and validation, the connected players with kick, ban, mute and the
-rest, the live log and chat, and a restart button. Phones on the same network find the server by
-themselves.
+If you want a game that's always up you can run a **dedicated server** on a spare machine. It's
+the same engine without the graphics and sound, so both ScorchDroid and desktop Scorched3D 44.3
+players can connect to it. It comes with a web admin page where you can change any setting, manage
+players (kick, ban, mute etc.), watch the log and chat, and restart the server. Phones on the same
+network will find it on their own.
 
-It is two containers, and there is nothing to clone — the compose file builds straight from this
-repository:
+It runs as two containers and you don't need to clone anything, the compose file builds straight
+from this repo:
 
 ```bash
 curl -O https://raw.githubusercontent.com/roge-rm/ScorchDroid/master/dedicated-server/docker-compose.yml
@@ -108,15 +78,14 @@ echo 'ADMIN_PASSWORD=pick-something' > .env
 docker compose up -d --build
 ```
 
-Setup, configuration, mods and backups: **[dedicated-server/README.md](dedicated-server/README.md)**.
-How it is built, and why: [docs/dedicated-server.md](docs/dedicated-server.md).
+Setup, config, mods and backups are covered in **[dedicated-server/README.md](dedicated-server/README.md)**.
+If you're curious how it's built, see [docs/dedicated-server.md](docs/dedicated-server.md).
 
 ## Requirements
 
-- Android Studio (recent stable) with the NDK, or a JDK-configured Gradle.
+- Android Studio (recent stable) with the NDK, or Gradle with a JDK set up.
 - minSdk 26 / targetSdk 37, `arm64-v8a` and `x86_64`.
-- Submodules are required — the upstream source and its dependencies are not vendored into this
-  repository:
+- The submodules, since the upstream source and its dependencies aren't copied into this repo:
 
 ```
 git clone --recurse-submodules https://github.com/roge-rm/ScorchDroid.git
@@ -129,24 +98,21 @@ git clone --recurse-submodules https://github.com/roge-rm/ScorchDroid.git
 ./gradlew assembleRelease   # build the release APK
 ```
 
-Upstream's `data/` directory (weapon and landscape XML, tank meshes, language strings) is bundled
-straight from the submodule at build time rather than duplicated into this repository, and is
-extracted to internal storage on first run — upstream's file I/O uses plain `fopen()` on paths, not
-`AAssetManager`.
+Upstream's `data/` folder (weapons, maps, models, language files) gets bundled from the submodule
+at build time and extracted to the phone's storage on first run, since upstream reads its files
+with plain `fopen()`.
 
-Game logic is verified on the host, not the emulator:
+Game logic is tested on the computer instead of the emulator:
 
 ```
 cd host-tests/build && cmake .. && make && ./host_tests
 ```
 
-That target builds the same `src/common` + `src/server` sources natively and runs over 400 checks
-against the real engine — including the full two-process client/host join, run twice: once over real
-TCP sockets, and once over a Unix socket pair through the same transport bridge Bluetooth play uses,
-with no TCP anywhere. It runs in seconds, which is why it, rather than an emulator, is where
-behaviour is pinned down.
+That builds the same engine code natively and runs over 400 checks against it, including a full
+client joining a host, once over TCP and once over the same socket bridge Bluetooth uses. It only
+takes a few seconds.
 
-The dedicated server builds from the same library, on its own:
+The dedicated server can be built on its own too:
 
 ```bash
 cmake -S dedicated-server -B build/server -DCMAKE_BUILD_TYPE=Release
@@ -154,43 +120,36 @@ cmake --build build/server -j
 ./build/server/dedicated_server --help
 ```
 
-Or as the two containers, which is how it is meant to be run —
-`cp .env.example .env`, set `ADMIN_PASSWORD`, then `docker compose up --build`.
+Or as the two containers, which is how it's meant to be run: `cp .env.example .env`, set
+`ADMIN_PASSWORD`, then `docker compose up --build`.
 
 ## Architecture
 
-- `third_party/scorched3d/` — upstream, as a submodule pinned to an exact commit. **Never edited
+- `third_party/scorched3d/` - upstream, as a submodule pinned to a specific commit. **Never edited
   directly.**
-- `patches/scorched3d/` — the twenty-three patches applied to that checkout on every build, and the
-  tracked record of every change made to upstream. Most are *hooks*: upstream guards its
-  presentation work behind `#ifndef S3D_SERVER`, and this build is one that *is* `S3D_SERVER` but
-  still has a renderer and a speaker, so each patch adds the smallest possible `#else` beside an
-  existing split and puts the real work in `porting/`. They add no game logic.
-- `app/src/main/cpp/porting/` — the Android-side half of those hooks, plus the portability shims
-  (SDL socket/thread compat) and the pieces of upstream's client layer that had to be rewritten
-  because they were unusable: the landscape texture generator, the sky description, and the
-  standalone `ClientContext` that replaces `ScorchedClient`.
-- `app/src/main/cpp/jni/` — `engine_jni.cpp` (the game-state and control surface) and
-  `renderer_jni.cpp` (the whole GLES3 renderer: terrain, water, sky, shadows, models, effects,
-  camera).
-- `app/src/main/java/com/rm/scorchdroid/` — the Compose UI (`GameHud`, `HudDialogs`), the
-  `GLSurfaceView` host and touch handling (`MainActivity`, `GameRenderer`), the JNI declarations
-  (`NativeBridge`), LAN discovery, sound, and first-run asset extraction.
-- `host-tests/` — a plain CMake project building the same engine natively, with an assert-based
-  runner.
-- `dedicated-server/` — a standalone Linux server built from the same sources: its own CMake
-  project, its `main.cpp`, and `ControlServer.cpp`, the local Unix-socket channel the web admin
-  drives. No part of it touches the game's wire protocol.
-- `cmake/ScorchedCommon.cmake` — the `scorched_common` library definition, shared by `host-tests/`
-  and `dedicated-server/` so it is written once.
-- `web-admin/` — the server's browser admin: FastAPI, Jinja and htmx, no build step. It owns no
-  game state; every page is a rendering of a control-channel reply.
-- `docker/`, `docker-compose.yml` — the two images and how they are run together.
+- `patches/scorched3d/` - the twenty-three patches applied to upstream on every build, and the
+  record of every change made to it. Most of them just add small hooks so the port can do its own
+  drawing and sound. None of them change how the game plays.
+- `app/src/main/cpp/porting/` - the Android side of those hooks, some compatibility shims (SDL
+  sockets and threads), and the parts of upstream's client that had to be rewritten: the landscape
+  texture generator, the sky, and `ClientContext`, which replaces `ScorchedClient`.
+- `app/src/main/cpp/jni/` - `engine_jni.cpp` (game state and controls) and `renderer_jni.cpp` (the
+  whole GLES3 renderer).
+- `app/src/main/java/com/rm/scorchdroid/` - the Compose UI (`GameHud`, `HudDialogs`), the
+  `GLSurfaceView` and touch handling (`MainActivity`, `GameRenderer`), the JNI bindings
+  (`NativeBridge`), LAN discovery, sound, and extracting the game data on first run.
+- `host-tests/` - a plain CMake project that builds the engine natively and runs the tests.
+- `dedicated-server/` - the standalone Linux server, with its own CMake project, `main.cpp`, and
+  `ControlServer.cpp`, which is how the web admin talks to it. It doesn't touch the game's network
+  protocol.
+- `cmake/ScorchedCommon.cmake` - the `scorched_common` library, shared by `host-tests/` and
+  `dedicated-server/`.
+- `web-admin/` - the server's web admin page, built with FastAPI, Jinja and htmx.
+- `docker/`, `docker-compose.yml` - the two images and how they run together.
 
-Two conventions are worth knowing before reading the renderer, because both have caused real bugs
-here: the engine's fire angle is measured **counter-clockwise** while wind and sun bearings are
-clockwise compass angles; and engine coordinates `(x, y, height)` map to world `(x, height,
-mapHeight − y)`, subtracting rather than negating so the world stays in the same box.
+Two things worth knowing before digging into the renderer, because both have caused bugs: the
+engine's fire angle goes **counter-clockwise** while wind and sun directions are clockwise compass
+angles, and engine coordinates `(x, y, height)` map to world `(x, height, mapHeight - y)`.
 
 ## Discussion and support
 
@@ -200,11 +159,11 @@ Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jG
 ## Attribution
 
 - Scorched3D is Copyright (C) 2000-2011 Gavin Camp and contributors, from
-  [scorched3d.co.uk](https://www.scorched3d.co.uk/). This port builds on the maintained fork at
+  [scorched3d.co.uk](https://www.scorched3d.co.uk/). This port is built on the maintained fork at
   [bberberov/scorched3d](https://github.com/bberberov/scorched3d).
-- The game's data files, models, textures and sounds are upstream's, bundled unmodified.
-- Ported to Android, with a from-scratch OpenGL ES 3 renderer and a new Compose UI, by Dan Hunke.
+- The game's data files, models, textures and sounds are all from Scorched3D, unmodified.
+- Ported to Android, with a new OpenGL ES 3 renderer and UI, by Dan Hunke.
 
 ## License
 
-GNU General Public License v2 (or later) — see [LICENSE](LICENSE), matching the upstream project.
+GNU General Public License v2 (or later), same as Scorched3D. See [LICENSE](LICENSE).
