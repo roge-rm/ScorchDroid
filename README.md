@@ -70,7 +70,7 @@ The easiest way to install ScorchDroid and keep it up to date is through my F-Dr
 Then search for ScorchDroid in F-Droid. When a new version comes out, F-Droid will offer it as an update.
 
 You can also download the APK from the [Releases](https://github.com/roge-rm/ScorchDroid/releases)
-page and sideload it. 
+page and sideload it.
 
 ## Dedicated server
 
