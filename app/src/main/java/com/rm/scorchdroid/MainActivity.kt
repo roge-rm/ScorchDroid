@@ -88,8 +88,8 @@ class MainActivity : AppCompatActivity() {
             // Refused, which is a choice and not a fault - but a silent
             // return to the menu would read as the button being broken.
             showMenuMessage(
-                "Bluetooth play needs the nearby-devices permission. You can turn it " +
-                    "back on in Android's Settings under Apps, ScorchDroid, Permissions."
+                "Bluetooth play needs the nearby devices permission. You can turn it " +
+                    "on in Android Settings under Apps > ScorchDroid > Permissions."
             )
         }
     }
@@ -483,7 +483,7 @@ class MainActivity : AppCompatActivity() {
         if (!loaded) {
             // Nothing was changed, so a normal game would start instead - with
             // tutorial text over it, which would be worse than saying so.
-            hudState.dialog = HudDialog.Message("The tutorial's settings could not be loaded.") {
+            hudState.dialog = HudDialog.Message("Couldn't load the tutorial settings.") {
                 hudState.dialog = HudDialog.None
             }
             return
@@ -521,7 +521,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun startPreset(preset: GamePreset) {
         if (!NativeBridge.loadSetupPreset(preset.gameFile)) {
-            hudState.dialog = HudDialog.Message("\"${preset.name}\" could not be loaded.") {
+            hudState.dialog = HudDialog.Message("Couldn't load \"${preset.name}\".") {
                 hudState.dialog = HudDialog.None
             }
             return
@@ -587,9 +587,9 @@ class MainActivity : AppCompatActivity() {
     } catch (e: Exception) {
         // The notice above it in the About screen is written out in full and
         // stands on its own, so a missing asset degrades rather than misleads.
-        "The full GNU General Public License v2 text could not be loaded. " +
-            "It is available at https://www.gnu.org/licenses/old-licenses/gpl-2.0.html " +
-            "and in the LICENSE file of the source repository."
+        "Couldn't load the GNU General Public License v2 text. You can read it " +
+            "at https://www.gnu.org/licenses/old-licenses/gpl-2.0.html " +
+            "or in the LICENSE file in the source code."
     }
 
     /**
@@ -708,8 +708,8 @@ class MainActivity : AppCompatActivity() {
                 // No visibility prompt on this device at all. Same
                 // consequence as refusing one, and worth the same sentence.
                 showMenuMessage(
-                    "This device has no Bluetooth visibility setting, so only phones " +
-                        "already paired with it will find the game."
+                    "This device can't be made visible over Bluetooth, so only phones " +
+                        "already paired with it can find the game."
                 )
             }
         }
@@ -759,7 +759,7 @@ class MainActivity : AppCompatActivity() {
                     if (target.bluetoothPaired) {
                         "This can take a few seconds."
                     } else {
-                        "Accept the pairing request on both devices if one appears."
+                        "Accept the pairing request on both devices if it pops up."
                     }
                 val connecting = withContext(Dispatchers.Default) {
                     NativeBridge.startJoinGameBluetooth(target.bluetoothAddress)
@@ -786,7 +786,7 @@ class MainActivity : AppCompatActivity() {
                 // phone, which the player is not looking at, and ignoring it
                 // is indistinguishable from the connection failing.
                 hudState.statusText = "Asking ${target.name} to connect...\n" +
-                    "Accept the invitation on the other device if it asks."
+                    "Accept the invite on the other device if it pops up."
                 val result = WifiDirectTransport.connectToOwner(
                     applicationContext, target.p2pDeviceAddress
                 )
@@ -1321,8 +1321,8 @@ class MainActivity : AppCompatActivity() {
         if (resultCode == RESULT_CANCELED) {
             hudState.dialog = HudDialog.ListChoice(
                 title = "This phone won't be visible.\nOnly devices already paired with " +
-                    "it will be able to find the game.",
-                items = listOf("Ask again", "Host anyway - paired devices only"),
+                    "it can find the game.",
+                items = listOf("Ask again", "Host anyway (paired devices only)"),
                 cancelLabel = "Back",
                 onSelect = { index ->
                     hudState.dialog = HudDialog.None
@@ -1429,7 +1429,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (!gameOk) {
-            hudState.statusText = "Failed to start local game (see logcat)"
+            hudState.statusText = "Couldn't start the game (check logcat)"
             return
         }
         // This device owns the game state now, so the admin controls apply -
@@ -2153,8 +2153,8 @@ class MainActivity : AppCompatActivity() {
                 val weapon = withContext(Dispatchers.Default) { NativeBridge.getCurrentWeaponName() }
                 notifyPlayer(
                     when {
-                        myTankId == 0 -> "No tank yet - wait for the round to start"
-                        weapon.isEmpty() -> "No weapon selected - pick one from the shop"
+                        myTankId == 0 -> "No tank yet, wait for the round to start"
+                        weapon.isEmpty() -> "No weapon selected, pick one from the Shop"
                         else -> "Can't fire $weapon right now"
                     }
                 )
@@ -2415,9 +2415,9 @@ class MainActivity : AppCompatActivity() {
                 // were buttons that could do nothing without saying so.
                 notifyPlayer(
                     when (moveType) {
-                        MoveType.SKIP -> "Couldn't skip - it may not be your move"
+                        MoveType.SKIP -> "Couldn't skip, it might not be your turn"
                         MoveType.RESIGN -> "Couldn't resign right now"
-                        else -> "Couldn't finish buying - the phase may have ended"
+                        else -> "Couldn't finish buying, buying time might be over"
                     }
                 )
             }
@@ -2430,7 +2430,7 @@ class MainActivity : AppCompatActivity() {
     private fun revertToLastAim() {
         val aim = lastFiredAim
         if (aim == null) {
-            hudState.statusText = "Nothing fired yet to revert to"
+            hudState.statusText = "Nothing to revert yet"
             return
         }
         currentAngleDegrees = aim.first
@@ -2579,15 +2579,15 @@ class MainActivity : AppCompatActivity() {
             // countdown banner, so unlike Resign it needs no confirmation
             // of its own - but it does skip the move you are on, which is
             // upstream's behaviour and worth being asked about first.
-            (if (hudState.skipAllMoves) "Stop skipping moves" else "Skip all moves...") to {
+            (if (hudState.skipAllMoves) "Stop skipping turns" else "Skip all turns...") to {
                 if (hudState.skipAllMoves) {
                     hudState.skipAllMoves = false
                     hudState.skipAllSeconds = -1
                     hudState.dialog = HudDialog.None
                 } else {
                     hudState.dialog = HudDialog.ListChoice(
-                        title = "Skip this move and the rest?",
-                        items = listOf("Yes, skip my moves"),
+                        title = "Skip this turn and all the rest?",
+                        items = listOf("Yes, skip them"),
                         cancelLabel = "Cancel",
                         onSelect = {
                             hudState.skipAllMoves = true
@@ -2626,7 +2626,7 @@ class MainActivity : AppCompatActivity() {
                         val saved = withContext(Dispatchers.Default) { NativeBridge.saveGame() }
                         notifyPlayer(
                             if (saved.isEmpty()) {
-                                "Nothing to save until a round is under way"
+                                "Nothing to save until a round starts"
                             } else {
                                 "Saved as $saved"
                             },
@@ -2777,7 +2777,7 @@ class MainActivity : AppCompatActivity() {
                                 // what the thing is for instead of going quiet.
                                 else -> Toast.makeText(
                                     this@MainActivity,
-                                    "${weapon.name} is not fired - it works on its own",
+                                    "${weapon.name} can't be fired, it works on its own",
                                     Toast.LENGTH_SHORT,
                                 ).show()
                             }
@@ -2807,7 +2807,7 @@ class MainActivity : AppCompatActivity() {
                                 }
                             } else {
                                 hudState.dialog = HudDialog.Message(
-                                    text = "You can only buy weapons during the buying phase (between rounds).",
+                                    text = "You can only buy weapons between rounds.",
                                     onDismiss = { hudState.dialog = HudDialog.None },
                                 )
                             }
@@ -2840,7 +2840,7 @@ class MainActivity : AppCompatActivity() {
 
             if (owned.isEmpty()) {
                 hudState.dialog = HudDialog.Message(
-                    text = "No weapons owned yet - buy some in the Shop first.",
+                    text = "No weapons yet, buy some in the Shop first.",
                     onDismiss = { hudState.dialog = HudDialog.None },
                 )
                 return@launch
@@ -2939,7 +2939,7 @@ class MainActivity : AppCompatActivity() {
 
             if (entries.isEmpty()) {
                 hudState.dialog = HudDialog.Message(
-                    text = "No defenses owned yet - buy shields, parachutes or batteries in the Shop.",
+                    text = "No defenses yet, buy shields, parachutes or batteries in the Shop.",
                     onDismiss = { hudState.dialog = HudDialog.None },
                 )
                 return@launch
@@ -3012,7 +3012,7 @@ class MainActivity : AppCompatActivity() {
                         if (visible) {
                             "New devices can find this game for 5 minutes"
                         } else {
-                            "Not visible - only devices already paired with this phone can join"
+                            "Not visible, only paired devices can join"
                         }
                     )
                 }
@@ -3038,7 +3038,7 @@ class MainActivity : AppCompatActivity() {
             val ip = getLocalIpAddress()
             hudState.hostingLabel = if (ip != null) "Host ${shownAddress(ip, port)}" else "No network"
             if (ip == null) {
-                notifyPlayer("No network - turn on Wi-Fi or your hotspot for others to join")
+                notifyPlayer("No network, turn on Wi-Fi or your hotspot so others can join")
             }
             LanDiscovery.registerService(applicationContext, port)
 
@@ -3068,7 +3068,7 @@ class MainActivity : AppCompatActivity() {
                 // room for the address and that is what it is for.
                 notifyPlayer(
                     if (advertising) {
-                        "Wi-Fi Direct is on - phones nearby can find this game"
+                        "Wi-Fi Direct is on, nearby phones can find this game"
                     } else {
                         "No Wi-Fi Direct: ${why ?: "it did not start"}"
                     }
@@ -3250,10 +3250,10 @@ class MainActivity : AppCompatActivity() {
                 // that permanently - a paired device is listed here from the
                 // bonded list with no scan at all.
                 overBluetooth ->
-                    "No Bluetooth devices found - pair the two phones in Android's " +
-                        "Settings and they will be listed here without a search"
+                    "No Bluetooth devices found. Pair the two phones in Android " +
+                        "Settings and they'll show up here without searching"
                 peersWithoutGames.isNotEmpty() ->
-                    "No games found - ${peersWithoutGames.size} nearby device(s) advertised none"
+                    "No games found (${peersWithoutGames.size} nearby device(s) aren't hosting)"
                 else -> "No games found"
             }
             listDialog.title = if (skipped.isEmpty()) {
@@ -3319,25 +3319,22 @@ class MainActivity : AppCompatActivity() {
     private fun showConnectionHelp(onDismiss: () -> Unit) {
         hudState.dialog = HudDialog.Message(
             "Ways to play together:\n\n" +
-                "Same Wi-Fi - put both devices on the same network. One taps " +
+                "Same Wi-Fi: put both devices on the same network. One taps " +
                 "Host Game, the other taps Join Game.\n\n" +
-                "Wi-Fi Direct - no router needed. Both devices just need Wi-Fi " +
-                "switched on; the host's game shows up in this list marked " +
-                "\"Wi-Fi Direct\". It also needs this game's nearby-devices " +
-                "permission, which is only asked for once - if it was refused, " +
-                "turn it back on in Android's Settings under Apps, ScorchDroid, " +
-                "Permissions.\n\n" +
-                "Bluetooth - no Wi-Fi at all. The host picks \"Host over " +
-                "Bluetooth\" and allows the visibility prompt; the other picks " +
-                "\"Join over Bluetooth\", which is its own search because a " +
-                "Bluetooth scan finds every nearby speaker and headset too. " +
-                "Pairing the two phones first makes it quicker and more " +
-                "reliable.\n\n" +
-                "Hotspot - turn on the host's hotspot from Quick Settings and " +
-                "connect the other device to it. Then Host and Join as usual.\n\n" +
-                "By address - some guest and office networks block the way games " +
-                "announce themselves. The host's screen shows its address; type " +
-                "that in with \"Enter address manually\"."
+                "Wi-Fi Direct: no router needed, both devices just need Wi-Fi " +
+                "turned on. The host's game shows up in this list marked " +
+                "\"Wi-Fi Direct\". It needs the nearby devices permission, which " +
+                "is only asked for once. If you said no, you can turn it on in " +
+                "Android Settings under Apps > ScorchDroid > Permissions.\n\n" +
+                "Bluetooth: no Wi-Fi needed. The host picks \"Host over " +
+                "Bluetooth\" and allows the visibility prompt, the other picks " +
+                "\"Join over Bluetooth\". Pairing the two phones first makes it " +
+                "quicker and more reliable.\n\n" +
+                "Hotspot: turn on a hotspot on the host and connect the other " +
+                "device to it, then Host and Join as usual.\n\n" +
+                "By address: some guest and work networks block games from " +
+                "finding each other. The host's screen shows its address, type " +
+                "it in with \"Enter address manually\"."
         ) {
             hudState.dialog = HudDialog.None
             onDismiss()

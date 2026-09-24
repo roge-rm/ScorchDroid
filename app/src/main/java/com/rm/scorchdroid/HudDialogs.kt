@@ -435,8 +435,8 @@ fun HudDialogHost(dialog: HudDialog) {
                         // one at that, which made typing one look required.
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "The port is optional - without one this uses 27270, " +
-                                "which is what a Scorched3D host listens on.",
+                            "The port is optional, it defaults to 27270 like " +
+                                "Scorched3D.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }

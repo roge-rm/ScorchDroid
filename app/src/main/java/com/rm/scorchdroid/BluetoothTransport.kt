@@ -124,11 +124,11 @@ object BluetoothTransport {
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 "the Bluetooth permissions were refused"
             } else {
-                "the location permission was refused - Android ${Build.VERSION.RELEASE} " +
-                    "treats finding nearby Bluetooth devices as a location feature"
+                "the location permission was refused (Android ${Build.VERSION.RELEASE} " +
+                    "needs it to find nearby Bluetooth devices)"
             }
         }
-        if (adapter()?.isEnabled != true) return "Bluetooth is switched off"
+        if (adapter()?.isEnabled != true) return "Bluetooth is turned off"
         // Below API 31 this is the same trap Wi-Fi Direct has: the permission
         // is not enough, and with the master location toggle off a scan
         // starts, succeeds, and reports nothing, forever. Already-paired
@@ -136,8 +136,8 @@ object BluetoothTransport {
         // rather than like a switch being off. From 31 the dedicated
         // BLUETOOTH_SCAN permission covers it and the toggle is irrelevant.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && !isLocationEnabled(context)) {
-            return "Location is switched off in system settings, which Android " +
-                "${Build.VERSION.RELEASE} needs before it will find unpaired devices"
+            return "Location is turned off, and Android " +
+                "${Build.VERSION.RELEASE} needs it on to find unpaired devices"
         }
         return null
     }
@@ -451,8 +451,8 @@ object BluetoothTransport {
             } catch (e: IOException) {
                 Log.e(TAG, "could not reach $address", e)
                 nativeFailed(
-                    "couldn't open a Bluetooth connection - check the other device is " +
-                        "hosting, and pair the two if they never have been"
+                    "couldn't open a Bluetooth connection. Make sure the other device is " +
+                        "hosting, and try pairing them"
                 )
             } catch (e: SecurityException) {
                 Log.e(TAG, "not allowed to connect to $address", e)

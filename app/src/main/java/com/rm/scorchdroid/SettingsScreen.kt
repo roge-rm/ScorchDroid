@@ -181,22 +181,22 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                         ) { settings.updateEffectsVolume(it) }
                         SwitchRow(
                             "Countdown beeps",
-                            "The beeps through the last seconds of your move",
+                            "Beeps when your turn is almost out of time",
                             settings.countdownSound,
                         ) { settings.updateCountdownSound(it) }
                         SwitchRow(
                             "Turn sound",
-                            "The cue when it becomes your move",
+                            "Plays when it's your turn",
                             settings.turnSound,
                         ) { settings.updateTurnSound(it) }
                         SwitchRow(
                             "Message sound",
-                            "The blip when a message arrives",
+                            "Plays when a message comes in",
                             settings.chatSound,
                         ) { settings.updateChatSound(it) }
                         SwitchRow(
                             "Ambient sound",
-                            "The landscape's own atmosphere - waves, rain, birds in the trees",
+                            "Background sounds like waves, rain and birds",
                             settings.ambientEnabled,
                         ) { settings.updateAmbientEnabled(it) }
                         SliderRow(
@@ -207,7 +207,7 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                         ) { settings.updateAmbientVolume(it) }
                         SwitchRow(
                             "Music",
-                            "Scorched3D's own loops, changing with the state of the game",
+                            "The original Scorched3D music",
                             settings.musicEnabled,
                         ) { settings.updateMusicEnabled(it) }
                         SliderRow(
@@ -225,8 +225,8 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                         Group("Landscape")
                         SwitchRow(
                             "Trees",
-                            "A landscape scatters up to two thousand; turning them off is the " +
-                                "single biggest saving on a slow device",
+                            "Up to two thousand per map. Turning them off helps slow devices " +
+                                "the most",
                             settings.showTrees,
                         ) {
                             settings.updateShowTrees(it)
@@ -266,9 +266,8 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateTerrainDetail((it / 16f).roundToInt() * 16)
                         }
                         Text(
-                            "How finely the ground is drawn. Full is the whole heightmap " +
-                                "and Scorched3D's own 1024 ground texture; half the slider is " +
-                                "a 512 texture, below that 256. Lower is cheaper on a slow device.",
+                            "How detailed the ground is. Full is the same as Scorched3D, " +
+                                "turn it down if your device is struggling.",
                             color = Color.White.copy(alpha = 0.55f),
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -292,10 +291,8 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateWaterDetail(it.roundToInt())
                         }
                         Text(
-                            "How finely Scorched3D's sea is drawn: its own wave spectrum, " +
-                                "driven by the round's wind, at its own 2-unit grid and 24 " +
-                                "wave steps a second, or at half or a quarter of each for a " +
-                                "slower device.",
+                            "How detailed the water is. Full is the same as Scorched3D, " +
+                                "turn it down if your device is struggling.",
                             color = Color.White.copy(alpha = 0.55f),
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -319,10 +316,9 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateShadowDetail(it.roundToInt())
                         }
                         Text(
-                            "The sun's shadow map, which puts an island's shadow on the sea " +
-                                "and a tank's on the ground. Off bakes the sun into the " +
-                                "ground texture instead, as Scorched3D does without it - " +
-                                "still lit, but nothing casts onto the water.",
+                            "Shadows from the sun on the ground and the water. With them off " +
+                                "the ground is still lit, but nothing casts a shadow on the " +
+                                "water.",
                             color = Color.White.copy(alpha = 0.55f),
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -345,9 +341,9 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateEffectsDetail(it.roundToInt())
                         }
                         Text(
-                            "How many flames, sparks and smoke puffs may be alight at " +
-                                "once - 100, 6000 or 10000, which are Scorched3D's own " +
-                                "numbers. Fire thins out when the budget runs out.",
+                            "How many flames, sparks and smoke puffs can be on screen at " +
+                                "once (100, 6000 or 10000, same as Scorched3D). Big fires " +
+                                "look thinner on the lower settings.",
                             color = Color.White.copy(alpha = 0.55f),
                             style = MaterialTheme.typography.bodySmall,
                         )
@@ -368,18 +364,17 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.updateReflectionLevel(it.roundToInt())
                         }
                         Text(
-                            "Sky is this port's own colour reflection. The other two draw " +
-                                "the scene a second time, mirrored in the water, as " +
-                                "Scorched3D does - Everything adds the clouds, tanks, " +
-                                "scenery, shots and explosions it reflects.",
+                            "What shows up in the water. Sky is the cheapest, Everything also " +
+                                "reflects the clouds, tanks, scenery, shots and explosions " +
+                                "like Scorched3D does.",
                             color = Color.White.copy(alpha = 0.55f),
                             style = MaterialTheme.typography.bodySmall,
                         )
 
                         SwitchRow(
-                            "Scorched3D's aim sight",
-                            "Its own: a protractor ring around the tank and a separate " +
-                                "bearing marker on the ground. Off is this port's single blade",
+                            "Scorched3D aim sight",
+                            "The original ring around the tank with a marker on the ground. " +
+                                "Off uses a simpler pointer",
                             settings.originalSight,
                         ) {
                             settings.updateOriginalSight(it)
@@ -398,12 +393,12 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                         ) { settings.updateShowHealthBars(it) }
                         SwitchRow(
                             "Tank arrows",
-                            "Scorched3D's floating arrow marking each tank, in its colour",
+                            "The floating arrow over each tank, in its colour",
                             settings.showTankArrows,
                         ) { settings.updateShowTankArrows(it) }
                         SwitchRow(
                             "Tank info",
-                            "Hold a tank's name plate for its life, lives and score",
+                            "Hold a tank's name to see its life, lives and score",
                             settings.showTankInfo,
                         ) { settings.updateShowTankInfo(it) }
                         SliderRow(
@@ -417,12 +412,12 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                     SettingsTab.CONTROLS -> {
                         SwitchRow(
                             "Tap to aim",
-                            "Tap the ground to aim there; the sliders always work either way",
+                            "Tap the ground to aim there. The sliders work either way",
                             settings.tapToAim,
                         ) { settings.updateTapToAim(it) }
                         SwitchRow(
                             "Invert drag",
-                            "Reverses the up/down direction when swinging the camera",
+                            "Flips up and down when moving the camera",
                             settings.invertDrag,
                         ) { settings.updateInvertDrag(it) }
                         SwitchRow(
@@ -473,7 +468,7 @@ private fun NameRow(settings: GameSettings) {
         label = { Text("Name", color = Color.White.copy(alpha = 0.7f)) },
         supportingText = {
             Text(
-                "Shown over your tank, and to everyone else in a network game",
+                "Shown over your tank and to other players in multiplayer",
                 color = Color.White.copy(alpha = 0.5f),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -597,7 +592,7 @@ private fun TankColorRow(settings: GameSettings) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
         Text("Colour", color = Color.White, style = MaterialTheme.typography.bodyLarge)
         Text(
-            "Your tank's colour, if it is free when the game starts",
+            "Your tank's colour, if nobody else has it already",
             color = Color.White.copy(alpha = 0.55f),
             style = MaterialTheme.typography.bodySmall,
         )

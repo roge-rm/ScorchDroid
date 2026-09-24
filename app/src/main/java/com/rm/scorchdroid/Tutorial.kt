@@ -61,8 +61,8 @@ data class TutorialStep(
 
 val TUTORIAL_STEPS: List<TutorialStep> = listOf(
     TutorialStep(
-        "That red tank in the middle is yours. Drag anywhere on the battlefield to " +
-            "swing the camera around it, and pinch to zoom."
+        "That red tank in the middle is yours. Drag anywhere to spin the camera " +
+            "around it and pinch to zoom."
     ),
     TutorialStep(
         // Named by neither edge nor readout, and both exclusions were learned
@@ -75,14 +75,14 @@ val TUTORIAL_STEPS: List<TutorialStep> = listOf(
         // turn slider in the next step is the other). So it says how to tell
         // them apart instead: drag one and watch. That costs nothing, commits
         // nothing, and the barrel moving is its own label.
-        "A slider sits at each edge. Drag either one to see what it does - one tilts " +
-            "the barrel up and down, the other sets how hard you fire."
+        "There's a slider on each edge. One tilts the barrel up and down, the other " +
+            "sets how hard you fire. Give them a try."
     ),
     TutorialStep(
         // "The bar along the bottom" used to be unambiguous. There are two
         // down there now, so each is named by what it does.
-        "The slider just above the buttons turns the tank to face left and right.\n\n" +
-            "Set an angle you like, then tap the wide bar below it to fire.",
+        "The slider above the buttons turns the tank left and right.\n\n" +
+            "Pick an angle, then tap the wide bar underneath to fire.",
         // The shot itself is the lesson; no need to make them tap Got it too.
         advanceWhen = { it.shotLocked },
     ),
@@ -91,8 +91,8 @@ val TUTORIAL_STEPS: List<TutorialStep> = listOf(
         // this tutorial most has to exist for - a long press announces itself
         // to nobody. Taught after the first shot rather than before it, so it
         // is read while watching that shot land.
-        "That bar always names the weapon it will send. Hold it to pick a different " +
-            "one.\n\nIt turns red while your shot is queued, and goes back to normal when " +
+        "That bar always shows the weapon you'll fire. Hold it to pick a different " +
+            "one.\n\nIt turns red once your shot is in and goes back to normal when " +
             "the round plays out."
     ),
     TutorialStep(
@@ -100,15 +100,15 @@ val TUTORIAL_STEPS: List<TutorialStep> = listOf(
         // tutorial config sets WindForce to WindNone, and the status line
         // reads "Wind: none" - so promising that wind pushes the shot here
         // would be contradicted on screen by the line above the card.
-        "Watch where it lands, then adjust and fire again. Ranging in like this is the " +
-            "whole game.\n\nThere is no wind in this practice game, so your shots go " +
-            "where you point them. In a real one the wind at the top left pushes every " +
-            "shot, and you have to allow for it."
+        "Watch where it lands, adjust, and fire again. That's pretty much the whole " +
+            "game.\n\nThere's no wind in this practice game so your shots go where you " +
+            "point them. In a real game the wind (top left) pushes every shot, so you'll " +
+            "have to account for it."
     ),
     TutorialStep(
-        "The other tanks are practice targets - they sit still and never fire back. " +
-            "There is no clock here either, so take as long as you like.\n\nWhen you want " +
-            "a real game, quit to the menu with a long press on the undo button."
+        "The other tanks are just targets, they don't move or shoot back. There's no " +
+            "timer either so take as long as you want.\n\nWhen you're ready for a real " +
+            "game, long press the undo button to quit to the menu."
     ),
 )
 
