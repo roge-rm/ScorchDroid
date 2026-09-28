@@ -40,8 +40,8 @@ target_compile_definitions(lua PRIVATE LUA_USE_POSIX)
 # NDK's default -D_FORTIFY_SOURCE=2 produces a false-positive
 # "strchr: prevented read past end of buffer" abort in luaL_findtable()
 # (lauxlib.c) on a plain 4-byte string literal ("s3d") - a known class of
-# bionic/clang __builtin_object_size misbehavior on certain compiler/
-# optimization-level combinations, not a real bug in this 30-year-old,
+# bionic/clang __builtin_object_size misbehaviour on certain compiler/
+# optimisation-level combinations, not a real bug in this 30-year-old,
 # widely-used code path. Disabled for this target only.
 target_compile_options(lua PRIVATE -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0)
 

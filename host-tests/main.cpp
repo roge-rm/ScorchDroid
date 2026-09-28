@@ -29,7 +29,7 @@
 #include <tanket/TanketAccessories.hpp>
 #include <tanket/TanketWeapon.hpp>
 #include <coms/ComsBuyAccessoryMessage.hpp>
-// M6 parity: defense accessories (shields/parachutes/batteries) - see
+// M6 parity: defence accessories (shields/parachutes/batteries) - see
 // testDefenseAccessories().
 #include <coms/ComsDefenseMessage.hpp>
 #include <simactions/TankDefenseSimAction.hpp>
@@ -223,7 +223,7 @@ namespace
 	// upstream's actual bundled data - not a mock or a subset - and checks
 	// that a specific, hand-verified accessory parsed correctly. This is
 	// the regression check: if a future porting patch subtly changes
-	// parsing/loading behavior, this fails fast on a laptop instead of only
+	// parsing/loading behaviour, this fails fast on a laptop instead of only
 	// showing up as a confusing runtime difference on-device.
 	void testRealAccessoryDataLoads()
 	{
@@ -696,7 +696,7 @@ namespace
 	// sequence useDefense() does: a real ComsDefenseMessage wrapped in a
 	// TankDefenseSimAction, queued via ServerSimulator - the real upstream
 	// TankDefenseSimAction::invokeAction() then does all the actual
-	// battery/shield work, so this is not a mock of the defense system.
+	// battery/shield work, so this is not a mock of the defence system.
 	//
 	// Deliberately a host test rather than an on-device UI test: driving
 	// this through the Android UI needs a 30-second buying window to be
@@ -727,7 +727,7 @@ namespace
 		// setter - it silently ignores any transition that isn't in its
 		// allowedStateTransitions table, with no error. sLoading -> sNormal
 		// is not in that table, so the obvious one-liner does nothing at
-		// all and every defense action then correctly no-ops. sLoading ->
+		// all and every defence action then correctly no-ops. sLoading ->
 		// sDead -> sNormal is a legal path, hence the two-step below.
 		auto keepPlaying = [&] {
 			TankState &state = tank->getState();
@@ -763,7 +763,7 @@ namespace
 		// simulator promoting and invoking it) is already proven by the
 		// TankAccessorySimAction buys above and in testEconomyBuyAndSelect
 		// - it's the same ServerSimulator path, and SimAction type makes
-		// no difference to it. What's worth isolating here is the defense
+		// no difference to it. What's worth isolating here is the defence
 		// logic itself, so invokeAction() is called directly: going
 		// through the simulator instead means racing the server's round
 		// state machine, which keeps resetting this directly-added tank

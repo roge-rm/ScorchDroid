@@ -451,7 +451,7 @@ class MainActivity : AppCompatActivity() {
                 NativeBridge.initEngine(dataRoot.absolutePath)
             }
             if (!initOk) {
-                splashStatus = "Failed to initialize engine data root"
+                splashStatus = "Failed to initialise engine data root"
                 return@launch
             }
             // Only now: applyAll() crosses into the engine, which has just
@@ -1928,7 +1928,7 @@ class MainActivity : AppCompatActivity() {
     // (NativeBridge.handleTap) and drag-slingshot fire are retired from
     // this surface as a result. That path has since been *replaced* rather
     // than merely retired - tap-to-aim now goes through the terrain
-    // ray-cast (nativePickTerrain + aimAtPoint), so the old normalized-space
+    // ray-cast (nativePickTerrain + aimAtPoint), so the old normalised-space
     // handleTap has been deleted rather than left lying around unused.
     //
     // ScaleGestureDetector owns pinch-zoom; a plain last-position diff
@@ -2444,7 +2444,7 @@ class MainActivity : AppCompatActivity() {
 
     // M6 parity: the overflow menu - deliberately only holds things that
     // are genuinely rare. Everything a player reaches for regularly (fire,
-    // undo, skip, done-buying, defenses, shop, weapon) is a direct button
+    // undo, skip, done-buying, defences, shop, weapon) is a direct button
     // on the HUD instead, so common actions never cost an extra tap.
     // M6 parity: the score / player list (upstream's SHOW_SCORE_DIALOG),
     // with the chat history under it. Every number is read straight off
@@ -2717,7 +2717,7 @@ class MainActivity : AppCompatActivity() {
     // engine_jni.cpp) - lets the human player buy accessories with real
     // AccessoryStore/TankScore state and switch between owned ones.
     // Tapping a row buys one unit if unowned; if already owned, a weapon
-    // becomes the current weapon and a defense accessory is activated
+    // becomes the current weapon and a defence accessory is activated
     // (see showDefenses() - the Shop is also a reasonable place to use one
     // you just bought). Renders via HudDialog.ListChoice (see
     // HudDialogs.kt).
@@ -2872,7 +2872,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // M6 parity: the defense panel - raise/lower shields, enable/disable
+    // M6 parity: the defence panel - raise/lower shields, enable/disable
     // parachutes, use a battery to repair. Upstream binds these to keys
     // (ENABLE_SHIELDS/ENABLE_PARACHUTES/USE_BATTERY in data/keys.xml) and
     // routes them through ComsDefenseMessage; ScorchDroid had no path to
@@ -2939,14 +2939,14 @@ class MainActivity : AppCompatActivity() {
 
             if (entries.isEmpty()) {
                 hudState.dialog = HudDialog.Message(
-                    text = "No defenses yet, buy shields, parachutes or batteries in the Shop.",
+                    text = "No defences yet, buy shields, parachutes or batteries in the Shop.",
                     onDismiss = { hudState.dialog = HudDialog.None },
                 )
                 return@launch
             }
 
             hudState.dialog = HudDialog.ListChoice(
-                title = "Defenses",
+                title = "Defences",
                 items = entries.map { it.first },
                 cancelLabel = "Close",
                 onSelect = { index -> entries[index].second() },

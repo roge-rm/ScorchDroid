@@ -178,15 +178,15 @@ sealed class HudDialog {
 /**
  * Shop tabs. Two is enough: upstream has five accessory types, but four of
  * them (parachute, shield, autodefense, battery) are all "things that keep
- * you alive" and are already grouped that way in the Defenses panel, so
+ * you alive" and are already grouped that way in the Defences panel, so
  * splitting them further would make three of the tabs very short.
  */
 private enum class ShopTab(val label: String) {
     WEAPONS("Weapons"),
-    DEFENSES("Defenses");
+    DEFENSES("Defences");
 
     // Upstream's own <tabgroup>, not the accessory type: Fuel and Rocket
-    // Fuel are weapons that upstream files under defense, and they belong
+    // Fuel are weapons that upstream files under defence, and they belong
     // there - you buy them for the same reason you buy a shield, and you
     // never pick one when choosing what to shoot with.
     fun matches(entry: WeaponShopEntry): Boolean =

@@ -129,7 +129,7 @@ struct Mat4 {
         if (fLen < 1e-6f) fLen = 1e-6f;
         fx /= fLen; fy /= fLen; fz /= fLen;
 
-        // s = f x up, normalized (right vector).
+        // s = f x up, normalised (right vector).
         float sx = fy * upZ - fz * upY;
         float sy = fz * upX - fx * upZ;
         float sz = fx * upY - fy * upX;

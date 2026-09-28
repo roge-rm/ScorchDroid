@@ -49,7 +49,7 @@ Dan
 - A **dedicated server** you can run on a spare machine with `docker compose up`, with a web page
   to manage its settings, players, chat and log. Phones on the same network find it on their own.
   See [dedicated-server/README.md](dedicated-server/README.md).
-- The full shop with weapons and defenses, plus giving money to other players.
+- The full shop with weapons and defences, plus giving money to other players.
 - Save a game you're hosting and load it later, solo or with other people.
 - Skip all your turns if you need to walk away, with a five second countdown each turn so you can
   change your mind.

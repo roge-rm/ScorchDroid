@@ -131,7 +131,7 @@ object NativeBridge {
     external fun getClientFailureReason(): String
 
     /**
-     * M6 parity: activates a defense accessory for "my tank" - see
+     * M6 parity: activates a defence accessory for "my tank" - see
      * [DefenseChange] for the change codes. [accessoryId] says which
      * shield/parachute/battery to act on (pass 0 for the *_DOWN cases).
      * Returns whether the request was queued/sent; the engine re-validates
@@ -188,7 +188,7 @@ object NativeBridge {
     external fun giftMoney(toPlayerId: Int, amount: Int): Boolean
 
     /**
-     * M6 parity: "my tank"'s currently-active defenses as
+     * M6 parity: "my tank"'s currently-active defences as
      * "shieldName|parachuteName", either side empty if none is up.
      */
     external fun getActiveDefenses(): String
@@ -681,7 +681,7 @@ data class WeaponShopEntry(
     /**
      * Upstream's own shop tab for this accessory (`<tabgroup>`): "weapon"
      * or "defense". Not always what [type] implies - Fuel and Rocket Fuel
-     * are weapons that upstream files under defense, since they are bought
+     * are weapons that upstream files under defence, since they are bought
      * alongside shields rather than alongside missiles.
      */
     val tabGroup: String,
@@ -694,7 +694,7 @@ data class WeaponShopEntry(
 
     /**
      * The [DefenseChange] code that activates this accessory, or null if it
-     * isn't an activatable defense (weapons, and auto-defense which the
+     * isn't an activatable defence (weapons, and auto-defence which the
      * engine applies on its own rather than on demand).
      */
     val activationChange: Int? get() = when (type) {

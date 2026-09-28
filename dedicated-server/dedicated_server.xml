@@ -2,7 +2,7 @@
   <!-- M5: settings for the standalone Linux "real PC dedicated server"
        build (dedicated-server/main.cpp), used to verify Android to PC
        cross-play against a genuine separate process/machine, not just
-       Android-to-Android. Modeled on app/src/main/assets/scorchdroid_server.xml
+       Android-to-Android. Modelled on app/src/main/assets/scorchdroid_server.xml
        but with no local human tank of its own - this is a headless
        dedicated server, no in-process player; real connecting clients ride
        the actual connect/load-level handshake completely unmodified. -->

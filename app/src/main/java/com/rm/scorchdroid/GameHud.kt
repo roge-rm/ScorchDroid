@@ -685,7 +685,7 @@ fun GameHud(
                     Spacer(Modifier.width(kHudGroupGap))
                     HudIconButton(Icons.Filled.MoreVert, "More actions", onActions)
                     Spacer(Modifier.width(kHudGroupGap))
-                    HudIconButton(Icons.Filled.Shield, "Defenses", onDefenses)
+                    HudIconButton(Icons.Filled.Shield, "Defences", onDefenses)
                     HudIconButton(Icons.Filled.ShoppingCart, "Shop", onShop)
                 }
                 // Only during the buying phase - the one time it does

@@ -940,7 +940,7 @@ namespace
 
 	// Orbit/free-fly camera - the default per the user's camera-style
 	// decision (see the porting plan's M6 entry). Target defaults to the
-	// map center once a landscape exists; distance/pitch defaults give a
+	// map centre once a landscape exists; distance/pitch defaults give a
 	// reasonable overview on first frame. Touched by both the GL thread
 	// (read every frame) and the UI thread (nativeCameraDrag/Zoom below,
 	// called from touch handling in Kotlin) - guarded by its own mutex
@@ -948,7 +948,7 @@ namespace
 	// simulation state and shouldn't contend with the sim tick.
 	std::mutex g_cameraMutex;
 	struct OrbitCamera {
-		// Map-center target, used in free-fly mode only - follow mode
+		// Map-centre target, used in free-fly mode only - follow mode
 		// retargets to "my tank"'s live position every frame instead (see
 		// nativeOnDrawFrame), so it doesn't need its own stored target.
 		float targetX = 0.0f, targetY = 0.0f, targetZ = 0.0f;
@@ -2227,7 +2227,7 @@ namespace
 	)";
 
 	// One terrain vertex: position, normal, UV. Normals via central
-	// differences on neighboring grid heights (clamped at the edges) - a
+	// differences on neighbouring grid heights (clamped at the edges) - a
 	// standard heightmap-normal approximation, not anything upstream
 	// provides (its normal computation, if any, lives in the excluded
 	// client rendering code). Split out of the full build so a partial
@@ -6472,7 +6472,7 @@ namespace
 	}
 
 	// Draws a set of real world-space positions (already x,y,z in the same
-	// units as the terrain mesh) as colored point sprites - tanks, shots,
+	// units as the terrain mesh) as coloured point sprites - tanks, shots,
 	// and explosions. Reused for all three, same as the old 2D renderer's
 	// drawPoints() - see ActionController::getShotAndExplosionPositions()
 	// for why shots/explosions need this at all (nothing was visibly
@@ -7771,7 +7771,7 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		}
 	}
 
-	// Camera: free-fly orbits the map center; follow mode retargets to "my
+	// Camera: free-fly orbits the map centre; follow mode retargets to "my
 	// tank"'s live position every frame instead (falling back to free-fly
 	// framing if there's no tank yet - e.g. still spectating/loading) - see
 	// the porting plan's M6 entry for why both modes exist. Yaw/pitch are

@@ -180,7 +180,7 @@ the **3-second** fade is local, alpha is `1 − age/3` in the sender's tank
 colour, and the whole map dims to 0.2 and climbs back at 0.2/s when lines
 first arrive.
 
-### Auto-defense selection — DONE 2026-09-10
+### Auto-defence selection — DONE 2026-09-10
 
 Corrected on implementing it: nothing is *automatic*, despite the name -
 `TanketAutoDefense::newMatch()` and `changed()` are both empty upstream. "Auto

@@ -28,7 +28,7 @@ work in a new file under `porting/` rather than in the submodule.
 - `0001-android-libcxx-portability-fixes.patch` - libc++ vs. legacy-GCC
   differences (`fixed.hpp`'s SDL-only `Sint64` typedef, `LangString`'s
   `basic_string<unsigned int>` needing an explicit `char_traits`
-  specialization under libc++).
+  specialisation under libc++).
 - `0002-android-common-common-module.patch` - `src/common/common` compiling
   for Android (`S3D_SERVER=1`, SDL mutex/timer/byte-order calls replaced).
 - `0003-android-lang-and-net-modules.patch` - `src/common/lang` and

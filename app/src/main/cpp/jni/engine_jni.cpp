@@ -83,7 +83,7 @@ std::mutex g_engineMutex;
 #include <coms/ComsBuyAccessoryMessage.hpp>
 #include <coms/ComsTankChangeMessage.hpp>
 #include <simactions/TankChangeSimAction.hpp>
-// M6 parity: defense accessories (shields/parachutes/batteries) and the
+// M6 parity: defence accessories (shields/parachutes/batteries) and the
 // wind indicator - see useDefense()/getWindInfo() below.
 #include <coms/ComsDefenseMessage.hpp>
 #include <simactions/TankDefenseSimAction.hpp>
@@ -818,7 +818,7 @@ Java_com_rm_scorchdroid_NativeBridge_getMyMoney(JNIEnv *env, jobject /* this */)
 // displays" split described in the porting plan for the eventual Compose HUD.
 //
 // M6: this used to filter to AccessoryPart::AccessoryWeapon only, which made
-// 4 of upstream's 5 accessory types (parachutes, shields, auto-defense,
+// 4 of upstream's 5 accessory types (parachutes, shields, auto-defence,
 // batteries - see AccessoryPart::AccessoryType) completely unreachable: not
 // buyable here and not usable anywhere, even though the engine fully
 // supports them. That was the single biggest gameplay-parity gap found in
@@ -936,7 +936,7 @@ Java_com_rm_scorchdroid_NativeBridge_buyAccessory(JNIEnv *env, jobject /* this *
     return g_clientContext->sendGameMessage(message) ? JNI_TRUE : JNI_FALSE;
 }
 
-// M6 parity: activates a defense accessory for "my tank" - raising/lowering
+// M6 parity: activates a defence accessory for "my tank" - raising/lowering
 // a shield, enabling/disabling parachutes, or using a battery (repair).
 // [change] matches ComsDefenseMessage::DefenseChange (1=shieldUp,
 // 2=shieldDown, 3=parachutesUp, 4=parachutesDown, 5=batteryUse) and
@@ -979,7 +979,7 @@ Java_com_rm_scorchdroid_NativeBridge_useDefense(JNIEnv *env, jobject /* this */,
 // Write the game out, and answer with the file it went to (empty if it did
 // not). Upstream's SaveDialog gates this two ways and both are kept: only a
 // process that *is* the server can save, because SaveGame::saveFile
-// serializes ScorchedServer's own level message, and only while the game is
+// serialises ScorchedServer's own level message, and only while the game is
 // playing or scoring, which is when there is a round worth resuming.
 //
 // The name is the time, as upstream's own dialog suggests by default, so
@@ -1163,7 +1163,7 @@ Java_com_rm_scorchdroid_NativeBridge_giftMoney(JNIEnv *env, jobject /* this */,
     return g_clientContext->sendGameMessage(message) ? JNI_TRUE : JNI_FALSE;
 }
 
-// M6 parity: "my tank"'s currently-active defenses, as
+// M6 parity: "my tank"'s currently-active defences, as
 // "shieldName|parachuteName" (either side empty if none active) - lets the
 // HUD/defense dialog show what's already up rather than making the player
 // guess. Shield/parachute state lives on Target, not TanketAccessories (see
@@ -1969,7 +1969,7 @@ Java_com_rm_scorchdroid_NativeBridge_fireWeapon(JNIEnv *env, jobject /* this */,
     // PlayMovesSimAction::tankFired()), so sending the raw 0..1 fraction
     // as "power" directly asks for essentially no thrust at all: every
     // shot landed right on top of the firing tank, never visibly
-    // traveling anywhere. Scale by this tank's actual max power so 1.0
+    // travelling anywhere. Scale by this tank's actual max power so 1.0
     // means "full power for this tank", matching what the drag gesture's
     // distance is meant to represent.
     fixed maxPower = tank->getShotInfo().getMaxPower();
