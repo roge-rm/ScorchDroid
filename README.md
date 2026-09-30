@@ -76,10 +76,13 @@ page and sideload it.
 
 ## Playing in a browser
 
-You can play it in a browser too, if someone runs a dedicated server (see below). The server's web
-page has the game at `/play/`, so on the same network that's `http://<server>:8080/play/`. It's the
-same game with the same menus, and you can play solo against bots or join the server, where
-browser players and phone players end up in the same game.
+You can play it in a browser too, at [roge-rm.gitlab.io/play/scorchdroid](https://roge-rm.gitlab.io/play/scorchdroid/).
+It's the same game with the same menus. Play solo against bots, or join a server where browser
+players and phone players end up in the same game.
+
+A dedicated server (see below) has the game on its own web page too, at `/play/`, so on the same
+network that's `http://<server>:8080/play/`. That's the one to use for a server on your own
+network, since the page above is https and can only join servers that are too.
 
 It needs a recent browser with WebGL 2 and WebAssembly GC (Chrome or Edge 119, Firefox 120, or
 Safari 18.2, or anything newer). The first load is about 45MB, most of it the game data. Settings

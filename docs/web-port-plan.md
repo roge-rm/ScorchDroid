@@ -87,7 +87,13 @@ the build did it. Neither route is behind the admin login.
   emulator. (A local Docker build needs clean submodules: the patch script
   can't tell an already patched tree without its .git. The compose files build
   from the GitHub URL, which is always clean.) Not done yet: loading the Apocalypse mod (22MB of the 87MB) only
-  for players who pick it, and a hosted page of its own like Apogee's.
+  for players who pick it.
+- **The hosted page.** https://roge-rm.gitlab.io/play/scorchdroid/, published the
+  way Apogee's is: `~/Projects/fdroid/web-builds.json` names the build (with
+  `"submodules": true`, which publish.py now honours), so each release's tag
+  gets built and copied to `play/scorchdroid/`, and the Pages job gzips it. An
+  https page can only open `wss://`, so from there Join Game says to use a LAN
+  server's own `/play/` page instead.
 
 ## Traps
 
