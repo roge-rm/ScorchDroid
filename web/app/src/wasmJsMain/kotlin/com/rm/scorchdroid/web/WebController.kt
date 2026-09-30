@@ -145,8 +145,17 @@ class WebController(
             if (here != null) add("This server" to here)
             if (last.isNotEmpty() && last != here) add("Last time: $last" to last)
         }
+        // A page on an https site, like the hosted one, can only open wss://,
+        // and a server on a home network doesn't do TLS. Its own page does
+        // plain http, so that's where to send people.
+        val title = if (here == null && jsPageSecure()) {
+            "Join a game\nThis page can only join servers that use https. For a server on your " +
+                "own network, open its page instead, at http://<server>:8080/play/"
+        } else {
+            "Join a game"
+        }
         hudState.dialog = HudDialog.ListChoice(
-            title = "Join a game",
+            title = title,
             items = rows.map { it.first } + "Enter an address...",
             cancelLabel = "Cancel",
             onSelect = { index ->
