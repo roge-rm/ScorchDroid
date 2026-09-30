@@ -94,7 +94,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -1200,12 +1199,12 @@ private fun MiniMap(
     // 300ms tick, because a three-second fade in ten steps is a stutter you
     // can count - but only while there is something fading, so a map with no
     // lines on it costs no frames at all.
-    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var nowMillis by remember { mutableLongStateOf(nowMillis()) }
     val fading = state.mapLines.isNotEmpty() || state.mapPending != null
     LaunchedEffect(fading) {
         while (fading) {
             withFrameMillis { }
-            val now = System.currentTimeMillis()
+            val now = nowMillis()
             nowMillis = now
             // Expired here rather than while drawing: the draw pass reads
             // state, it does not get to change it.
@@ -1217,10 +1216,10 @@ private fun MiniMap(
     // See kMiniMapEnlargedMarginDp: the enlarged side is what the screen can
     // spare, not a multiple, and it is capped by the shorter of the two axes
     // so the square never overruns a landscape screen.
-    val configuration = LocalConfiguration.current
+    val (screenWidthDp, screenHeightDp) = screenSizeDp()
     val enlargedSide = minOf(
-        configuration.screenWidthDp - kMiniMapEnlargedMarginDp,
-        configuration.screenHeightDp - kMiniMapEnlargedHeadroomDp,
+        screenWidthDp - kMiniMapEnlargedMarginDp,
+        screenHeightDp - kMiniMapEnlargedHeadroomDp,
     ).dp.coerceAtLeast(kMiniMapSize)
     // Animated because the map carries position: a square that jumps size
     // between two frames makes you re-find every dot on it, where one that
@@ -1324,7 +1323,7 @@ private fun MiniMap(
                                             point.x,
                                             point.y,
                                             myColour,
-                                            System.currentTimeMillis(),
+                                            nowMillis(),
                                         )
                                         state.mapPending = pending
                                         if (line != null) {
@@ -1337,7 +1336,7 @@ private fun MiniMap(
                                         }
                                     }
                                 } else {
-                                    val now = System.currentTimeMillis()
+                                    val now = nowMillis()
                                     val isDouble =
                                         now - lastTapAt < viewConfiguration.doubleTapTimeoutMillis &&
                                             (offset - lastTapPos).getDistance() <
@@ -1600,7 +1599,7 @@ private fun ChatOverlay(
     LaunchedEffect(state.chatToasts.size, state.chatToasts.firstOrNull()?.line?.id) {
         while (state.chatToasts.isNotEmpty()) {
             delay(250)
-            val now = System.currentTimeMillis()
+            val now = nowMillis()
             state.chatToasts = state.chatToasts.filter {
                 now - it.shownAtMillis < state.chatToastMillis
             }

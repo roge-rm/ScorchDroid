@@ -20,7 +20,7 @@ import os
 import struct
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
 LOG = logging.getLogger("scorchdroid.play")
 
@@ -99,6 +99,13 @@ async def relay(ws: WebSocket):
 @router.get("/play")
 def play_root():
     return RedirectResponse("/play/", status_code=301)
+
+
+@router.get("/play/server.json")
+def play_server():
+    """Tells the page it came from a server, and where the relay is, so
+    Join Game can offer "This server" first."""
+    return JSONResponse({"relay": "/play/ws"}, headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/play/{path:path}")

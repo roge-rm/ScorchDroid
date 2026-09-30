@@ -68,6 +68,8 @@ target_link_options(scorchdroid PRIVATE
     # server config beside it, under one root the engine chdir()s into.
     "--preload-file=${DATA}@/scorched_root/data"
     "--preload-file=${CPP}/../assets/scorchdroid_server.xml@/scorched_root/scorchdroid_server.xml"
+    # The licence the About screen shows, as the phone stages it.
+    "--preload-file=${SCORCHDROID_REPO_ROOT}/LICENSE@/scorched_root/licenses/GPL-2.0.txt"
     -sFORCE_FILESYSTEM=1
     -lidbfs.js
     "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToUTF8','stringToNewUTF8','lengthBytesUTF8','FS','IDBFS','GL','HEAPU8','HEAP32']"

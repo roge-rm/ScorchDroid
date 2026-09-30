@@ -65,4 +65,9 @@ EMSCRIPTEN_KEEPALIVE int sd_gl_create(const char *selector) {
     return static_cast<int>(context);
 }
 
+/** Lets go of a context made by sd_gl_create, when its game ends. */
+EMSCRIPTEN_KEEPALIVE void sd_gl_destroy(int context) {
+    emscripten_webgl_destroy_context(static_cast<EMSCRIPTEN_WEBGL_CONTEXT_HANDLE>(context));
+}
+
 } // extern "C"

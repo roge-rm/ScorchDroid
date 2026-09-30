@@ -1,33 +1,26 @@
 package com.rm.scorchdroid
 
-import android.opengl.GLSurfaceView
-import javax.microedition.khronos.egl.EGLConfig
-import javax.microedition.khronos.opengles.GL10
-
 /**
- * M6: a real 3D GLES3 renderer (see renderer_jni.cpp) drawing the real,
- * live heightmap/tank state from the running ScorchedServer/ClientContext
- * instance as an actual terrain mesh with lighting, not the earlier M2/M5
- * flat top-down view. All GL calls happen on the GL thread via these
- * callbacks, as GLSurfaceView requires - nativeCameraDrag/nativeCameraZoom
- * are the exception, safe to call from the UI thread (touch handling in
- * MainActivity), since the native side guards camera state with its own
- * mutex separate from the GL-thread/sim-thread one.
+ * The renderer's calls (renderer_jni.cpp), on the phone and in the browser.
+ * Kept as a class of their own named GameRenderer, so the JNI names stay
+ * Java_com_rm_scorchdroid_GameRenderer_*. On the phone, GlRenderer is what
+ * GLSurfaceView calls, and it calls these. Generated like [NativeBridge].
  */
-class GameRenderer : GLSurfaceView.Renderer {
-    external fun nativeOnSurfaceCreated()
-    external fun nativeOnSurfaceChanged(width: Int, height: Int)
-    external fun nativeOnDrawFrame()
+expect object GameRenderer {
+
+    fun nativeOnSurfaceCreated()
+    fun nativeOnSurfaceChanged(width: Int, height: Int)
+    fun nativeOnDrawFrame()
     /**
      * The names the plate pass wants a picture of. The renderer draws the
      * plates itself now - in the frame it projected them for, so they cannot
      * lag - but it has no font, which is the one thing it still needs from
      * this side. It asks for what it is missing; [nativeSetPlateText] answers.
      */
-    external fun nativeGetMissingPlateTexts(): Array<String>
+    fun nativeGetMissingPlateTexts(): Array<String>
 
     /** One string's picture, ARGB_8888 as [android.graphics.Bitmap.getPixels] gives it. */
-    external fun nativeSetPlateText(text: String, width: Int, height: Int, pixels: IntArray)
+    fun nativeSetPlateText(text: String, width: Int, height: Int, pixels: IntArray)
 
     /**
      * Whose name plate is at this point on screen, or 0 for none. The
@@ -35,7 +28,7 @@ class GameRenderer : GLSurfaceView.Renderer {
      * can actually see. Only a *hold* on one opens a card: a tap, there as
      * anywhere else, aims.
      */
-    external fun nativePickTankPlate(screenX: Float, screenY: Float): Int
+    fun nativePickTankPlate(screenX: Float, screenY: Float): Int
 
     /**
      * A1: the projectile engine loops that should be playing, one row each:
@@ -43,17 +36,17 @@ class GameRenderer : GLSurfaceView.Renderer {
      * per shell in flight; this is that list, already attenuated and panned
      * against the live listener. Empty whenever nothing is in the air.
      */
-    external fun nativeGetSoundLoops(): Array<String>
+    fun nativeGetSoundLoops(): Array<String>
 
     /** dp to px, for the plate layout - only this side knows it. */
-    external fun nativeSetUiDensity(density: Float)
+    fun nativeSetUiDensity(density: Float)
 
     /**
      * M6: turns a screen tap into a landscape "x|y", or "" if the ray
      * misses the ground. Rebuilds the pick ray from the camera basis the
      * renderer published last frame rather than inverting the MVP.
      */
-    external fun nativePickTerrain(screenX: Float, screenY: Float): String
+    fun nativePickTerrain(screenX: Float, screenY: Float): String
 
     /**
      * Development readout: "fps|drawCalls|targets" for the last complete
@@ -64,10 +57,10 @@ class GameRenderer : GLSurfaceView.Renderer {
      * Not a player-facing feature; see GameHudState.perfLabel for where to
      * gate it before a release.
      */
-    external fun nativeGetFrameStats(): String
+    fun nativeGetFrameStats(): String
 
-    external fun nativeCameraDrag(dx: Float, dy: Float)
-    external fun nativeCameraZoom(scaleFactor: Float)
+    fun nativeCameraDrag(dx: Float, dy: Float)
+    fun nativeCameraZoom(scaleFactor: Float)
 
     /**
      * Slides the free-fly camera's look-at point across the ground, in
@@ -76,18 +69,18 @@ class GameRenderer : GLSurfaceView.Renderer {
      * retargets to your tank every frame and would overwrite any pan on the
      * very next one.
      */
-    external fun nativeCameraPan(dx: Float, dy: Float)
+    fun nativeCameraPan(dx: Float, dy: Float)
 
     // Toggles free-fly (orbit the map) vs. third-person-follow (orbit "my
     // tank") - see renderer_jni.cpp. Returns the new mode (true = follow).
-    external fun nativeToggleCameraMode(): Boolean
+    fun nativeToggleCameraMode(): Boolean
 
     /**
      * M6 parity: selects one of upstream's camera presets
      * (TargetCamera::CamType). See [CameraPreset]. A drag drops back out of
      * a fixed preset, so this is a framing, not a mode lock.
      */
-    external fun nativeSetCameraPreset(preset: Int)
+    fun nativeSetCameraPreset(preset: Int)
 
     /**
      * The mini-map's picture, which is upstream's plan view: the landscape's
@@ -100,42 +93,30 @@ class GameRenderer : GLSurfaceView.Renderer {
      * version has moved. Empty between landscapes, so the old map is dropped
      * rather than left over the new one.
      */
-    external fun nativeMiniMapVersion(): Int
+    fun nativeMiniMapVersion(): Int
 
     /** ARGB_8888 rows in landscape order - see [nativeMiniMapVersion]. */
-    external fun nativeMiniMapImage(): IntArray
+    fun nativeMiniMapImage(): IntArray
 
     /**
      * "lookX|lookY|dirX|dirY" in landscape coordinates, for the plan view's
      * camera arrow (upstream's GLWPlanView::drawCameraPointer).
      */
-    external fun nativeCameraPlanInfo(): String
+    fun nativeCameraPlanInfo(): String
 
     /**
      * Points the camera at a spot on the landscape, and drops into free look
      * so that it stays there - what tapping the mini-map does, and what
      * upstream does on a left-click in its plan view.
      */
-    external fun nativeCameraLookAt(landscapeX: Float, landscapeY: Float)
+    fun nativeCameraLookAt(landscapeX: Float, landscapeY: Float)
 
     /**
      * M6: short-lived labels anchored to a world position - floating damage
      * numbers and speech bubbles - already projected to screen space. See
      * [parseFloatingLabels].
      */
-    external fun nativeGetFloatingLabels(): Array<String>
-
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        nativeOnSurfaceCreated()
-    }
-
-    override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        nativeOnSurfaceChanged(width, height)
-    }
-
-    override fun onDrawFrame(gl: GL10?) {
-        nativeOnDrawFrame()
-    }
+    fun nativeGetFloatingLabels(): Array<String>
 }
 
 /**

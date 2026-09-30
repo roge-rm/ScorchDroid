@@ -282,17 +282,6 @@ fun LoadGameScreen(
     }
 }
 
-/** "Today 15:04" for a save from today, otherwise "19 Sep 15:04". */
-private fun savedGameLabel(epochSeconds: Long): String {
-    val saved = java.util.Calendar.getInstance().apply { timeInMillis = epochSeconds * 1000L }
-    val now = java.util.Calendar.getInstance()
-    val sameDay = saved.get(java.util.Calendar.YEAR) == now.get(java.util.Calendar.YEAR) &&
-        saved.get(java.util.Calendar.DAY_OF_YEAR) == now.get(java.util.Calendar.DAY_OF_YEAR)
-    val time = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(saved.time)
-    if (sameDay) return "Today $time"
-    val day = java.text.SimpleDateFormat("d MMM", java.util.Locale.getDefault()).format(saved.time)
-    return "$day $time"
-}
 
 @Composable
 fun QuickGameScreen(
@@ -335,10 +324,19 @@ fun MultiplayerScreen(
     onJoinBluetooth: () -> Unit,
     onBack: () -> Unit,
     bluetoothEnabled: Boolean = true,
+    // A browser can only join, so it gets the join button and nothing else.
+    joinOnly: Boolean = false,
+    joinSubtitle: String = "Find a game on the network",
 ) {
     MenuBackdrop {
         Title("Multiplayer")
         Spacer(Modifier.height(36.dp))
+        if (joinOnly) {
+            MenuButton("Join Game", joinSubtitle, onClick = onJoin)
+            Spacer(Modifier.height(12.dp))
+            TextButton(onClick = onBack) { Text("Back", color = MenuAccent) }
+            return@MenuBackdrop
+        }
         MenuButton("Host Game", "Over Wi-Fi, a hotspot, or Wi-Fi Direct", onClick = onHost)
         // Its own button rather than an option inside hosting, because it is
         // genuinely a different game: the engine has one network interface,
@@ -360,7 +358,7 @@ fun MultiplayerScreen(
             enabled = loadGameEnabled,
             onClick = onLoadGame,
         )
-        MenuButton("Join Game", "Find a game on the network", onClick = onJoin)
+        MenuButton("Join Game", joinSubtitle, onClick = onJoin)
         // Its own search, not a row in the other one. A Bluetooth scan
         // cannot be narrowed to devices running the game, so it turns up
         // every speaker, headset and car in range - which buried the two

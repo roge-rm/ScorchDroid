@@ -2,7 +2,6 @@ package com.rm.scorchdroid
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
-import android.util.Log
 import android.util.TypedValue
 import android.opengl.GLSurfaceView
 import android.os.Bundle
@@ -11,12 +10,7 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.AndroidUiDispatcher
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -27,12 +21,16 @@ import java.util.Collections
 import kotlin.math.ceil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * The phone's shell around [GameController]: the Activity, its GL surface and
+ * touch handling, and everything multiplayer needs from Android - Wi-Fi
+ * Direct, Bluetooth and LAN discovery, with their permissions and system
+ * prompts. The game itself, menus and HUD included, is shared with the
+ * browser build and lives in the shared module.
+ */
 class MainActivity : AppCompatActivity() {
     private lateinit var gameSurface: GLSurfaceView
     private lateinit var gameRenderer: GameRenderer
@@ -40,23 +38,6 @@ class MainActivity : AppCompatActivity() {
     // M9: the container the GL surface is added to when a game starts and
     // removed from on quit - see startGame/quitToMenu.
     private lateinit var surfaceHost: android.widget.FrameLayout
-    // Which top-level screen is showing. The game is one of these now.
-    private var appScreen by mutableStateOf(AppScreen.SPLASH)
-    private var splashStatus by mutableStateOf("Starting...")
-    private var licenseText by mutableStateOf("")
-
-    // M11: the player's own preferences, as opposed to a game's rules - see
-    // GameSettings. Created in onCreate, before anything reads a setting.
-    private lateinit var settings: GameSettings
-    // M15: created once the data root exists; state-driven from the tick.
-    private var music: MusicPlayer? = null
-    // M21: the landscape's own atmosphere. Reloaded when the landscape
-    // changes, which is every round.
-    private var ambient: AmbientPlayer? = null
-    private var lastLandscapeTex = ""
-    // The running game's tick loop, so quit-to-menu can stop it. Non-null
-    // exactly while a game is running.
-    private var gameJob: Job? = null
 
     // Wi-Fi Direct's discovery permission (see WifiDirectTransport). The
     // first runtime permission this game has ever asked for, and asked for
@@ -87,7 +68,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             // Refused, which is a choice and not a fault - but a silent
             // return to the menu would read as the button being broken.
-            showMenuMessage(
+            controller.showMenuMessage(
                 "Bluetooth play needs the nearby devices permission. You can turn it " +
                     "on in Android Settings under Apps > ScorchDroid > Permissions."
             )
@@ -98,129 +79,7 @@ class MainActivity : AppCompatActivity() {
     // makes it so. Never more than one: these are menu taps.
     private var afterBluetoothReady: (() -> Unit)? = null
 
-    // M10: the game-setup screen's state. The options come from the engine
-    // (upstream's own entries, ranges and descriptions) rather than being
-    // declared here - see GameSetup.h.
-    private var setupOptions by mutableStateOf<List<SetupOption>>(emptyList())
-    private var setupTitle by mutableStateOf("New Game")
-    private var availableMods by mutableStateOf<List<String>>(emptyList())
-    // M18: the bots the chosen mod offers, and which one fills the slots.
-    // Re-read whenever the mod changes - a mod brings its own AIs.
-    private var availableBots by mutableStateOf<List<BotOption>>(emptyList())
-    private var selectedBots by mutableStateOf<List<String>>(emptyList())
-    // M19: the mod's landscapes, and which of them a game may use. An empty
-    // selection is upstream's own "all of them".
-    private var availableLandscapes by mutableStateOf<List<String>>(emptyList())
-    private var selectedLandscapes by mutableStateOf<List<String>>(emptyList())
-    // M12: non-null exactly while a tutorial game is running.
-    private var tutorial by mutableStateOf<TutorialState?>(null)
-    private var selectedMod by mutableStateOf("none")
-    // M14: the ready-made games the installed mods describe in their own
-    // modinfo.xml. Read once, after the engine has a data root - the list
-    // cannot change while the app is running.
-    private var presets by mutableStateOf<List<GamePreset>>(emptyList())
-    // The saves on disk, refreshed on the way into Single Player rather than
-    // once at startup: one is written mid-game, and the menu is the next
-    // thing the player sees afterwards.
-    private var savedGames by mutableStateOf<List<SavedGame>>(emptyList())
-    // M16: where the extracted data lives, so the settings screen can show
-    // the avatar images and the score table can show them again.
-    private var dataRootPath by mutableStateOf("")
-
-    // M4: the real Compose HUD's mutable state (see GameHud.kt) - written
-    // to directly from the tick loop, touch handlers, and dialogs below,
-    // all plain (non-Composable) Kotlin code, so a plain mutable holder is
-    // simpler here than threading Compose State through every function
-    // that used to take a `statusText: TextView` parameter.
-    private val hudState = GameHudState()
-
-    // M4: touch-controllable elevation, in degrees, shared by both fire
-    // gestures below - mirrors hudState.elevationDegrees (the Slider's
-    // displayed value) but kept as a separate @Volatile field since it's
-    // read from a background coroutine dispatcher when firing, and Compose
-    // State reads/writes are only safe on the main thread.
-    @Volatile
-    private var currentElevationDegrees = 45f
-
-    // Slider-based aiming (see the porting plan's "aiming controls
-    // direction" note) - angle/power set via the sliders in GameHud.kt,
-    // fired explicitly via the Fire button (fireFromSliders()) rather than
-    // on gesture release like the battlefield tap/drag. Same
-    // mirrors-Compose-state-into-a-@Volatile-field pattern as
-    // currentElevationDegrees above, for the same reason.
-    @Volatile
-    private var currentAngleDegrees = 0f
-
-    @Volatile
-    private var currentPowerFraction = DEFAULT_POWER_FRACTION
-
-    // M6 parity: upstream's UNDO_MOVE ("Revert to last angles") - the
-    // angle/elevation/power of the last shot actually fired, so a player
-    // can get back to it after nudging the sliders around. Null until
-    // something has been fired this session.
-    private var lastFiredAim: Triple<Float, Float, Float>? = null
-
-    // Whether the game being started hosts over Bluetooth instead of the
-    // network. Not a setting: the engine has one network interface, so this
-    // is chosen on the way in and cannot change while a game is running.
-    private var hostOverBluetooth = false
-
-    // Whether this game is meant for anyone else to join.
-    //
-    // Every game on this port is a hosted game - there is one engine and it
-    // always runs the server - but that is an implementation fact, not
-    // something a solo player has any use for. With this false nothing is
-    // published: no NSD registration, no Wi-Fi Direct group, no line of HUD
-    // naming an address, and none of the toasts that report how those two
-    // went. The server socket is still open (stopping it would mean a
-    // second startup path through the engine, for no gain), so a game can
-    // still be joined by someone told the address by hand - it just isn't
-    // announced to the room.
-    //
-    // Chosen on the way in like [hostOverBluetooth], and false unless one of
-    // the two Multiplayer host entries set it.
-    private var hostForOthers = false
-
-    // Whether this game has already put the visibility prompt up. Asked once
-    // per game, since a second prompt between setup and the first round would
-    // read as the first one not having worked.
-    private var bluetoothVisibilityAsked = false
-
-    // The move id this turn's committed move was submitted against, or 0 if
-    // nothing is committed. The Fire button's locked state hangs off it - see
-    // the tick loop, which cannot use "there is a move id" on its own.
-    // Which save the next started game comes from, or null for a fresh one.
-    // Read by startAsHost, which is the one place either kind of game begins.
-    private var savedGameToLoad: String? = null
-
-    // Which screen the save picker was opened from, which is also the
-    // question of intent: a game loaded from Single Player publishes
-    // nothing, one loaded from Multiplayer hosts like any other host.
-    private var loadGameForOthers = false
-    private var lockedMoveId = 0
-    // Skip All Moves: which move the countdown belongs to, and when it ends.
-    // See GameHudState.skipAllMoves for why the mode itself is not engine state.
-    // A1: which projectile engine loops this side has started, so the ones
-    // that land can be stopped again. Keys are the renderer's.
-    private val projectileLoopKeys = HashSet<String>()
-
-    // The doppler rate each of those was last given, for the line that says
-    // what it ended on - see updateProjectileLoops.
-    private val projectileLoopRates = HashMap<String, Float>()
-    private var skipAllMoveId = 0
-    private var skipAllDeadlineMs = 0L
-
-    // M6: whether the aiming sliders have been seeded from the tank's real
-    // starting turret rotation yet (see the tick loop). One-shot, so it
-    // never fights the player's own adjustments afterwards.
-    private var aimSeeded = false
-    // M6 parity: chat polling state. The version is the cheap "did anything
-    // arrive" check; the line id is how far the HUD has already been told
-    // about, so a message it is already timing is never restarted.
-    private var lastChatVersion = 0
-    private var lastChatLineId = 0
-    private var lastMapLineVersion = 0
-    private var lastMapLineId = 0
+    private lateinit var controller: Controller
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -233,348 +92,44 @@ class MainActivity : AppCompatActivity() {
         // out mid-game exactly like any other idle app.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
-        hudState.statusText = NativeBridge.helloFromNative()
 
         surfaceHost = findViewById(R.id.game_surface_host)
-        settings = GameSettings(this)
+        val store = SharedPreferencesStore(getSharedPreferences("scorchdroid.settings", MODE_PRIVATE))
+        controller = Controller(GameSettings(store, SoundPlayer))
+        controller.hudState.statusText = NativeBridge.helloFromNative()
 
         findViewById<ComposeView>(R.id.hud_compose_view).setContent {
             // M9: the system back gesture walks the menu back up a level.
             // Enabled only off the main menu, so back there still leaves the
-            // app as Android expects. In a game it does nothing: quitting is
-            // a confirmed action behind the overflow menu, and a stray back
-            // swipe mid-round should never throw the game away.
-            BackHandler(enabled = appScreen != AppScreen.MENU) {
-                when (appScreen) {
-                    AppScreen.GAME -> Unit
-                    // The only screen two levels down; back should undo one
-                    // step, not both.
-                    AppScreen.QUICK_GAME -> appScreen = AppScreen.SINGLE_PLAYER
-                    AppScreen.LOAD_GAME -> appScreen =
-                        if (loadGameForOthers) AppScreen.MULTIPLAYER else AppScreen.SINGLE_PLAYER
-                    else -> appScreen = AppScreen.MENU
-                }
-            }
-            when (appScreen) {
-                AppScreen.SPLASH -> SplashScreen(splashStatus, null)
-                AppScreen.MENU -> MainMenuScreen(
-                    onSinglePlayer = {
-                        savedGames = parseSavedGames(NativeBridge.listSavedGames())
-                        appScreen = AppScreen.SINGLE_PLAYER
-                    },
-                    onMultiplayer = {
-                        requestNearbyPermissionOnce()
-                        // Read on the way in, not on the tap: whether Load
-                        // Game is even offered depends on there being a
-                        // save, and a game saved a minute ago was written
-                        // after this list was last read.
-                        savedGames = parseSavedGames(NativeBridge.listSavedGames())
-                        appScreen = AppScreen.MULTIPLAYER
-                    },
-                    onSettings = { appScreen = AppScreen.SETTINGS },
-                    onAbout = { appScreen = AppScreen.ABOUT },
-                )
-                AppScreen.SINGLE_PLAYER -> SinglePlayerScreen(
-                    onQuickGame = { openQuickGame() },
-                    quickGameEnabled = presets.isNotEmpty(),
-                    onNewGame = { openSetup("New Game") },
-                    onLoadGame = {
-                        loadGameForOthers = false
-                        appScreen = AppScreen.LOAD_GAME
-                    },
-                    loadGameEnabled = savedGames.isNotEmpty(),
-                    onTutorial = { startTutorial() },
-                    tutorialEnabled = true,
-                    onBack = { appScreen = AppScreen.MENU },
-                )
-                AppScreen.LOAD_GAME -> LoadGameScreen(
-                    saves = savedGames,
-                    onPick = { startSavedGame(it) },
-                    onDelete = { confirmDeleteSave(it) },
-                    onBack = {
-                        appScreen = if (loadGameForOthers) {
-                            AppScreen.MULTIPLAYER
-                        } else {
-                            AppScreen.SINGLE_PLAYER
-                        }
-                    },
-                )
-                AppScreen.QUICK_GAME -> QuickGameScreen(
-                    presets = presets,
-                    onPick = { startPreset(it) },
-                    onBack = { appScreen = AppScreen.SINGLE_PLAYER },
-                )
-                AppScreen.MULTIPLAYER -> MultiplayerScreen(
-                    onHost = { openSetup("Host Game", forOthers = true) },
-                    onHostBluetooth = { startBluetoothHostFlow() },
-                    onLoadGame = {
-                        loadGameForOthers = true
-                        appScreen = AppScreen.LOAD_GAME
-                    },
-                    loadGameEnabled = savedGames.isNotEmpty(),
-                    onJoin = { startJoinFlow() },
-                    onJoinBluetooth = { requireBluetooth { startJoinFlow(overBluetooth = true) } },
-                    onBack = { appScreen = AppScreen.MENU },
-                    bluetoothEnabled = BluetoothTransport.isSupported(applicationContext),
-                )
-                // M11 builds this screen; until then the button is honest
-                // about it rather than doing nothing when tapped.
-                AppScreen.SETUP -> GameSetupScreen(
-                    title = setupTitle,
-                    options = setupOptions,
-                    mods = availableMods,
-                    selectedMod = selectedMod,
-                    onModChange = {
-                        NativeBridge.setSelectedMod(it)
-                        selectedMod = NativeBridge.getSelectedMod()
-                        // The new mod's bots, which are rarely the same ones.
-                        readPlayersAndMaps()
-                    },
-                    bots = availableBots,
-                    selectedBots = selectedBots,
-                    onBotsChange = {
-                        NativeBridge.setBotTypes(it.toTypedArray())
-                        selectedBots = NativeBridge.getBotTypes().toList()
-                    },
-                    landscapes = availableLandscapes,
-                    selectedLandscapes = selectedLandscapes,
-                    onLandscapesChange = {
-                        NativeBridge.setLandscapes(it.toTypedArray())
-                        selectedLandscapes = NativeBridge.getSelectedLandscapes().toList()
-                    },
-                    onChange = { option, value -> changeSetupOption(option, value) },
-                    onReset = {
-                        NativeBridge.resetSetupOptions()
-                        setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
-                        selectedMod = NativeBridge.getSelectedMod()
-                        readPlayersAndMaps()
-                    },
-                    onStart = { startGame() },
-                    onBack = { appScreen = AppScreen.MENU },
-                )
-                AppScreen.JOINING -> JoiningScreen(
-                    status = hudState.statusText,
-                    dialog = hudState.dialog,
-                    onBack = { cancelJoinFlow() },
-                )
-                AppScreen.SETTINGS -> SettingsScreen(
-                    settings = settings,
-                    dataRoot = dataRootPath,
-                    onBack = { appScreen = AppScreen.MENU },
-                )
-                AppScreen.ABOUT -> AboutScreen(
-                    versionName = BuildConfig.VERSION_NAME,
-                    upstreamCommit = BuildConfig.UPSTREAM_COMMIT,
-                    licenseText = licenseText,
-                    onBack = { appScreen = AppScreen.MENU },
-                )
-                AppScreen.GAME -> GameHud(
-                state = hudState,
-                onFindGames = { showFindGames() },
-                onShop = { showWeaponShop() },
-                onWeapon = { showWeaponQuickSelect() },
-                onElevationChange = { degrees ->
-                    currentElevationDegrees = degrees
-                    hudState.elevationDegrees = degrees
-                    pushAimToEngine()
-                },
-                onAngleChange = { degrees ->
-                    currentAngleDegrees = degrees
-                    hudState.angleDegrees = degrees
-                    pushAimToEngine()
-                },
-                onPowerChange = { power ->
-                    currentPowerFraction = power
-                    hudState.powerFraction = power
-                    pushAimToEngine()
-                },
-                onFire = { fireFromSliders() },
-                onToggleCamera = { hudState.cameraFollow = gameRenderer.nativeToggleCameraMode() },
-                onDefenses = { showDefenses() },
-                onActions = { showActionsMenu() },
-                onUndo = { revertToLastAim() },
-                onQuitToMenu = { confirmQuitToMenu() },
-                onSkip = { submitMoveAsync(MoveType.SKIP) },
-                onDoneBuying = { finishBuying() },
-                onScores = { showScores() },
-                onCameraPresets = { showCameraPresets() },
-                onSimulationSpeed = { showSimulationSpeed() },
-                onAdmin = { showAdminMenu() },
-                onAimGesture = { axis, active -> playAimSound(axis, active) },
-                onSendChat = { text -> sendChatAsync(hudState.chatChannel, text) },
-                onLookAt = { x, y ->
-                    if (::gameRenderer.isInitialized) gameRenderer.nativeCameraLookAt(x, y)
-                },
-                // Onto the wire as upstream's ComsLinesMessage. The engine
-                // decides who may see it - the sender's team, which in a
-                // free-for-all is everyone - and a solo game simply has
-                // nobody to send to, so this costs a no-op there.
-                onDrawLine = { line ->
-                    val arena = hudState.miniMapInfo
-                    if (arena != null) {
-                        val (ax, ay) = landscapeToPlanFraction(line.ax, line.ay, arena)
-                        val (bx, by) = landscapeToPlanFraction(line.bx, line.by, arena)
-                        sendMapLineAsync(ax, ay, bx, by)
-                    }
-                },
-                )
-            }
-            // A game that fails to load has to be able to say so from the
-            // screen it was picked on. HudDialogHost is drawn by the game and
-            // joining screens; these three raise dialogs without being any of
-            // them - and a dialog raised on a screen that does not draw one is
-            // invisible, which is how "Host over Bluetooth" came to do nothing
-            // at all when the radio was switched off.
-            if (appScreen == AppScreen.SINGLE_PLAYER || appScreen == AppScreen.QUICK_GAME ||
-                appScreen == AppScreen.MULTIPLAYER || appScreen == AppScreen.LOAD_GAME
-            ) {
-                HudDialogHost(hudState.dialog)
-            }
-            // M12: over the HUD, and only during a tutorial game.
-            tutorial?.let { active ->
-                if (appScreen == AppScreen.GAME) {
-                    TutorialOverlay(active) { active.skip() }
-                }
-            }
+            // app as Android expects.
+            BackHandler(enabled = controller.backEnabled) { controller.onBack() }
+            controller.Content()
         }
 
         // First run has real work to do - extracting upstream's ~90MB data/
         // tree - so the splash stays up until the engine has a data root.
         CoroutineScope(Dispatchers.Main).launch {
-            splashStatus = "Extracting game data..."
+            controller.splashStatus = "Extracting game data..."
             val dataRoot = withContext(Dispatchers.IO) {
                 AssetDataExtractor.ensureExtracted(applicationContext)
             }
-            dataRootPath = dataRoot.absolutePath
-            splashStatus = "Starting engine..."
+            controller.splashStatus = "Starting engine..."
             val initOk = withContext(Dispatchers.Default) {
                 NativeBridge.initEngine(dataRoot.absolutePath)
             }
             if (!initOk) {
-                splashStatus = "Failed to initialise engine data root"
+                controller.splashStatus = "Failed to initialise engine data root"
                 return@launch
             }
-            // Only now: applyAll() crosses into the engine, which has just
+            controller.licenseText = withContext(Dispatchers.IO) { readLicenseText() }
+            // Only now: the players cross into the engine, which has just
             // been given its data root.
-            music = MusicPlayer(dataRoot).also {
-                it.load(NativeBridge.getSelectedMod())
-                settings.music = it
-            }
-            ambient = AmbientPlayer(dataRoot.absolutePath).also { settings.ambient = it }
-            settings.applyAll()
-            presets = parsePresets(NativeBridge.getPresets())
-            // Upstream's menu music is its "wait" loop.
-            music?.setState(MusicPlayer.State.WAIT)
-            licenseText = withContext(Dispatchers.IO) { readLicenseText() }
-            appScreen = AppScreen.MENU
+            controller.onEngineReady(
+                dataRoot.absolutePath,
+                MusicPlayer(dataRoot),
+                AmbientPlayer(dataRoot.absolutePath),
+            )
         }
-    }
-
-    /**
-     * M12: starts the tutorial - upstream's own easy-game configuration with
-     * this port's own coach marks over it.
-     *
-     * No setup screen: the whole point is a game that needs no decisions
-     * first. The preset is loaded rather than merged, so a player who has been
-     * fiddling with rounds and wall types still gets the gentle version.
-     */
-    private fun startTutorial() {
-        val loaded = NativeBridge.loadSetupPreset("data/singletutorial.xml")
-        if (!loaded) {
-            // Nothing was changed, so a normal game would start instead - with
-            // tutorial text over it, which would be worse than saying so.
-            hudState.dialog = HudDialog.Message("Couldn't load the tutorial settings.") {
-                hudState.dialog = HudDialog.None
-            }
-            return
-        }
-        tutorial = TutorialState()
-        startGame()
-    }
-
-    /**
-     * M18/M19: the parts of the setup screen that are not plain options - the
-     * bots and the landscapes. Both come from the chosen mod, so they are
-     * re-read whenever the mod changes as well as when the screen opens.
-     */
-    private fun readPlayersAndMaps() {
-        availableBots = parseBots(NativeBridge.getBots())
-        selectedBots = NativeBridge.getBotTypes().toList()
-        availableLandscapes = NativeBridge.getLandscapes().toList()
-        selectedLandscapes = NativeBridge.getSelectedLandscapes().toList()
-    }
-
-    private fun openQuickGame() {
-        appScreen = AppScreen.QUICK_GAME
-    }
-
-    /**
-     * M14: starts one of the mods' own ready-made games.
-     *
-     * Like the tutorial, and for the same reason: the preset *replaces* the
-     * setup rather than merging into it, so "Easy Game" is upstream's easy
-     * game and not upstream's easy game plus whatever was last fiddled with in
-     * New Game. The mod comes with it - a mod's preset file names the mod
-     * itself, which is why picking an Apocalypse game needs no separate mod
-     * choice - and startGame() writes the session config from that, so the
-     * server loads the right mod before it reads anything else.
-     */
-    private fun startPreset(preset: GamePreset) {
-        if (!NativeBridge.loadSetupPreset(preset.gameFile)) {
-            hudState.dialog = HudDialog.Message("Couldn't load \"${preset.name}\".") {
-                hudState.dialog = HudDialog.None
-            }
-            return
-        }
-        startGame()
-    }
-
-    /**
-     * M10: opens the pre-game setup screen. Both New Game and Host Game land
-     * here - they differ in wording, not in what they configure, because a
-     * single-player game on this port *is* a hosted game that nobody joined.
-     */
-    private fun openSetup(
-        title: String,
-        overBluetooth: Boolean = false,
-        forOthers: Boolean = false,
-    ) {
-        // Stated here rather than left over from whichever button was last
-        // pressed: a player who backed out of a Bluetooth game and then
-        // started a solo one would otherwise have hosted it over Bluetooth,
-        // or advertised a solo game to the room.
-        hostOverBluetooth = overBluetooth
-        hostForOthers = forOthers
-        bluetoothVisibilityAsked = false
-        // Back to the shipped config: a player who ran the tutorial and then
-        // started a real game would otherwise inherit its seven inert targets
-        // and its missing shot clock, with the setup screen showing them as
-        // though they had chosen them.
-        NativeBridge.resetSetupOptions()
-        setupTitle = title
-        setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
-        // The mod reaches the server through the session config, which is the
-        // only route that can work: startServerInternal() loads mod files
-        // partway through its own startup, so anything applied after
-        // startServer() is far too late for it.
-        availableMods = NativeBridge.getAvailableMods().toList()
-        selectedMod = NativeBridge.getSelectedMod()
-        readPlayersAndMaps()
-        appScreen = AppScreen.SETUP
-    }
-
-    /**
-     * Sends one choice to the engine and re-reads the list.
-     *
-     * Re-read rather than patched locally: the engine is the authority on
-     * whether a value was accepted, and on what the option now reads as. A
-     * rejected value (out of upstream's range, or not one of an enum's
-     * choices) then simply leaves the control where it was, which is the right
-     * behaviour and costs no validation logic here.
-     */
-    private fun changeSetupOption(option: SetupOption, value: String) {
-        NativeBridge.setSetupOption(option.name, value)
-        setupOptions = parseSetupOptions(NativeBridge.getSetupOptions())
     }
 
     /**
@@ -592,2843 +147,32 @@ class MainActivity : AppCompatActivity() {
             "or in the LICENSE file in the source code."
     }
 
-    /**
-     * M9: starts a game and switches to the game screen, creating the GL
-     * surface as it goes.
-     *
-     * A fresh GLSurfaceView per game is deliberate. It gives a fresh EGL
-     * context, so nativeOnSurfaceCreated runs and the renderer forgets every
-     * build-once cache it holds - terrain, ground texture, models, trees,
-     * water, sky. That reset already exists and is already correct, because
-     * the minimise/resume bug forced it to be; reusing it is much safer than
-     * writing a second "forget everything" path that would need to stay in
-     * step with the first.
-     */
-    /**
-     * Deleting a save asks first - it is the one action on these menus that
-     * destroys something, and there is no undoing it.
-     */
-    private fun confirmDeleteSave(save: SavedGame) {
-        hudState.dialog = HudDialog.ListChoice(
-            title = "Delete this saved game?",
-            items = listOf("Yes, delete it"),
-            cancelLabel = "Keep it",
-            onSelect = {
-                val deleted = NativeBridge.deleteSavedGame(save.name)
-                if (!deleted) notifyPlayer("Couldn't delete that save")
-                savedGames = parseSavedGames(NativeBridge.listSavedGames())
-                hudState.dialog = HudDialog.None
-                // Nothing left to show, so this screen has nothing to be.
-                if (savedGames.isEmpty()) {
-                    appScreen = if (loadGameForOthers) {
-                        AppScreen.MULTIPLAYER
-                    } else {
-                        AppScreen.SINGLE_PLAYER
-                    }
-                }
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    /**
-     * Resume a save: the same path a fresh game takes - the GL surface, then
-     * the host coroutine - with the file named for [startAsHost] to load
-     * instead of building a new game.
-     */
-    private fun startSavedGame(save: SavedGame) {
-        if (gameJob != null) return
-        if (!loadGameForOthers) {
-            // Solo: the game runs a server as every game here does, and
-            // publishes nothing - no service record, no Wi-Fi Direct group.
-            savedGameToLoad = save.name
-            hostForOthers = false
-            hostOverBluetooth = false
-            startGame()
-            return
-        }
-
-        // Hosted: the engine has one network interface, so which radio it
-        // comes back on has to be settled before the game starts - the same
-        // reason Host Game and Host over Bluetooth are two buttons rather
-        // than one with an option inside it.
-        val transports = buildList {
-            add("Over Wi-Fi, a hotspot, or Wi-Fi Direct" to false)
-            if (BluetoothTransport.isSupported(applicationContext)) {
-                add("Over Bluetooth" to true)
-            }
-        }
-        if (transports.size == 1) {
-            startHostedSavedGame(save, overBluetooth = false)
-            return
-        }
-        hudState.dialog = HudDialog.ListChoice(
-            title = "Host it how?",
-            items = transports.map { it.first },
-            cancelLabel = "Cancel",
-            onSelect = { index ->
-                hudState.dialog = HudDialog.None
-                val overBluetooth = transports[index].second
-                if (overBluetooth) {
-                    requireBluetooth { startHostedSavedGame(save, overBluetooth = true) }
-                } else {
-                    startHostedSavedGame(save, overBluetooth = false)
-                }
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    /** The hosted half of [startSavedGame], once the transport is settled. */
-    private fun startHostedSavedGame(save: SavedGame, overBluetooth: Boolean) {
-        if (gameJob != null) return
-        savedGameToLoad = save.name
-        hostForOthers = true
-        hostOverBluetooth = overBluetooth
-        bluetoothVisibilityAsked = false
-        startGame()
-    }
-
-    private fun startGame() {
-        if (gameJob != null) return
-
-        // Bluetooth visibility is asked for here, not on the way into setup.
-        // Android grants it for five minutes at most and the clock starts the
-        // moment it is granted, so a player who spends two of them choosing
-        // options and waiting for a landscape has two left for the other
-        // phone to find them - which is how a host can be up and genuinely
-        // invisible. Answering lands in onActivityResult, which comes back
-        // here.
-        if (hostOverBluetooth && !bluetoothVisibilityAsked) {
-            bluetoothVisibilityAsked = true
-            try {
-                startActivityForResult(BluetoothTransport.discoverableIntent(), REQUEST_DISCOVERABLE)
-                return
-            } catch (e: android.content.ActivityNotFoundException) {
-                // No visibility prompt on this device at all. Same
-                // consequence as refusing one, and worth the same sentence.
-                showMenuMessage(
-                    "This device can't be made visible over Bluetooth, so only phones " +
-                        "already paired with it can find the game."
-                )
-            }
-        }
-
-        music?.load(NativeBridge.getSelectedMod())
-        applySettingsToHud()
-        attachGameSurface()
-        appScreen = AppScreen.GAME
-        gameJob = CoroutineScope(Dispatchers.Main).launch { startAsHost() }
-    }
-
-    /**
-     * M10: find and connect to a game, staying on a menu screen while it
-     * happens.
-     *
-     * The GL surface is deliberately not built until the connection is up.
-     * Building it first - which is what happened when Join went through
-     * startGame() - put the discovery dialog on top of the aiming sliders and
-     * Fire button of a game that did not exist yet.
-     */
-    private fun startJoinFlow(overBluetooth: Boolean = false) {
-        if (gameJob != null) return
-        appScreen = AppScreen.JOINING
-        hudState.statusText = if (overBluetooth) {
-            "Looking for a device to join..."
-        } else {
-            "Looking for a game..."
-        }
-        gameJob = CoroutineScope(Dispatchers.Main).launch {
-            val target = pickJoinTarget(overBluetooth)
-            if (target == null) {
-                gameJob = null
-                appScreen = AppScreen.MULTIPLAYER
-                return@launch
-            }
-
-            // A Wi-Fi Direct pick is not an address yet. Forming the group
-            // takes several seconds and puts an invitation prompt on the
-            // host's screen, so it gets its own status line - told that it is
-            // "connecting to :27270", a player would reasonably think the
-            // game had hung.
-            // Bluetooth has no address to connect to at any point - the
-            // whole game runs over RFCOMM - so it takes its own path into
-            // the engine rather than being turned into a host and port.
-            if (target.bluetoothAddress != null) {
-                hudState.statusText = "Connecting to ${target.name} over Bluetooth...\n" +
-                    if (target.bluetoothPaired) {
-                        "This can take a few seconds."
-                    } else {
-                        "Accept the pairing request on both devices if it pops up."
-                    }
-                val connecting = withContext(Dispatchers.Default) {
-                    NativeBridge.startJoinGameBluetooth(target.bluetoothAddress)
-                }
-                if (!connecting) {
-                    hudState.statusText =
-                        "Couldn't start a Bluetooth connection to ${target.name}. " +
-                            "Tap Cancel to go back."
-                    return@launch
-                }
-                // The same five lines the network path ends with - there
-                // is nothing different about a joined client from here on,
-                // whatever carried it.
-                hudState.isHost = false
-                applySettingsToHud()
-                attachGameSurface()
-                appScreen = AppScreen.GAME
-                awaitJoinAndPlay()
-                return@launch
-            }
-
-            val host = if (target.p2pDeviceAddress != null) {
-                // The prompt is worth mentioning: it lands on the *other*
-                // phone, which the player is not looking at, and ignoring it
-                // is indistinguishable from the connection failing.
-                hudState.statusText = "Asking ${target.name} to connect...\n" +
-                    "Accept the invite on the other device if it pops up."
-                val result = WifiDirectTransport.connectToOwner(
-                    applicationContext, target.p2pDeviceAddress
-                )
-                if (result.address == null) {
-                    hudState.statusText = if (result.error != null) {
-                        "Couldn't connect to ${target.name}: ${result.error}. " +
-                            "Tap Cancel to go back."
-                    } else {
-                        "Couldn't form a Wi-Fi Direct group with ${target.name}. " +
-                            "Tap Cancel to go back."
-                    }
-                    return@launch
-                }
-                result.address
-            } else {
-                target.host
-            }
-
-            hudState.statusText = "Connecting to $host:${target.port}..."
-            val connecting = withContext(Dispatchers.Default) {
-                NativeBridge.startJoinGame(host, target.port)
-            }
-            if (!connecting) {
-                hudState.statusText =
-                    "Couldn't reach $host:${target.port}. Tap Cancel to go back."
-                return@launch
-            }
-
-            // Connected, so there is now a game to draw. A joined client is
-            // never the host, so the admin button stays away.
-            hudState.isHost = false
-            applySettingsToHud()
-            attachGameSurface()
-            appScreen = AppScreen.GAME
-            awaitJoinAndPlay()
-        }
-    }
-
-    /**
-     * M11: copies the display-side settings into the HUD's own state.
-     *
-     * Copied rather than read through, so a composition never touches
-     * preferences: the HUD reads one object, and this is the single place the
-     * two are joined. Called when a game starts, which is the only time they
-     * can have changed - the settings screen is not reachable mid-game.
-     */
-    private fun applySettingsToHud() {
-        hudState.showNamePlates = settings.showNamePlates
-        hudState.showHealthBars = settings.showHealthBars
-        hudState.showTankArrows = settings.showTankArrows
-        hudState.chatToastMillis = settings.chatToastSeconds * 1000L
-        hudState.leftHandMode = settings.leftHandMode
-        hudState.controlOpacity = settings.controlOpacity
-    }
-
-    /** Abandons a join that hasn't connected yet and returns to the menu. */
-    private fun cancelJoinFlow() {
-        music?.setState(MusicPlayer.State.WAIT)
-        gameJob?.cancel()
-        gameJob = null
-        hudState.dialog = HudDialog.None
-        NativeBridge.stopGame()
-        ambient?.stop()
-        lastLandscapeTex = ""
-        lockedMoveId = 0
-        hudState.reset()
-        stopNetworkAdvertising()
-        appScreen = AppScreen.MULTIPLAYER
-    }
-
-    /**
-     * The renderer draws the name plates itself, but it has no font: upstream
-     * has a GL font atlas there and this port never had one. So each name is
-     * drawn here, once, into a bitmap the plate pass uploads and keeps.
-     *
-     * White on nothing, because the *tank's* colour is applied in the shader -
-     * one picture serves a player whatever colour they are playing, and a
-     * player who changes colour needs no new one.
-     */
-    private val plateTextPaint by lazy {
-        android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            // The size the Compose plates used (labelMedium), through the
-            // same sp scaling, so nothing about them changed in the move.
-            textSize = TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_SP, 12f, resources.displayMetrics,
-            )
-            typeface = android.graphics.Typeface.create(
-                "sans-serif-medium", android.graphics.Typeface.NORMAL,
-            )
-            color = android.graphics.Color.WHITE
-        }
-    }
-
-    /**
-     * Answers whatever the plate pass has asked for since the last tick.
-     * Normally nothing: a name is asked for once, the first frame that draws
-     * a plate for it, and again only if the GL context and this process ever
-     * disagree about what has been handed over.
-     */
-    private fun supplyPlateTexts() {
-        if (!::gameRenderer.isInitialized) return
-        val missing = gameRenderer.nativeGetMissingPlateTexts()
-        if (missing.isEmpty()) return
-
-        val metrics = plateTextPaint.fontMetrics
-        val height = ceil(metrics.descent - metrics.ascent).toInt().coerceIn(1, 256)
-        for (text in missing) {
-            if (text.isEmpty()) continue
-            val width = ceil(plateTextPaint.measureText(text)).toInt().coerceIn(1, 2048)
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            android.graphics.Canvas(bitmap).drawText(text, 0f, -metrics.ascent, plateTextPaint)
-            val pixels = IntArray(width * height)
-            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-            bitmap.recycle()
-            gameRenderer.nativeSetPlateText(text, width, height, pixels)
-        }
-    }
-
-    private fun attachGameSurface() {
-        val surface = GLSurfaceView(this).apply {
-            setEGLContextClientVersion(3)
-            // Only a hint - the driver may drop the context anyway under
-            // memory pressure, and nativeOnSurfaceCreated copes when it does -
-            // but when honoured a resume is instant instead of rebuilding the
-            // terrain mesh, the ground texture and every model from scratch.
-            preserveEGLContextOnPause = true
-            // M6: the 3D renderer needs a real depth buffer (the M2/M5 flat
-            // 2D view never did) and GLSurfaceView's default config chooser
-            // doesn't reliably request one on every device.
-            setEGLConfigChooser(8, 8, 8, 8, 16, 0)
-        }
-        gameRenderer = GameRenderer()
-        // The plate pass lays out in dp, the same dp the Compose plates used,
-        // and the renderer has no way of its own to know what a dp is here.
-        gameRenderer.nativeSetUiDensity(resources.displayMetrics.density)
-        surface.setRenderer(gameRenderer)
-        // After setRenderer, never before: GLSurfaceView has no GL thread
-        // until a renderer is attached, and setRenderMode dereferences it.
-        surface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-        setUpCameraControls(surface, gameRenderer)
-        gameSurface = surface
-        surfaceHost.addView(surface)
-    }
-
-    /**
-     * M10: quitting is a long press on the undo button rather than an entry in
-     * the overflow menu (rm's call). It keeps its confirmation - it abandons
-     * the game outright, with no saving or rejoining - and a long press is
-     * hard enough to do by accident that the pairing is safe.
-     */
-    private fun confirmQuitToMenu() {
-        hudState.dialog = HudDialog.ListChoice(
-            title = "Leave this game?",
-            items = listOf("Yes, quit to menu"),
-            cancelLabel = "Cancel",
-            onSelect = {
-                hudState.dialog = HudDialog.None
-                quitToMenu()
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    /**
-     * M9: end the game and go back to the menu.
-     *
-     * Order matters. The tick loop is stopped first so nothing is mid-call
-     * into the engine when it goes away; then the engine is torn down (see
-     * stopGame in engine_jni.cpp, and testServerRestart for the evidence that
-     * a second game really can start afterwards); then the GL surface is
-     * destroyed, which is what makes the next game's context - and so the
-     * renderer's whole cache - genuinely fresh.
-     */
-
-
-
-    /**
-     * Finishing the shop, which is also where Auto Defense is spent.
-     *
-     * Upstream puts one step between the shop and the round: finishing the
-     * shop stimulates StimAutoDefense, and AutoDefenseDialog::windowInit then
-     * either shows a shield/parachute chooser or passes straight through -
-     *
-     *     if (haveDefense()) displayCurrent(); else finished();
-     *
-     * - and its OK applies the choices and sends eFinishedBuy. So this is
-     * that step, in that place. Hooking it to the Defences button instead
-     * would have handed every player the accessory's benefit for free, since
-     * that button is reachable whenever you like; the whole of what 3000
-     * buys is this window before the round.
-     */
-    private fun finishBuying() {
-        CoroutineScope(Dispatchers.Main).launch {
-            val owned = withContext(Dispatchers.Default) { NativeBridge.hasAutoDefense() }
-            if (!owned) {
-                submitMoveAsync(MoveType.FINISHED_BUY)
-                return@launch
-            }
-            showAutoDefense()
-        }
-    }
-
-    /**
-     * The pre-round defence chooser. Upstream offers a shield (or "Shields
-     * Off") and parachutes on/off; this offers the shields and parachutes
-     * actually owned, each raised by the same useDefense path the mid-round
-     * Defences menu uses, so there is one way defences go up rather than two.
-     *
-     * Leaving it without choosing anything still starts the round - the
-     * round is not optional, and upstream's cancel does the same.
-     */
-    private fun showAutoDefense() {
-        CoroutineScope(Dispatchers.Main).launch {
-            val defences = withContext(Dispatchers.Default) {
-                parseWeaponShop(NativeBridge.getWeaponShop()).filter {
-                    it.isOwned && it.activationChange != null &&
-                        (it.type == AccessoryType.SHIELD || it.type == AccessoryType.PARACHUTE)
-                }
-            }
-
-            if (defences.isEmpty()) {
-                // Owning Auto Defense but no shields or parachutes to raise
-                // with it. Nothing to choose, so do not stop for it.
-                submitMoveAsync(MoveType.FINISHED_BUY)
-                return@launch
-            }
-
-            val startRound = "Start the round"
-            hudState.dialog = HudDialog.ListChoice(
-                title = "Before the round",
-                items = defences.map { "${it.name} [${it.type}] x${it.ownedLabel}" } + startRound,
-                cancelLabel = "Start the round",
-                onSelect = { index ->
-                    if (index >= defences.size) {
-                        hudState.dialog = HudDialog.None
-                        submitMoveAsync(MoveType.FINISHED_BUY)
-                        return@ListChoice
-                    }
-                    val item = defences[index]
-                    val change = item.activationChange
-                    CoroutineScope(Dispatchers.Main).launch {
-                        if (change != null) {
-                            val used = withContext(Dispatchers.Default) {
-                                NativeBridge.useDefense(item.accessoryId, change)
-                            }
-                            if (!used) notifyPlayer("Couldn't activate ${item.name}")
-                        }
-                        // Straight back to the list: upstream's dialog lets a
-                        // player set a shield *and* parachutes before going
-                        // on, so one choice must not end the step.
-                        showAutoDefense()
-                    }
-                },
-                onCancel = {
-                    hudState.dialog = HudDialog.None
-                    submitMoveAsync(MoveType.FINISHED_BUY)
-                },
-            )
-        }
-    }
-
-    /**
-     * The turret servo sounds, following a drag on one of the aiming
-     * controls - upstream's TankKeyboardControlUtil, which starts a one-shot
-     * movement.wav plus a looping turn/elevate/power source as a key goes
-     * down and stops the loop as it comes up.
-     *
-     * A drag stands in for the held key, which is the one deliberate
-     * difference: there is no key here to hold. Power gets no movement.wav,
-     * matching upstream - winding up the power is not the turret moving.
-     *
-     * Paths and gain come from the engine on every start rather than being
-     * cached: the paths go through the mod, and the gain is the live distance
-     * from the camera to your own tank, which changes as the camera does.
-     */
-    private fun playAimSound(axis: AimAxis, active: Boolean) {
-        val key = "aim-$axis"
-        if (!active) {
-            SoundPlayer.stopLoop(key)
-            return
-        }
-
-        val sounds = AimSounds.parse(NativeBridge.getAimSounds()) ?: return
-        val loop = when (axis) {
-            AimAxis.ANGLE -> sounds.turn
-            AimAxis.ELEVATION -> sounds.elevate
-            AimAxis.POWER -> sounds.power
-        }
-        if (axis != AimAxis.POWER) {
-            SoundPlayer.play(sounds.movement, sounds.gain, sounds.priority)
-        }
-        SoundPlayer.startLoop(key, loop, sounds.gain, sounds.priority)
-    }
-
-    /**
-     * The host's admin controls - upstream's AdminDialog, which lived in
-     * src/client and so was never ported with the rest of it.
-     *
-     * Nothing here is new engine work: ServerAdminCommon has run in this
-     * build all along (see engine_jni.cpp's adminCommand), there was simply
-     * no way to reach it. The commands and the split below are upstream's
-     * own - its dialog offers exactly kick, ban, mute, unmute, poor and slap
-     * against a chosen player - plus the whole-game ones ServerAdminCommon
-     * exposes and upstream drives from its console instead.
-     *
-     * Two levels rather than one flat list: most of these need a player, and
-     * a single list of "kick Bob / kick Alice / ban Bob / ban Alice" grows
-     * with the square of the room.
-     */
-    private fun showAdminMenu() {
-        val gameActions = listOf(
-            "New game" to AdminCommand.NEW_GAME,
-            "Kill all tanks" to AdminCommand.KILL_ALL,
-            "Add a bot" to AdminCommand.ADD_BOT,
-        )
-        val playerRow = "Player actions..."
-
-        hudState.dialog = HudDialog.ListChoice(
-            title = "Admin",
-            items = gameActions.map { it.first } + playerRow,
-            onSelect = { index ->
-                hudState.dialog = HudDialog.None
-                if (index < gameActions.size) {
-                    runAdminCommand(gameActions[index].second, 0, gameActions[index].first)
-                } else {
-                    showAdminPlayerPicker()
-                }
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    private fun showAdminPlayerPicker() {
-        val players = parsePlayerList(NativeBridge.getPlayerList())
-        if (players.isEmpty()) {
-            Toast.makeText(this, "Nobody in the game yet", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        hudState.dialog = HudDialog.ListChoice(
-            title = "Which player?",
-            items = players.map { player ->
-                // Which of these is you matters: several commands are
-                // perfectly willing to kick or kill the host.
-                val tags = listOfNotNull(
-                    if (player.isMe) "you" else null,
-                    if (player.isBot) "bot" else null,
-                    if (!player.alive) "dead" else null,
-                )
-                if (tags.isEmpty()) player.name else "${player.name} (${tags.joinToString(", ")})"
-            },
-            onSelect = { index ->
-                hudState.dialog = HudDialog.None
-                showAdminPlayerActions(players[index])
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    private fun showAdminPlayerActions(player: PlayerEntry) {
-        // Slap is upstream's own 10 life, and Poor takes a player's money -
-        // both are its punishments short of removing someone.
-        val actions = listOf(
-            "Kick" to AdminCommand.KICK,
-            "Ban" to AdminCommand.BAN,
-            "Mute" to AdminCommand.MUTE,
-            "Unmute" to AdminCommand.UNMUTE,
-            "Slap (10 life)" to AdminCommand.SLAP,
-            "Take their money" to AdminCommand.POOR,
-            "Kill" to AdminCommand.KILL,
-        )
-
-        hudState.dialog = HudDialog.ListChoice(
-            title = player.name,
-            items = actions.map { it.first },
-            onSelect = { index ->
-                hudState.dialog = HudDialog.None
-                runAdminCommand(actions[index].second, player.playerId, actions[index].first, player.name)
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    /**
-     * Runs the command and says what happened. The answer is worth showing:
-     * ServerAdminCommon refuses quietly - a command against a player who has
-     * already left just returns false - and these are actions where "did
-     * that work?" is a fair question.
-     */
-    private fun runAdminCommand(command: Int, playerId: Int, label: String, who: String? = null) {
-        val argument = when (command) {
-            // Upstream's ban takes a reason, which ends up in the ban list
-            // and in the message the banned player sees.
-            AdminCommand.BAN -> "Banned by the host"
-            // The bot the game was set up with, so one added mid-game plays
-            // like the ones already in it rather than at some other skill.
-            AdminCommand.ADD_BOT -> selectedBots.firstOrNull() ?: "Moron"
-            else -> ""
-        }
-
-        CoroutineScope(Dispatchers.Main).launch {
-            val accepted = withContext(Dispatchers.Default) {
-                NativeBridge.adminCommand(command, playerId, argument)
-            }
-            val subject = who?.let { "$label - $it" } ?: label
-            val message = when {
-                accepted -> subject
-                // The one refusal with a reason worth giving, because it is
-                // a setting rather than a mistake: bot balancing holds the
-                // game at a fixed player count and would auto-kick the bot
-                // straight back out. See the JNI side.
-                command == AdminCommand.ADD_BOT ->
-                    "Turn bot balancing off in game setup to add bots"
-                else -> "$subject failed"
-            }
-            Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    /**
-     * Hosting over Bluetooth, which needs two things the network paths do
-     * not: the permissions, and the system's own "make this device visible"
-     * dialog. A host nobody can see is the Bluetooth equivalent of a group
-     * that never formed, and a player would have no way of telling.
-     *
-     * Already-paired devices can find the game without this, which is why a
-     * refused dialog is a warning rather than a failure.
-     */
-    /**
-     * Runs [action] once Bluetooth is actually usable, asking for whatever is
-     * missing first: the permissions, then the radio itself through Android's
-     * own "turn Bluetooth on?" prompt. Both answers come back through
-     * [onActivityResult] or the permission launcher, which is why the action
-     * is held rather than passed down.
-     *
-     * Hosting and joining both need this and neither should be reciting it,
-     * which is also how the two came to disagree about whether to ask at all.
-     */
-    private fun requireBluetooth(action: () -> Unit) {
-        if (!BluetoothTransport.isSupported(applicationContext)) {
-            showMenuMessage("This device has no Bluetooth.")
-            return
-        }
-        if (!BluetoothTransport.hasPermissions(applicationContext)) {
-            afterBluetoothReady = { requireBluetooth(action) }
-            bluetoothPermissionLauncher.launch(BluetoothTransport.requiredPermissions())
-            return
-        }
-        // Switched off is the one fixable case, so it is offered as a fix
-        // rather than reported as a fault.
-        if (BluetoothTransport.isOff(applicationContext)) {
-            afterBluetoothReady = action
-            try {
-                startActivityForResult(BluetoothTransport.enableIntent(), REQUEST_ENABLE_BLUETOOTH)
-            } catch (e: android.content.ActivityNotFoundException) {
-                afterBluetoothReady = null
-                showMenuMessage("Bluetooth needs to be switched on first.")
-            }
-            return
-        }
-        val reason = BluetoothTransport.unavailableReason(applicationContext)
-        if (reason != null) {
-            showMenuMessage("Can't use Bluetooth: $reason.")
-            return
-        }
-        action()
-    }
-
-    private fun startBluetoothHostFlow() = requireBluetooth {
-        openSetup("Host over Bluetooth", overBluetooth = true, forOthers = true)
-    }
-
-    /**
-     * The address to put on the HUD's one line: the port is left off when it
-     * is the default, because a joiner typing a bare address now gets 27270
-     * anyway (see promptManualAddress). That is what buys the line enough
-     * room for a long local address without clipping - "Host
-     * 192.168.232.2:27270" is thirty characters and the column has about
-     * twenty-two, sharing its row with four icon buttons.
-     */
-    private fun shownAddress(ip: String, port: Int): String =
-        if (port == DEFAULT_SERVER_PORT) ip else "$ip:$port"
-
-    /** A message from a menu screen, which has no HUD to put one on. */
-    private fun showMenuMessage(text: String) {
-        hudState.dialog = HudDialog.Message(text) { hudState.dialog = HudDialog.None }
-    }
-
-    /**
-     * A brief word to the player during a game, for an action that did not
-     * happen.
-     *
-     * A toast rather than [GameHudState.statusText], which is not a channel
-     * at all: the tick loop rewrites it from the engine's own status every
-     * hundred milliseconds, so anything put there mid-game is gone before it
-     * can be read. Chat send failures were reported that way and were
-     * therefore never once seen.
-     */
-    private fun notifyPlayer(text: String) {
-        Toast.makeText(this, text, Toast.LENGTH_SHORT).show()
-    }
-
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-
-        if (requestCode == REQUEST_ENABLE_BLUETOOTH) {
-            val next = afterBluetoothReady
-            afterBluetoothReady = null
-            if (BluetoothTransport.isOff(applicationContext)) {
-                // Refused, or it did not come up. Either way, saying so is
-                // the whole point - this silently did nothing before.
-                showMenuMessage(
-                    "Bluetooth needs to be switched on. Turn it on and try again."
-                )
-            } else {
-                // Straight on to whatever the player was heading for before
-                // the radio got in the way.
-                next?.invoke()
-            }
-            return
-        }
-
-        if (requestCode != REQUEST_DISCOVERABLE) return
-
-        // resultCode is the number of seconds granted, or RESULT_CANCELED.
-        // A refusal used to walk straight on into game setup, which is only
-        // half defensible: a phone that is not visible can still be joined
-        // by one it has already paired with, and not by anything else. So
-        // say which of those the player is choosing rather than deciding for
-        // them - and having said it, make asking again the easy answer.
-        if (resultCode == RESULT_CANCELED) {
-            hudState.dialog = HudDialog.ListChoice(
-                title = "This phone won't be visible.\nOnly devices already paired with " +
-                    "it can find the game.",
-                items = listOf("Ask again", "Host anyway (paired devices only)"),
-                cancelLabel = "Back",
-                onSelect = { index ->
-                    hudState.dialog = HudDialog.None
-                    // Asking again means asking again, so the one-shot guard
-                    // has to be let go of first.
-                    if (index == 0) bluetoothVisibilityAsked = false
-                    startGame()
-                },
-                onCancel = {
-                    hudState.dialog = HudDialog.None
-                    bluetoothVisibilityAsked = false
-                    appScreen = AppScreen.SETUP
-                },
-            )
-            return
-        }
-
-        startGame()
-    }
-
-    /**
-     * Asks for Wi-Fi Direct's discovery permission the first time the player
-     * goes looking for a multiplayer game, and never again in this session -
-     * see [nearbyPermissionLauncher]. Silent on hardware that cannot do
-     * Wi-Fi Direct at all, and on a device where it has already been granted.
-     */
-    private fun requestNearbyPermissionOnce() {
-        if (askedForNearbyPermission) return
-        askedForNearbyPermission = true
-        if (!WifiDirectTransport.isSupported(applicationContext)) return
-        if (WifiDirectTransport.hasPermissions(applicationContext)) return
-        nearbyPermissionLauncher.launch(WifiDirectTransport.requiredPermissions())
-    }
-
-    /**
-     * Stops telling other devices about a game that has ended, and drops any
-     * Wi-Fi Direct group this device is in.
-     *
-     * Both halves matter for different reasons. The NSD registration going
-     * stale is a nuisance - peers keep seeing a game whose socket
-     * stopGame() has already closed - but a Wi-Fi Direct group left up is a
-     * real cost: it holds the radio in a group and can keep the device off
-     * its normal Wi-Fi, long after the game it existed for is over.
-     */
-    private fun stopNetworkAdvertising() {
-        LanDiscovery.stopRegistration()
-        LanDiscovery.stopDiscovery()
-        stopWifiDirect()
-        // The sockets themselves belong to NetBridge and go with stopGame();
-        // this is the scan, which holds the radio and would otherwise keep
-        // running after the dialog that started it went away.
-        BluetoothTransport.stopDiscovery(applicationContext)
-        hostOverBluetooth = false
-        hostForOthers = false
-        bluetoothVisibilityAsked = false
-    }
-
-    private fun stopWifiDirect() {
-        if (!WifiDirectTransport.isSupported(applicationContext)) return
-        WifiDirectTransport.stopDiscovery()
-        WifiDirectTransport.stopAdvertising(applicationContext)
-        WifiDirectTransport.disconnect(applicationContext)
-    }
-
-    private fun quitToMenu() {
-        gameJob?.cancel()
-        gameJob = null
-        NativeBridge.stopGame()
-        // M21: the landscape is gone, and so is its atmosphere. Cleared as
-        // well as stopped, so the next game reloads rather than assuming the
-        // same landscape came back.
-        ambient?.stop()
-        SoundPlayer.stopAllLoops()
-        projectileLoopKeys.clear()
-        projectileLoopRates.clear()
-        SoundPlayer.release()
-        lastLandscapeTex = ""
-        if (::gameSurface.isInitialized) {
-            surfaceHost.removeView(gameSurface)
-        }
-        hudState.reset()
-        lockedMoveId = 0
-        savedGameToLoad = null
-        tutorial = null
-        music?.setState(MusicPlayer.State.WAIT)
-        aimSeeded = false
-        lastChatVersion = 0
-        lastChatLineId = 0
-        stopNetworkAdvertising()
-        appScreen = AppScreen.MENU
-    }
-
-    private suspend fun CoroutineScope.startAsHost() {
-        val save = savedGameToLoad
-        hudState.statusText = if (save == null) "Starting local game..." else "Loading saved game..."
-        val gameOk = withContext(Dispatchers.Default) {
-            // A loaded game is a hosted game in every other respect - the
-            // difference is only where the options, the landscape and the
-            // players come from, and that is decided inside the engine.
-            if (save == null) {
-                NativeBridge.startLocalGame(hostOverBluetooth)
-            } else {
-                NativeBridge.startLoadedGame(save, hostOverBluetooth)
-            }
-        }
-        if (!gameOk) {
-            hudState.statusText = "Couldn't start the game (check logcat)"
-            return
-        }
-        // This device owns the game state now, so the admin controls apply -
-        // asked of the engine rather than inferred from having taken the
-        // host path, since that is the same question adminCommand answers.
-        hudState.isHost = withContext(Dispatchers.Default) { NativeBridge.isGameHost() }
-        updateHostingLabel()
-        runTickLoop()
-    }
-
-    // M5 Phase 2: joining side of the host/join choice above. Reuses the
-    // same "Find Games" LAN-discovery dialog as the informational one that
-    // already existed (see showFindGames doc comment history) - now tapping
-    // a result actually connects, and there's a manual host:port entry too
-    // for a PC host (or a device not advertising via NSD).
-    /**
-     * The second half of joining: the connection is open, so pump the
-     * handshake through to sJoined and then play. Split from the finding and
-     * connecting half (startJoinFlow) because only this part belongs on the
-     * game screen.
-     */
-    private suspend fun CoroutineScope.awaitJoinAndPlay() {
-        // The handshake itself (connect -> auth -> mod-check -> load-level,
-        // see ClientContext.hpp) only advances as tickEngine() pumps the
-        // network, same as everything else - so this loop has to run
-        // (renamed) tickEngine() from the very start, not just once joined.
-        while (isActive) {
-            withContext(Dispatchers.Default) { NativeBridge.tickEngine() }
-            val state = withContext(Dispatchers.Default) { NativeBridge.getClientJoinState() }
-            if (state == ClientJoinState.JOINED) break
-            if (state == ClientJoinState.FAILED) {
-                val reason = withContext(Dispatchers.Default) { NativeBridge.getClientFailureReason() }
-                hudState.statusText = "Join failed: $reason"
-                return
-            }
-            hudState.statusText = "Connecting... (state $state)"
-            kotlinx.coroutines.delay(100)
-        }
-
-        runTickLoop()
-    }
-
-    // Blocks (suspends) until the user picks a discovered game or types a
-    // host:port manually, or cancels (null). A thin wrapper around
-    // showFindGames's dialog plus a manual-entry option, since a PC host or
-    // an NSD-blocked network has nothing to discover.
-    //
-    // Answers with the whole FoundGame rather than a host/port pair: a Wi-Fi
-    // Direct result has no address yet, and turning it into one is a
-    // seconds-long negotiation the caller has to be able to narrate and
-    // cancel - see startJoinFlow.
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-    private suspend fun pickJoinTarget(overBluetooth: Boolean = false): LanDiscovery.FoundGame? =
-        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-            showFindGames(
-                overBluetooth = overBluetooth,
-                onSelected = { game -> if (cont.isActive) cont.resume(game) {} },
-                onCancelled = { if (cont.isActive) cont.resume(null) {} },
-            )
-        }
-
-    // Drives the real game simulation forward every 100ms, in either role -
-    // tickEngine()/getMyStatusLabel()/getCurrentWeaponName() are all
-    // mode-agnostic now (see engine_jni.cpp's activeContext()). Host mode's
-    // tickEngine() call is what actually advances ServerState (waiting for
-    // players -> new level -> buying -> playing); client mode's just pumps
-    // ClientContext::tick(). Rendering happens separately, driven by
-    // GLSurfaceView's own thread (GameRenderer).
-    private suspend fun CoroutineScope.runTickLoop() {
-        // Decode the aiming servo samples before anyone can drag a slider -
-        // see SoundPlayer.preload for why a loop cannot wait for a decode the
-        // way a one-shot can. Both roles come through here, once per game.
-        withContext(Dispatchers.Default) {
-            AimSounds.parse(NativeBridge.getAimSounds())?.let { sounds ->
-                SoundPlayer.preload(
-                    listOf(sounds.movement, sounds.turn, sounds.elevate, sounds.power)
-                )
-            }
-        }
-
-        // What is left on this side of the world-anchored drawing - the
-        // floating damage numbers, and the plan view's camera arrow - is
-        // published by the renderer as a *screen* position, so it goes stale
-        // the moment the camera moves. The tick loop below runs ten times a
-        // second, which is right for a status line and hopeless for these:
-        // at 60fps the scene moved six frames between updates and they
-        // stepped after it in visible jumps.
-        //
-        // So they read on the frame clock instead. AndroidUiDispatcher's
-        // CurrentThread is what carries the MonotonicFrameClock that
-        // withFrameNanos needs; a plain Dispatchers.Main scope has none and
-        // would throw.
-        //
-        // The name plates used to be read here too, and a frame of lag was
-        // the best this route could do - the plate is placed from the MVP of
-        // the frame the GL thread finished last. They are drawn in GL now,
-        // in the frame they were projected for, which is why they are gone
-        // from this loop.
-        launch(AndroidUiDispatcher.CurrentThread) {
-            while (isActive) {
-                withFrameNanos { }
-                hudState.floatingLabels = parseFloatingLabels(gameRenderer.nativeGetFloatingLabels())
-                // A1: the shells in flight hum while they fly, and both how
-                // loud and which side change as they travel - so this rides
-                // the frame clock with the things that are pinned to the
-                // world, not the ten-a-second tick.
-                updateProjectileLoops()
-                // The plan view's camera arrow turns with the camera, so it
-                // belongs here for the same reason the plates do. The tanks
-                // on that map do not - they move on a turn, not on a frame -
-                // and its picture changes a handful of times a round, so both
-                // of those stay on the tick loop below.
-                if (hudState.miniMapVisible) {
-                    hudState.miniMapCamera = gameRenderer.nativeCameraPlanInfo()
-                }
-            }
-        }
-
-        while (isActive) {
-            withContext(Dispatchers.Default) {
-                NativeBridge.tickEngine()
-                // M3: SoundAction events queued this tick (see
-                // SoundEventQueue.h) - played via Android's own media
-                // stack, not vendored OpenAL/OGG (see the porting plan).
-                //
-                // "path|gain|priority|pan", where the gain is upstream's own
-                // inverse-distance attenuation against the live listener and
-                // the batch has already been cut to the channel budget - so
-                // this loop plays what won a channel, it does not decide.
-                for (event in NativeBridge.pollSoundEvents()) {
-                    val parts = event.split('|')
-                    if (parts.size != 4) continue
-                    SoundPlayer.play(
-                        parts[0],
-                        parts[1].toFloatOrNull() ?: 1.0f,
-                        parts[2].toIntOrNull() ?: SoundPlayer.PRIORITY_ACTION,
-                        // A4: where it sits across the stereo field, from the
-                        // listener's own right vector - see panForPosition.
-                        parts[3].toFloatOrNull() ?: 0f,
-                    )
-                }
-            }
-            // M5: a plain-language "what's happening / can I fire" label
-            // (see getMyStatusLabel()) - replaces the raw ServerState-enum
-            // debug string this used to show, which was never meant as a
-            // real HUD and left a real player with no way to tell whether
-            // they were in a buying phase, a live round, or waiting -
-            // "there's no strict turn order, so how do I know when it's my
-            // turn to shoot" was the direct report that prompted this.
-            // Falls back to the debug string before a tank of ours exists
-            // yet (label is "" during connect/buying-roster setup).
-            val label = withContext(Dispatchers.Default) { NativeBridge.getMyStatusLabel() }
-            val baseStatus = label.ifEmpty {
-                withContext(Dispatchers.Default) { NativeBridge.getGameStateDebugString() }
-            }
-            // M6: how long is left in the current phase. Both timed phases
-            // end on a deadline the player otherwise can't see - a buying
-            // phase that closes mid-purchase, or a shot clock that expires
-            // while you are still nudging the sliders, both just happen.
-            // Prefixed to the status rather than given its own line, so the
-            // battlefield keeps the space.
-            // M6: a granted move id means it is our turn to act again, so
-            // whatever we committed last round has been played out. See
-            // GameHudState.shotLocked - the Fire button reads this.
-            // The mini-map. Nothing here runs unless it is actually on
-            // screen: it is off by default, and a map nobody is looking at
-            // should not cost a tank sweep and a JNI string every tick.
-            //
-            // The picture itself is fetched only when the renderer says it
-            // changed - a handful of times a round, against the ten times a
-            // second this loop runs - so the usual tick copies nothing.
-            // The one thing the plate pass cannot do for itself: a picture
-            // of each name. Usually an empty array and nothing more - a name
-            // is asked for once, when a player first has a plate drawn.
-            supplyPlateTexts()
-
-            if (hudState.miniMapVisible) {
-                val version = gameRenderer.nativeMiniMapVersion()
-                if (version != hudState.miniMapVersion) {
-                    hudState.miniMapVersion = version
-                    val pixels = withContext(Dispatchers.Default) {
-                        gameRenderer.nativeMiniMapImage()
-                    }
-                    val side = kotlin.math.sqrt(pixels.size.toDouble()).toInt()
-                    hudState.miniMapImage = if (side > 0 && side * side == pixels.size) {
-                        Bitmap.createBitmap(pixels, side, side, Bitmap.Config.ARGB_8888)
-                            .asImageBitmap()
-                    } else {
-                        // Empty between landscapes, which is the renderer
-                        // saying "no map yet" rather than a failure.
-                        null
-                    }
-                    hudState.miniMapInfo = parseMiniMapInfo(
-                        withContext(Dispatchers.Default) { NativeBridge.getMiniMapInfo() }
-                    )
-                }
-                hudState.miniMapTanks = parseMiniMapTanks(
-                    withContext(Dispatchers.Default) { NativeBridge.getMiniMapTanks() }
-                )
-
-                // Lines other players have drawn. The version check keeps
-                // this to one cheap int on the overwhelming majority of
-                // ticks, the way the chat poll does.
-                val mapLineVersion =
-                    withContext(Dispatchers.Default) { NativeBridge.getMapLinesVersion() }
-                if (mapLineVersion != lastMapLineVersion) {
-                    lastMapLineVersion = mapLineVersion
-                    val arena = hudState.miniMapInfo
-                    val fresh = withContext(Dispatchers.Default) {
-                        parseMapLines(NativeBridge.getMapLines(lastMapLineId))
-                    }
-                    if (fresh.isNotEmpty() && arena != null) {
-                        lastMapLineId = fresh.last().id
-                        // Stamped on arrival, which is upstream's own rule
-                        // (simulateLine stamps with the receiver's clock):
-                        // a line fades from when you saw it, not from when
-                        // it was drawn on someone else's phone.
-                        val now = System.currentTimeMillis()
-                        hudState.mapLines = hudState.mapLines + fresh.map { line ->
-                            val (ax, ay) = planFractionToLandscape(line.ax, line.ay, arena)
-                            val (bx, by) = planFractionToLandscape(line.bx, line.by, arena)
-                            MapLine(ax, ay, bx, by, line.colorArgb, now)
-                        }
-                    } else if (fresh.isNotEmpty()) {
-                        // No arena to convert against yet; drop them rather
-                        // than placing them wrongly, and do not advance the
-                        // cursor past what was never shown.
-                        lastMapLineVersion = 0
-                    }
-                }
-            }
-
-            // M6 parity: the scoreboard between rounds. Upstream puts it up
-            // by itself and holds the game there for RoundScoreTime (5s), or
-            // ScoreTime (15s) after the last round; before this the port
-            // sat through that pause showing the empty battlefield, and the
-            // player had to know to open the table by hand. Opened only
-            // over an idle HUD - a dialog the player opened themselves is
-            // never yanked away - and closed again only if this is the one
-            // that opened it.
-            val scoreboard = withContext(Dispatchers.Default) { NativeBridge.getScoreboardState() }
-            if (scoreboard != 0 && autoScoreDialog == null &&
-                hudState.dialog is HudDialog.None) {
-                autoScoreDialog = showScores()
-            } else if (scoreboard == 0 && autoScoreDialog != null) {
-                if (hudState.dialog === autoScoreDialog) hudState.dialog = HudDialog.None
-                autoScoreDialog = null
-            }
-
-            tutorial?.observe(hudState)
-
-            val moveId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
-            // A move id *different* from the one we committed against - not
-            // merely a non-zero one. The id lives on our own tank, and only
-            // the server clears it: it is set locally by
-            // TankStartMoveSimAction when the move is granted and cleared by
-            // TankStopMoveSimAction when the server has the move, which is a
-            // round trip away. Testing for non-zero therefore unlocked the
-            // button again on the very next tick after firing, and on a
-            // client - where that round trip is a real network - the locked
-            // state was visible for a frame or two and then gone.
-            if (moveId != 0 && moveId != lockedMoveId) {
-                hudState.shotLocked = false
-                lockedMoveId = 0
-            }
-
-            // Skip All Moves, the countdown half. While the mode is on and a
-            // shot move of ours is live and uncommitted, five seconds run and
-            // then the move is skipped - upstream's own window
-            // (SkipAllDialog::simulate waits 5). Driven from this loop rather
-            // than the frame clock because it is a move, not a picture, and
-            // everything it needs is already here: the move id says whose
-            // turn it is, shotLocked says whether we have already answered,
-            // and buyingPhase keeps it away from the shop, which upstream's
-            // skip does not touch either.
-            if (hudState.skipAllMoves && moveId != 0 && !hudState.shotLocked &&
-                !hudState.buyingPhase
-            ) {
-                if (skipAllMoveId != moveId) {
-                    skipAllMoveId = moveId
-                    skipAllDeadlineMs = System.currentTimeMillis() + SKIP_ALL_SECONDS * 1000L
-                }
-                val remaining = skipAllDeadlineMs - System.currentTimeMillis()
-                if (remaining <= 0) {
-                    hudState.skipAllSeconds = -1
-                    skipAllMoveId = 0
-                    submitMoveAsync(MoveType.SKIP)
-                } else {
-                    // Rounded up, so a fresh countdown reads "5s" rather than
-                    // starting at four.
-                    hudState.skipAllSeconds = ((remaining + 999) / 1000).toInt()
-                }
-            } else if (hudState.skipAllSeconds >= 0) {
-                // Not our move any more, or the move has been answered - by
-                // the countdown itself, or by the player firing anyway.
-                hudState.skipAllSeconds = -1
-                skipAllMoveId = 0
-            }
-
-            val seconds = withContext(Dispatchers.Default) { NativeBridge.getPhaseSecondsRemaining() }
-            hudState.statusText = if (seconds >= 0) "${seconds}s | $baseStatus" else baseStatus
-            // M6: drives the contextual "done buying" button - it only
-            // exists during the buying phase, which is the one time it
-            // does anything (see ServerPlayedMoveHandler's eFinishedBuy).
-            hudState.buyingPhase = label.startsWith("Buying")
-            // M15: upstream's music follows its client state - buying,
-            // playing, a shot in flight, the score screen - and these are the
-            // same signals the status line is already built from.
-            music?.setState(
-                when {
-                    scoreboard != 0 -> MusicPlayer.State.SCORE
-                    hudState.buyingPhase -> MusicPlayer.State.BUYING
-                    hudState.shotLocked -> MusicPlayer.State.SHOT
-                    else -> MusicPlayer.State.PLAYING
-                }
-            )
-            // M21: the landscape brings its own atmosphere with it, and a
-            // new one arrives every round. The check is a string compare
-            // against a value the engine already holds; the XML behind the
-            // sounds is only read when it actually changed.
-            val tex = withContext(Dispatchers.Default) { NativeBridge.getLandscapeTex() }
-            if (tex != lastLandscapeTex) {
-                lastLandscapeTex = tex
-                val sounds = withContext(Dispatchers.Default) {
-                    parseAmbientSounds(NativeBridge.getAmbientSounds())
-                }
-                ambient?.apply(sounds)
-            }
-            // M4: keep the weapon-select button's label in sync with
-            // the current weapon, in case it changed via the shop
-            // dialog or a fresh round's default selection.
-            val weaponName = withContext(Dispatchers.Default) {
-                NativeBridge.getCurrentWeaponName()
-            }
-            hudState.weaponLabel = weaponName.ifEmpty { "Weapon" }
-            // M6 parity: wind really does perturb shots (see TankLib's
-            // windoffsetFB) but nothing ever showed it - upstream has a
-            // wind dialog of its own (SHOW_WIND_DIALOG). Rendered as a
-            // compass-style bearing to match the angle slider's
-            // "clockwise from up" convention (see fireFromSliders).
-            val wind = withContext(Dispatchers.Default) { NativeBridge.getWindInfo() }
-            hudState.windLabel = formatWindLabel(wind)
-            // M6 tank movement: Fuel and friends are used by tapping the
-            // ground rather than by aiming, so the HUD needs to know which
-            // mode the battlefield tap is in - see handleBattlefieldTap.
-            val positionSelect = withContext(Dispatchers.Default) {
-                NativeBridge.getPositionSelect()
-            }
-            hudState.positionSelectWeapon =
-                positionSelect.split("|").getOrNull(1).orEmpty()
-            // Development perf readout - see GameHudState.perfLabel. Debug
-            // builds only: it is a diagnostic that has earned its keep
-            // several times over (it is what found the trees not drawing),
-            // but it has no business on screen in a release.
-            if (BuildConfig.DEBUG) {
-                val stats = gameRenderer.nativeGetFrameStats().split("|")
-                val fps = stats.getOrNull(0).orEmpty()
-                val calls = stats.getOrNull(1).orEmpty()
-                val targets = stats.getOrNull(2).orEmpty()
-                hudState.perfLabel = if (fps.isEmpty()) {
-                    ""
-                } else {
-                    "$fps fps | $calls draws | $targets targets"
-                }
-            }
-            // M6: seed the aiming sliders from where the tank is actually
-            // pointing, once, as soon as we have a tank - the engine gives
-            // every tank a real starting turret rotation, so leaving the
-            // sliders at a flat 0 meant the UI disagreed with the tank and
-            // the first shot never went where the sliders said.
-            if (!aimSeeded) {
-                val aim = withContext(Dispatchers.Default) { NativeBridge.getMyAim() }
-                if (seedAimFromEngine(aim)) aimSeeded = true
-            }
-            // M6 parity: the simulation-speed multiplier, shown only when
-            // it is not 1x - upstream's SpeedChange draws it on the same
-            // condition.
-            val speed = withContext(Dispatchers.Default) { NativeBridge.getSimulationSpeed() }
-            val speedParts = speed.split("|")
-            val num = speedParts.getOrNull(0)?.toIntOrNull() ?: 1
-            val den = speedParts.getOrNull(1)?.toIntOrNull() ?: 1
-            hudState.speedLabel = when {
-                num == den -> ""
-                den == 1 -> "Speed: ${num}x"
-                else -> "Speed: 1/${den}x"
-            }
-            // M6 parity: new chat. The version check keeps this to one cheap
-            // int most ticks - the strings are only crossed over the JNI
-            // boundary when something was actually said.
-            val chatVersion = withContext(Dispatchers.Default) { NativeBridge.getChatVersion() }
-            if (chatVersion != lastChatVersion) {
-                lastChatVersion = chatVersion
-                val fresh = withContext(Dispatchers.Default) {
-                    parseChatLines(NativeBridge.getChatLines(lastChatLineId))
-                }
-                if (fresh.isNotEmpty()) {
-                    lastChatLineId = fresh.last().id
-                    // Each gets its own arrival stamp here, which is what
-                    // lets the HUD expire them independently.
-                    //
-                    // Trimmed to the newest MAX_CHAT_TOASTS, which drops the
-                    // oldest the moment the limit is passed rather than
-                    // waiting out its timer. takeLast rather than a check on
-                    // the existing stack, because one poll can carry a whole
-                    // burst on its own - a Death's Head announces every tank
-                    // it killed at once.
-                    val now = System.currentTimeMillis()
-                    hudState.chatToasts =
-                        (hudState.chatToasts + fresh.map { ChatToast(it, now) })
-                            .takeLast(MAX_CHAT_TOASTS)
-                }
-            }
-            kotlinx.coroutines.delay(100)
-        }
-    }
-
-    /**
-     * The player-facing compass dial (0 up/north, 90 right/east, clockwise)
-     * converted to the bearing the engine takes, which turns the other way:
-     * `TankLib::getVelocityVector` fires along `(-sin(xy), cos(xy))`, so
-     * engine 0 is north and engine 90 is *west*. A compass and a
-     * counter-clockwise bearing are mirror images, hence `360 - d`.
-     *
-     * This was an identity mapping for a while, and it genuinely measured
-     * correct at the time - because the renderer was drawing the whole world
-     * mirrored (see worldZFromEngineY in renderer_jni.cpp), which reversed
-     * the apparent sweep on screen and cancelled this one. Correcting the
-     * renderer's handedness uncovered it: the dial started sweeping the
-     * barrel backwards again. Two mirrors cancelling is exactly the trap
-     * this port kept falling into, so: this one is derived, and the sweep
-     * was then checked on a top-down view.
-     */
-    private fun engineAngleFromDial(dialDegrees: Float): Float =
-        ((360f - dialDegrees) % 360f + 360f) % 360f
-
-    /** Inverse of [engineAngleFromDial] - a mirror is its own inverse. */
-    private fun dialAngleFromEngine(engineDegrees: Float): Float =
-        engineAngleFromDial(engineDegrees)
-
-    // M6: applies "angleDegrees|elevationDegrees|powerFraction" from
-    // NativeBridge.getMyAim() to the sliders. Returns whether it applied -
-    // false while there's no tank yet, so the caller can keep trying.
-    //
-    // Angle and elevation are taken from the tank; power is not. The engine
-    // starts every tank at full power, which is a poor opening shot and an
-    // awkward slider position to nudge down from, so the round opens at
-    // DEFAULT_POWER_FRACTION instead - and is pushed straight back to the
-    // engine, because the gun and aim sight read TanketShotInfo, not the
-    // sliders. Setting the slider alone would put the UI back to claiming a
-    // power the tank does not have, which is the exact bug that seeding was
-    // introduced to fix.
-    private fun seedAimFromEngine(raw: String): Boolean {
-        val parts = raw.split("|")
-        val engineAngle = parts.getOrNull(0)?.toFloatOrNull() ?: return false
-        val elevation = parts.getOrNull(1)?.toFloatOrNull() ?: return false
-
-        currentAngleDegrees = dialAngleFromEngine(engineAngle)
-        currentElevationDegrees = elevation.coerceIn(0f, 90f)
-        currentPowerFraction = DEFAULT_POWER_FRACTION
-        hudState.angleDegrees = currentAngleDegrees
-        hudState.elevationDegrees = currentElevationDegrees
-        hudState.powerFraction = currentPowerFraction
-        pushAimToEngine()
-        return true
-    }
-
-    // M6 parity: turns NativeBridge.getWindInfo()'s "speed|angle" into a
-    // HUD line with a direction arrow.
-    //
-    // Wind's own angle convention is already the player-friendly one and,
-    // conveniently, the same as the angle slider's: Wind.cpp builds its
-    // direction as (sin(angle), cos(angle)), so 0 = up and 90 = right
-    // (clockwise from up). That's the opposite rotation direction from the
-    // engine's *fire* angle (vx = -sin, vy = cos - see fireFromSliders),
-    // so unlike the fire angle this needs no mirroring to display.
-    private fun formatWindLabel(raw: String): String {
-        val parts = raw.split("|")
-        val speed = parts.getOrNull(0)?.toFloatOrNull() ?: return ""
-        val angle = parts.getOrNull(1)?.toFloatOrNull() ?: return ""
-        if (speed <= 0.01f) return "Wind: none"
-        val arrows = listOf("↑", "↗", "→", "↘", "↓", "↙", "←", "↖")
-        // Round to the nearest 45-degree bucket rather than truncating, so
-        // e.g. 169 degrees reads as "down" instead of "down-right".
-        val arrow = arrows[(((angle + 22.5f) / 45f).toInt() % 8 + 8) % 8]
-        return "Wind: %.1f %s %.0f°".format(speed, arrow, angle)
-    }
-
-    // M6: the battlefield surface is now camera control, not fire input -
-    // one-finger drag orbits (yaw/pitch), pinch zooms (see
-    // renderer_jni.cpp's file-level comment for why: firing is reliably
-    // handled by the angle/elevation/power sliders + Fire button in
-    // GameHud.kt, which don't depend on screen-to-world mapping, whereas a
-    // screen tap/drag no longer has an unambiguous landscape meaning under
-    // a real perspective camera without ray-casting against the terrain
-    // mesh - not done in this slice). The old M2-era tap-to-fire
-    // (NativeBridge.handleTap) and drag-slingshot fire are retired from
-    // this surface as a result. That path has since been *replaced* rather
-    // than merely retired - tap-to-aim now goes through the terrain
-    // ray-cast (nativePickTerrain + aimAtPoint), so the old normalised-space
-    // handleTap has been deleted rather than left lying around unused.
-    //
-    // ScaleGestureDetector owns pinch-zoom; a plain last-position diff
-    // drives orbit drag, suppressed while a scale gesture is in progress
-    // (or just ended) so a two-finger pinch doesn't also register as a
-    // one-finger drag on whichever pointer stayed down.
-    @SuppressLint("ClickableViewAccessibility")
-    private fun setUpCameraControls(surface: GLSurfaceView, renderer: GameRenderer) {
-        // Anything under this much movement is a tap, not a drag. Taken from
-        // the platform's own scaled touch slop so it matches every other
-        // Android app on this screen density rather than a guessed pixel
-        // count.
-        val tapSlopPx = android.view.ViewConfiguration.get(this).scaledTouchSlop.toFloat()
-
-        var lastX = 0f
-        var lastY = 0f
-        var dragging = false
-        // Centroid of all pointers, for the two-finger pan. Tracked here
-        // rather than taken from ScaleGestureDetector.focusX/focusY because
-        // those only update while the *span* is changing - two fingers
-        // sliding together at a fixed distance is exactly a pan with no
-        // pinch, and the detector reports nothing for it.
-        var lastFocusX = 0f
-        var lastFocusY = 0f
-        var panning = false
-        // Where and when the gesture started, so a release can be told
-        // apart from the end of a drag. A tap aims (upstream's AUTO_AIM);
-        // a drag orbits. Without the movement test every orbit would also
-        // fling the turret somewhere on release.
-        var downX = 0f
-        var downY = 0f
-        // How far the finger has actually travelled, added up over the whole
-        // gesture rather than measured from where it started. A drag that
-        // curves away and comes back finishes near its own start, so net
-        // displacement cannot tell it from a tap; the distance walked can.
-        var pathLength = 0f
-        var multiTouched = false
-
-        fun focusOf(event: MotionEvent): Pair<Float, Float> {
-            var sumX = 0f
-            var sumY = 0f
-            for (i in 0 until event.pointerCount) {
-                sumX += event.getX(i)
-                sumY += event.getY(i)
-            }
-            return Pair(sumX / event.pointerCount, sumY / event.pointerCount)
-        }
-
-        val scaleDetector = android.view.ScaleGestureDetector(
-            this,
-            object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                override fun onScale(detector: android.view.ScaleGestureDetector): Boolean {
-                    renderer.nativeCameraZoom(detector.scaleFactor)
-                    return true
-                }
-            },
-        )
-
-        // A long press over a tank's plate opens that tank's card. Only over
-        // a plate: everywhere else a press is a press however long it is
-        // held, which is the rule the battlefield tap has kept since
-        // 02f5f9d - and over a plate a *tap* still aims at the tank, so the
-        // card costs the hold rather than the shot.
-        var plateHeld = false
-        val plateLongPress = Runnable {
-            plateHeld = true
-            val tankId = renderer.nativePickTankPlate(downX, downY)
-            if (tankId != 0) showTankInfo(tankId)
-        }
-
-        surface.setOnTouchListener { _, event ->
-            scaleDetector.onTouchEvent(event)
-
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    lastX = event.x
-                    lastY = event.y
-                    dragging = true
-                    downX = event.x
-                    downY = event.y
-                    pathLength = 0f
-                    multiTouched = false
-                    plateHeld = false
-                    // Armed only where there is a plate to open, so a press
-                    // anywhere else carries no hidden timer at all.
-                    if (settings.showTankInfo &&
-                        renderer.nativePickTankPlate(event.x, event.y) != 0
-                    ) {
-                        surface.postDelayed(
-                            plateLongPress,
-                            android.view.ViewConfiguration.getLongPressTimeout().toLong(),
-                        )
-                    }
-                }
-                MotionEvent.ACTION_POINTER_DOWN -> {
-                    // A second finger rules the gesture out as a tap.
-                    multiTouched = true
-                    surface.removeCallbacks(plateLongPress)
-                    // A second finger just went down - this is a pinch/pan,
-                    // not a one-finger orbit; stop treating pointer 0's
-                    // movement as one and start tracking the centroid.
-                    dragging = false
-                    val (fx, fy) = focusOf(event)
-                    lastFocusX = fx
-                    lastFocusY = fy
-                    panning = true
-                }
-                MotionEvent.ACTION_MOVE -> {
-                    if (dragging && event.pointerCount == 1 && !scaleDetector.isInProgress) {
-                        val dx = event.x - lastX
-                        // M11: upstream's InvertMouse, for the one axis where
-                        // people genuinely disagree - dragging down to look up
-                        // is the flight-sim convention and feels wrong to
-                        // everyone else, and vice versa.
-                        val dy = (event.y - lastY) * (if (settings.invertDrag) -1f else 1f)
-                        renderer.nativeCameraDrag(dx, dy)
-                    }
-                    if (panning && event.pointerCount >= 2) {
-                        // Pan and pinch run together rather than one winning:
-                        // they read different things from the same two
-                        // fingers (centroid movement vs. span change), so
-                        // moving and zooming at once behaves the way it does
-                        // in any map app.
-                        val (fx, fy) = focusOf(event)
-                        renderer.nativeCameraPan(fx - lastFocusX, fy - lastFocusY)
-                        lastFocusX = fx
-                        lastFocusY = fy
-                    }
-                    pathLength += kotlin.math.hypot(event.x - lastX, event.y - lastY)
-                    lastX = event.x
-                    lastY = event.y
-                    // A finger that has travelled is orbiting the camera, not
-                    // holding a plate.
-                    if (pathLength > tapSlopPx) surface.removeCallbacks(plateLongPress)
-                }
-                MotionEvent.ACTION_POINTER_UP -> {
-                    // One finger lifted out of a multi-touch gesture - resume
-                    // dragging from whichever pointer remains, next MOVE.
-                    dragging = false
-                    // Below two fingers there is no pan; re-seed the centroid
-                    // on the next POINTER_DOWN rather than letting it jump
-                    // from a two-finger centroid to a one-finger position.
-                    if (event.pointerCount - 1 < 2) panning = false
-                }
-                MotionEvent.ACTION_UP -> {
-                    surface.removeCallbacks(plateLongPress)
-                    // A press that never went anywhere is a tap, however long
-                    // it was held. There used to be a 250ms ceiling on it as
-                    // well, and it was quietly throwing away deliberate taps:
-                    // anyone lining a shot up rather than stabbing at the
-                    // screen holds the screen for longer than that, and the
-                    // tap simply did nothing. Nothing needed the limit -
-                    // there is no long press on the battlefield for it to
-                    // protect, and the distance walked already separates a
-                    // tap from an orbit.
-                    // plateHeld: the card is already open, and the press
-                    // that opened it is not also a shot.
-                    if (!multiTouched && !plateHeld && pathLength <= tapSlopPx) {
-                        handleBattlefieldTap(event.x, event.y)
-                    }
-                    dragging = false
-                    panning = false
-                }
-                MotionEvent.ACTION_CANCEL -> {
-                    surface.removeCallbacks(plateLongPress)
-                    dragging = false
-                    panning = false
-                }
-            }
-            true
-        }
-    }
-
-    // Slider-based aiming (see GameHud.kt's angle/power sliders and the
-    // Fire button) - fires directly with the slider-set angle/elevation/
-    // power, the same NativeBridge.fireWeapon() call the drag gesture uses,
-    // just triggered explicitly instead of on gesture release. This is the
-    // precise/repeatable path for small between-round adjustments; the
-    // battlefield tap/drag gestures above remain as the quick/casual one.
-    //
-    // The angle slider is deliberately a "clockwise from up" dial for the
-    // player (0=forward/up, 90=right, 180=back, 270=left - the usual
-    // clock/compass-face reading), while the engine's bearing runs
-    // counter-clockwise - see engineAngleFromDial for the conversion.
-    private fun fireFromSliders() {
-        // The fire button used to be disabled for these weapons - choosing a
-        // spot on the ground *is* the shot, and upstream refuses its fire key
-        // for the same reason. It cannot be disabled now that the same button
-        // is the only way to reach the weapon list, so the refusal moves here
-        // and says so instead of doing nothing.
-        if (hudState.positionSelectWeapon.isNotEmpty()) {
-            notifyPlayer("Tap the ground to use ${hudState.positionSelectWeapon}")
-            return
-        }
-
-        val engineAngle = engineAngleFromDial(currentAngleDegrees)
-        CoroutineScope(Dispatchers.Main).launch {
-            // Read before firing: this is the id the shot is submitted
-            // against, and the tick loop needs it to tell "still waiting on
-            // this move" from "granted a new one".
-            val movedId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
-            val myTankId = withContext(Dispatchers.Default) { NativeBridge.getMyTankId() }
-            val fired = myTankId != 0 && withContext(Dispatchers.Default) {
-                NativeBridge.fireWeapon(myTankId, engineAngle, currentElevationDegrees, currentPowerFraction)
-            }
-            if (fired) {
-                lockedMoveId = movedId
-                // Remember what we actually fired so "revert to last
-                // angles" can restore it (see showActionsMenu).
-                lastFiredAim = Triple(currentAngleDegrees, currentElevationDegrees, currentPowerFraction)
-                // The shot is committed but nothing flies until every player
-                // has committed too - the tick loop clears this once the
-                // server grants the next move.
-                hudState.shotLocked = true
-            } else {
-                // The most-pressed button in the game, and refusing was
-                // indistinguishable from the tap not registering. The engine
-                // answers only yes or no (see fireWeapon in engine_jni.cpp),
-                // so the reason is worked out from the same two things it
-                // checks: whether there is a tank of ours at all, and what
-                // the current accessory is.
-                val weapon = withContext(Dispatchers.Default) { NativeBridge.getCurrentWeaponName() }
-                notifyPlayer(
-                    when {
-                        myTankId == 0 -> "No tank yet, wait for the round to start"
-                        weapon.isEmpty() -> "No weapon selected, pick one from the Shop"
-                        else -> "Can't fire $weapon right now"
-                    }
-                )
-            }
-        }
-    }
-
-    // M6 tap-to-aim - upstream's AUTO_AIM ("Aim at point"), which the
-    // control-parity audit flagged as a real binding rather than a
-    // convenience. Tapping the ground casts a ray against the terrain (see
-    // GameRenderer.nativePickTerrain) and swings the turret to face the
-    // hit point, leaving elevation and power alone: it aims *at* a
-    // direction, it does not solve the shot for you.
-    //
-    // The battlefield tap was free - since the 3D camera landed, dragging
-    // orbits and a plain tap did nothing at all.
-    /**
-     * Acknowledges a purchase at once, then reconciles it with the engine.
-     *
-     * A buy is a queued simulator action, not an immediate one:
-     * ServerSimulator only promotes it at a send boundary a couple of
-     * fixed-seconds out, so the real count can take several seconds to
-     * appear. The shop used to read straight back after sending and so
-     * showed the *old* row - during a ~20 second buying phase that reads as
-     * "the tap did nothing", and there is no time to close and reopen the
-     * shop to find out otherwise.
-     *
-     * So the row goes to "buying..." and flashes immediately (the money is
-     * deducted locally too), and this then polls until the engine confirms.
-     * Whatever the engine reports wins in the end, so a purchase the server
-     * rejects corrects itself rather than leaving a lie on screen.
-     */
-    private suspend fun awaitPurchase(shop: HudDialog.Shop, weapon: WeaponShopEntry) {
-        shop.markPending(weapon.accessoryId, weapon.price)
-
-        // ~4s at 120ms. Longer than the couple of seconds a send boundary
-        // needs, short enough that a rejected buy doesn't sit as
-        // "buying..." for the rest of the phase.
-        repeat(34) {
-            delay(120)
-            val money = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
-            val entries = withContext(Dispatchers.Default) {
-                parseWeaponShop(NativeBridge.getWeaponShop())
-            }
-            val updated = entries.firstOrNull { it.accessoryId == weapon.accessoryId }
-            if (updated != null && updated.ownedCount != weapon.ownedCount) {
-                shop.settle(weapon.accessoryId, money, entries)
-                return
-            }
-        }
-
-        // Never confirmed - show whatever is actually true now.
-        val money = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
-        val entries = withContext(Dispatchers.Default) {
-            parseWeaponShop(NativeBridge.getWeaponShop())
-        }
-        shop.settle(weapon.accessoryId, money, entries)
-    }
-
-    /**
-     * Starts, moves and stops the engine loops for the shells in the air.
-     *
-     * Upstream holds a looping source per shot and lets OpenAL follow it
-     * (MissileActionRenderer). The port's player is keyed rather than
-     * handle-based, so the same thing here is a reconciliation: whatever the
-     * renderer says is flying gets started or moved, and every loop it no
-     * longer names is stopped. Only keys the renderer owns are touched - the
-     * aiming servo keeps its own.
-     */
-    private fun updateProjectileLoops() {
-        val rows = gameRenderer.nativeGetSoundLoops()
-        val live = HashSet<String>(rows.size)
-        for (row in rows) {
-            // The file is a path and can hold anything, so it is parsed from
-            // the ends in: key first, then gain, pan and rate off the back.
-            val first = row.indexOf('|')
-            val rateAt = row.lastIndexOf('|')
-            val panAt = if (rateAt > 0) row.lastIndexOf('|', rateAt - 1) else -1
-            val gainAt = if (panAt > 0) row.lastIndexOf('|', panAt - 1) else -1
-            if (first <= 0 || gainAt <= first) continue
-
-            val key = row.substring(0, first)
-            val file = row.substring(first + 1, gainAt)
-            val gain = row.substring(gainAt + 1, panAt).toFloatOrNull() ?: continue
-            val pan = row.substring(panAt + 1, rateAt).toFloatOrNull() ?: 0f
-            val rate = row.substring(rateAt + 1).toFloatOrNull() ?: 1f
-
-            live.add(key)
-            projectileLoopRates[key] = rate
-            if (key in projectileLoopKeys) {
-                SoundPlayer.updateLoop(key, gain, pan, rate)
-            } else {
-                SoundPlayer.startLoop(key, file, gain, SoundPlayer.PRIORITY_MISSILE, pan, rate)
-                projectileLoopKeys.add(key)
-                // Same reason the one-shots log: "is that sound wired" should
-                // be answerable from logcat rather than by listening.
-                Log.i(
-                    "ScorchDroidEngine",
-                    "Engine loop: $key ${file.substringAfterLast('/')} rate=$rate",
-                )
-            }
-        }
-
-        if (projectileLoopKeys.isNotEmpty()) {
-            val iterator = projectileLoopKeys.iterator()
-            while (iterator.hasNext()) {
-                val key = iterator.next()
-                if (key !in live) {
-                    SoundPlayer.stopLoop(key)
-                    // The rate it ended on, beside the one it started at:
-                    // two numbers are what show the doppler shift moving
-                    // rather than merely being computed once.
-                    Log.i(
-                        "ScorchDroidEngine",
-                        "Engine loop ends: $key rate=${projectileLoopRates.remove(key)}",
-                    )
-                    iterator.remove()
-                }
-            }
-        }
-    }
-
-    /**
-     * Upstream's tank tooltip, as a card. The lines and the conditions are
-     * TankTip::populate's: the shield only while one is up, the state only
-     * when it is not the ordinary one, skill and rank only when the game
-     * keeps them. Nothing here is computed on this side - the engine
-     * answers, and this lays it out.
-     */
-    private fun showTankInfo(playerId: Int) {
-        CoroutineScope(Dispatchers.Main).launch {
-            val info = withContext(Dispatchers.Default) {
-                parseTankInfo(NativeBridge.getTankInfo(playerId))
-            } ?: return@launch
-
-            val lines = buildList {
-                add("Life: ${info.life}/${info.maxLife}")
-                if (info.maxShield > 0) add("Shield: ${info.shield}/${info.maxShield}")
-                if (info.state.isNotEmpty()) add("State: ${info.state}")
-                add("Lives: ${info.lives}/${info.maxLives}")
-                add("Score: ${info.score}")
-                if (info.skill > 0) add("Skill: ${info.skill} (${info.startSkill})")
-                if (info.rank > 0) add("Rank: ${info.rank}")
-            }
-            hudState.dialog = HudDialog.ListChoice(
-                title = info.name,
-                items = lines,
-                cancelLabel = "Close",
-                // Nothing here is a choice - the rows are the card. Tapping
-                // one closes it, which is what a player does to a card they
-                // have finished reading.
-                onSelect = { hudState.dialog = HudDialog.None },
-                onCancel = { hudState.dialog = HudDialog.None },
-            )
-        }
-    }
-
-    /**
-     * A tap on the battlefield: normally aims, but with a position-select
-     * weapon current (Fuel, Rocket Fuel, Teleport) it *uses* that weapon on
-     * the tapped square instead - which for the fuel weapons means driving
-     * the tank there. Upstream splits the same way, in
-     * TargetCamera::landIntersect.
-     *
-     * The pick is done once here and handed to whichever branch, rather
-     * than in each, so a tap can't ray-cast twice.
-     */
-    private fun handleBattlefieldTap(screenX: Float, screenY: Float) {
-        // M11: with tap-to-aim off, a tap on the battlefield does nothing and
-        // the sliders are the only way to aim. Position-selecting weapons are
-        // the exception - Fuel and Teleport have no other way to choose a
-        // square, so turning aiming off must not take them with it.
-        if (!settings.tapToAim && hudState.positionSelectWeapon.isEmpty()) return
-        CoroutineScope(Dispatchers.Main).launch {
-            val hit = withContext(Dispatchers.Default) {
-                gameRenderer.nativePickTerrain(screenX, screenY)
-            }
-            val parts = hit.split("|")
-            val landscapeX = parts.getOrNull(0)?.toFloatOrNull() ?: return@launch
-            val landscapeY = parts.getOrNull(1)?.toFloatOrNull() ?: return@launch
-
-            if (hudState.positionSelectWeapon.isNotEmpty()) {
-                val used = withContext(Dispatchers.Default) {
-                    NativeBridge.firePositionSelect(landscapeX, landscapeY)
-                }
-                // Upstream's click handler simply returns when the square is
-                // out of reach, which on a touch screen is indistinguishable
-                // from a missed tap - so say it instead. The reachable area
-                // is painted on the ground either way.
-                if (!used) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Out of range for ${hudState.positionSelectWeapon}",
-                        Toast.LENGTH_SHORT,
-                    ).show()
-                }
-                return@launch
-            }
-
-            aimAtLandscapePoint(landscapeX, landscapeY)
-        }
-    }
-
-    /** Swings the turret to face an already-picked landscape point. */
-    private suspend fun aimAtLandscapePoint(landscapeX: Float, landscapeY: Float) {
-        val angle = withContext(Dispatchers.Default) {
-            NativeBridge.aimAtPoint(landscapeX, landscapeY)
-        }
-        if (angle < 0f) {
-            // Only happens when there is no tank of ours to turn, which from
-            // the player's side is a tap on the ground doing nothing.
-            notifyPlayer("No tank to aim yet")
-            return
-        }
-
-        // aimAtPoint has already moved the real turret; this just keeps
-        // the dial showing what the tank is actually doing.
-        currentAngleDegrees = dialAngleFromEngine(angle)
-        hudState.angleDegrees = currentAngleDegrees
-    }
-
-    // M6: pushes the current slider values onto "my tank"'s real turret so
-    // the rendered gun and the aim sight follow the player's aim live.
-    // Without this the sliders were Kotlin-only state handed over at fire
-    // time, so the turret (and therefore the sight, which reads
-    // TanketShotInfo) never moved until a shot was actually fired - which
-    // is exactly how it looked: adjusting angle or elevation changed
-    // nothing on screen.
-    private fun pushAimToEngine() {
-        CoroutineScope(Dispatchers.Main).launch {
-            withContext(Dispatchers.Default) {
-                NativeBridge.setAim(
-                    engineAngleFromDial(currentAngleDegrees),
-                    currentElevationDegrees,
-                    currentPowerFraction,
-                )
-            }
-        }
-    }
-
-    // M6 parity: fire-and-forget submission of a non-shot move type (see
-    // NativeBridge.submitMove). Skip and done-buying are common enough to
-    // be their own HUD buttons rather than menu entries.
-    private fun submitMoveAsync(moveType: Int) {
-        CoroutineScope(Dispatchers.Main).launch {
-            val movedId = withContext(Dispatchers.Default) { NativeBridge.getMyMoveId() }
-            val submitted = withContext(Dispatchers.Default) { NativeBridge.submitMove(moveType) }
-            // A skip is a committed move for this turn like any other: the
-            // player is done, and the round is now waiting on everyone else.
-            // The button said so for a shot and not for a skip, which left
-            // the one move that looks like nothing happening also looking
-            // like it had not registered.
-            if (submitted && moveType == MoveType.SKIP) {
-                lockedMoveId = movedId
-                hudState.shotLocked = true
-            } else if (!submitted) {
-                // Skip, Resign and done-buying all arrive here, and all three
-                // were buttons that could do nothing without saying so.
-                notifyPlayer(
-                    when (moveType) {
-                        MoveType.SKIP -> "Couldn't skip, it might not be your turn"
-                        MoveType.RESIGN -> "Couldn't resign right now"
-                        else -> "Couldn't finish buying, buying time might be over"
-                    }
-                )
-            }
-        }
-    }
-
-    // M6 parity: upstream's UNDO_MOVE - puts the sliders back to the aim of
-    // the last shot actually fired, for the usual fire/nudge/fire-again
-    // loop. No-ops (with a nudge) before anything has been fired.
-    private fun revertToLastAim() {
-        val aim = lastFiredAim
-        if (aim == null) {
-            hudState.statusText = "Nothing to revert yet"
-            return
-        }
-        currentAngleDegrees = aim.first
-        currentElevationDegrees = aim.second
-        currentPowerFraction = aim.third
-        hudState.angleDegrees = aim.first
-        hudState.elevationDegrees = aim.second
-        hudState.powerFraction = aim.third
-        pushAimToEngine()
-    }
-
-    // M6 parity: the overflow menu - deliberately only holds things that
-    // are genuinely rare. Everything a player reaches for regularly (fire,
-    // undo, skip, done-buying, defences, shop, weapon) is a direct button
-    // on the HUD instead, so common actions never cost an extra tap.
-    // M6 parity: the score / player list (upstream's SHOW_SCORE_DIALOG),
-    // with the chat history under it. Every number is read straight off
-    // TankScore, which this build already keeps - nothing here is simulated
-    // or estimated. Refreshed while open so it tracks the round rather than
-    // freezing at the moment it was opened.
-    private fun showScores(): HudDialog.Scores {
-        val dialog = HudDialog.Scores(
-            entries = emptyList(),
-            roundInfo = "",
-            chat = emptyList(),
-            dataRoot = dataRootPath,
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-        hudState.dialog = dialog
-
-        CoroutineScope(Dispatchers.Main).launch {
-            while (hudState.dialog === dialog) {
-                val players = withContext(Dispatchers.Default) {
-                    parsePlayerList(NativeBridge.getPlayerList())
-                }
-                val info = withContext(Dispatchers.Default) { NativeBridge.getRoundInfo() }
-                // afterId 0 = the whole log the native store still holds
-                // (bounded at 100 lines, see ChatStore.cpp).
-                val chat = withContext(Dispatchers.Default) {
-                    parseChatLines(NativeBridge.getChatLines(0))
-                }
-                dialog.entries = players
-                dialog.roundInfo = info
-                dialog.chat = chat
-                delay(1000)
-            }
-        }
-        return dialog
-    }
-
-    // Set while the between-rounds scoreboard is on screen because the
-    // engine asked for it, so the tick below knows to take it down again -
-    // and knows not to touch a score dialog the player opened themselves.
-    private var autoScoreDialog: HudDialog.Scores? = null
-
-    // M6 parity: simulation speed (upstream's SIMULATION_SPEED_* keys).
-    // The seven upstream offers, no more: this is upstream's own
-    // Simulator::setFast, so the set of speeds is its set, not a range
-    // invented here.
-    private fun showSimulationSpeed() {
-        val speeds = listOf(
-            "1/8 speed" to (1 to 8),
-            "1/4 speed" to (1 to 4),
-            "1/2 speed" to (1 to 2),
-            "Normal speed" to (1 to 1),
-            "2x speed" to (2 to 1),
-            "4x speed" to (4 to 1),
-            "8x speed" to (8 to 1),
-        )
-        hudState.dialog = HudDialog.ListChoice(
-            title = "Game speed",
-            items = speeds.map { it.first },
-            cancelLabel = "Cancel",
-            onSelect = { index ->
-                val (numerator, denominator) = speeds[index].second
-                CoroutineScope(Dispatchers.Main).launch {
-                    val ok = withContext(Dispatchers.Default) {
-                        NativeBridge.setSimulationSpeed(numerator, denominator)
-                    }
-                    // Joined clients follow the host's pace - say so rather
-                    // than letting the tap look like it did nothing.
-                    if (!ok) hudState.statusText = "Only the host can change the game speed"
-                }
-                hudState.dialog = HudDialog.None
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    // M6 parity: upstream's camera presets (TargetCamera::CamType). The
-    // camera *button* stays the quick free/follow toggle - it is the one
-    // control reached mid-aim - so the fixed framings live here instead of
-    // crowding it. Selecting one is a framing, not a mode lock: a drag drops
-    // straight back out of it (see nativeCameraDrag).
-    private fun showCameraPresets() {
-        val presets = CameraPreset.entries
-        hudState.dialog = HudDialog.ListChoice(
-            title = "Camera view",
-            items = presets.map { it.label },
-            cancelLabel = "Cancel",
-            onSelect = { index ->
-                gameRenderer.nativeSetCameraPreset(index)
-                // Keep the camera button's icon honest - selecting Free or
-                // Follow moves the toggle it shows.
-                hudState.cameraFollow = presets[index] == CameraPreset.FOLLOW
-                hudState.dialog = HudDialog.None
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    // Chat send. Off the main thread because it takes the engine mutex, which
-    // the simulation tick holds for the duration of a step.
-    // Failure is deliberately silent, unlike chat's. There is nothing the
-    // player can do about it, the line is already on their own map, and a
-    // solo game - where there is nobody to send to at all - would otherwise
-    // complain every time anyone drew anything.
-    private fun sendMapLineAsync(ax: Float, ay: Float, bx: Float, by: Float) {
-        CoroutineScope(Dispatchers.Main).launch {
-            withContext(Dispatchers.Default) { NativeBridge.sendMapLine(ax, ay, bx, by) }
-        }
-    }
-
-    private fun sendChatAsync(channel: String, text: String) {
-        CoroutineScope(Dispatchers.Main).launch {
-            val sent = withContext(Dispatchers.Default) { NativeBridge.sendChat(channel, text) }
-            if (!sent) notifyPlayer("Could not send that message")
-        }
-    }
-
-    private fun showActionsMenu() {
-        // Resigning ends your round, so it keeps a confirmation step rather
-        // than firing off a single tap.
-        val entries = listOf<Pair<String, () -> Unit>>(
-            // Scores/chat, the camera views and the game speed used to be
-            // here; each now hangs off a long press on the button it
-            // extends - message, camera, and skip-turn respectively. Only
-            // genuinely rare things are left behind the overflow.
-            (if (hudState.hudHidden) "Show HUD" else "Hide HUD") to {
-                hudState.hudHidden = !hudState.hudHidden
-                hudState.dialog = HudDialog.None
-            },
-            // Upstream's third button in the same dialog as Resign
-            // (SkipDialog): it skips this move and every later one of yours
-            // until it is cancelled. Reversible in one tap from the
-            // countdown banner, so unlike Resign it needs no confirmation
-            // of its own - but it does skip the move you are on, which is
-            // upstream's behaviour and worth being asked about first.
-            (if (hudState.skipAllMoves) "Stop skipping turns" else "Skip all turns...") to {
-                if (hudState.skipAllMoves) {
-                    hudState.skipAllMoves = false
-                    hudState.skipAllSeconds = -1
-                    hudState.dialog = HudDialog.None
-                } else {
-                    hudState.dialog = HudDialog.ListChoice(
-                        title = "Skip this turn and all the rest?",
-                        items = listOf("Yes, skip them"),
-                        cancelLabel = "Cancel",
-                        onSelect = {
-                            hudState.skipAllMoves = true
-                            // Upstream skips the current move as it sets the
-                            // flag (SkipDialog::buttonDown falls through to
-                            // skipShot for both buttons).
-                            submitMoveAsync(MoveType.SKIP)
-                            hudState.dialog = HudDialog.None
-                        },
-                        onCancel = { hudState.dialog = HudDialog.None },
-                    )
-                }
-            },
-            "Resign round..." to {
-                hudState.dialog = HudDialog.ListChoice(
-                    title = "Resign this round?",
-                    items = listOf("Yes, resign"),
-                    cancelLabel = "Cancel",
-                    onSelect = {
-                        submitMoveAsync(MoveType.RESIGN)
-                        hudState.dialog = HudDialog.None
-                    },
-                    onCancel = { hudState.dialog = HudDialog.None },
-                )
-            },
-        ) + if (!hudState.isHost) {
-            // A game you joined cannot be saved: the save is the server's own
-            // level message, and the server is someone else's process. That
-            // is upstream's rule too - its SaveDialog is only registered when
-            // this client is not connected to a server.
-            emptyList()
-        } else {
-            listOf<Pair<String, () -> Unit>>(
-                "Save game" to {
-                    CoroutineScope(Dispatchers.Main).launch {
-                        val saved = withContext(Dispatchers.Default) { NativeBridge.saveGame() }
-                        notifyPlayer(
-                            if (saved.isEmpty()) {
-                                "Nothing to save until a round starts"
-                            } else {
-                                "Saved as $saved"
-                            },
-                        )
-                    }
-                    hudState.dialog = HudDialog.None
-                },
-            )
-        }
-
-        hudState.dialog = HudDialog.ListChoice(
-            title = "More actions",
-            items = entries.map { it.first },
-            cancelLabel = "Close",
-            onSelect = { index -> entries[index].second() },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    /**
-     * Upstream's GiftMoneyDialog: pick someone, pick an amount. Both lists are
-     * upstream's own - the recipients are whoever the engine says may be given
-     * money (see getGiftTargets), and the amounts are the ladder
-     * GiftMoneyDialog offers, cut to what this player actually holds.
-     *
-     * Whether the gift lands is not decided here: TankGiftSimAction checks the
-     * teams, the phase and the money again when it runs, so this is a request,
-     * not a transfer.
-     */
-    private fun showGiftMoney(targets: List<GiftTarget>, money: Int) {
-        hudState.dialog = HudDialog.ListChoice(
-            title = "Give money to",
-            items = targets.map { "${it.name}  (has \$${it.money})" },
-            cancelLabel = "Cancel",
-            onSelect = { index ->
-                val target = targets[index]
-                val amounts = GIFT_AMOUNTS.filter { it <= money }
-                if (amounts.isEmpty()) {
-                    notifyPlayer("You have nothing to give")
-                    hudState.dialog = HudDialog.None
-                    return@ListChoice
-                }
-                hudState.dialog = HudDialog.ListChoice(
-                    title = "Give how much to ${target.name}?",
-                    items = amounts.map { "\$$it" },
-                    cancelLabel = "Cancel",
-                    onSelect = { amountIndex ->
-                        val amount = amounts[amountIndex]
-                        CoroutineScope(Dispatchers.Main).launch {
-                            val before = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
-                            val sent = withContext(Dispatchers.Default) {
-                                NativeBridge.giftMoney(target.playerId, amount)
-                            }
-                            if (!sent) notifyPlayer("Couldn't send that money")
-                            // Back to the shop, which is where this came from,
-                            // straight away rather than after the wait below.
-                            showWeaponShop()
-                            if (!sent) return@launch
-                            notifyPlayer("Sent \$$amount to ${target.name}")
-
-                            // A gift is a queued simulator action, like a
-                            // purchase: the money does not move on this tick,
-                            // and a shop reopened before it lands shows the
-                            // player what they had before they gave it away.
-                            // Same wait, and the same reason, as awaitPurchase.
-                            repeat(34) {
-                                delay(120)
-                                val now = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
-                                if (now != before) {
-                                    val entries = withContext(Dispatchers.Default) {
-                                        parseWeaponShop(NativeBridge.getWeaponShop())
-                                    }
-                                    (hudState.dialog as? HudDialog.Shop)?.settle(0, now, entries)
-                                    return@launch
-                                }
-                            }
-                        }
-                    },
-                    onCancel = { hudState.dialog = HudDialog.None },
-                )
-            },
-            onCancel = { hudState.dialog = HudDialog.None },
-        )
-    }
-
-    // M4 economy, M6 parity: exercises the
-    // getMyMoney/getWeaponShop/buyAccessory/selectWeapon JNI surface (see
-    // engine_jni.cpp) - lets the human player buy accessories with real
-    // AccessoryStore/TankScore state and switch between owned ones.
-    // Tapping a row buys one unit if unowned; if already owned, a weapon
-    // becomes the current weapon and a defence accessory is activated
-    // (see showDefenses() - the Shop is also a reasonable place to use one
-    // you just bought). Renders via HudDialog.ListChoice (see
-    // HudDialogs.kt).
-    //
-    // M6: the list now covers all five upstream accessory types, not just
-    // weapons - shields/parachutes/batteries were previously unbuyable and
-    // unusable (see the getWeaponShop() comment in engine_jni.cpp).
-    private fun showWeaponShop() {
-        CoroutineScope(Dispatchers.Main).launch {
-            val money = withContext(Dispatchers.Default) { NativeBridge.getMyMoney() }
-            val weapons = withContext(Dispatchers.Default) {
-                parseWeaponShop(NativeBridge.getWeaponShop())
-            }
-            // Upstream's gift button lives in this dialog and nowhere else -
-            // the buying phase is the only time a gift is accepted. An empty
-            // list is the engine saying "not now, or nobody", and the button
-            // simply does not appear.
-            val giftTargets = withContext(Dispatchers.Default) {
-                parseGiftTargets(NativeBridge.getGiftTargets())
-            }
-
-            hudState.dialog = HudDialog.Shop(
-                money = money,
-                entries = weapons,
-                onGift = if (giftTargets.isEmpty()) {
-                    null
-                } else {
-                    { showGiftMoney(giftTargets, money) }
-                },
-                onSelect = { weapon ->
-                    CoroutineScope(Dispatchers.Main).launch {
-                        if (weapon.isOwned) {
-                            val change = weapon.activationChange
-                            when {
-                                // Tapping an owned weapon picks it to fire.
-                                weapon.isWeapon -> {
-                                    val picked = withContext(Dispatchers.Default) {
-                                        NativeBridge.selectWeapon(weapon.accessoryId)
-                                    }
-                                    if (!picked) notifyPlayer("Couldn't select ${weapon.name}")
-                                    hudState.dialog = HudDialog.None
-                                }
-                                // A shield, parachute or battery goes up.
-                                change != null -> {
-                                    val used = withContext(Dispatchers.Default) {
-                                        NativeBridge.useDefense(weapon.accessoryId, change)
-                                    }
-                                    if (!used) notifyPlayer("Couldn't activate ${weapon.name}")
-                                    hudState.dialog = HudDialog.None
-                                }
-                                // Owned, but neither fired nor raised - Auto
-                                // Defense is the one. This used to fall into
-                                // selectWeapon, which set it as the current
-                                // weapon and took the game down on the next
-                                // Fire; the engine refuses that now, but there
-                                // is still nothing useful to do here, so say
-                                // what the thing is for instead of going quiet.
-                                else -> Toast.makeText(
-                                    this@MainActivity,
-                                    "${weapon.name} can't be fired, it works on its own",
-                                    Toast.LENGTH_SHORT,
-                                ).show()
-                            }
-                        } else {
-                            // The server only accepts a buy during the
-                            // Buying phase (see ServerBuyAccessoryHandler.cpp) -
-                            // outside that window it silently no-ops with
-                            // nothing but a server-console log line the
-                            // player never sees, which looked exactly like
-                            // "tapping doesn't do anything". Check first so
-                            // there's at least a visible reason why.
-                            val status = withContext(Dispatchers.Default) { NativeBridge.getMyStatusLabel() }
-                            if (status.startsWith("Buying")) {
-                                val sent = withContext(Dispatchers.Default) {
-                                    NativeBridge.buyAccessory(weapon.accessoryId, true)
-                                }
-                                // Stay open and refresh rather than close:
-                                // the buying phase is for kitting out, and
-                                // reopening the shop after every purchase
-                                // (then finding your place in the list
-                                // again) was needless work. money and
-                                // entries are dialog state precisely so this
-                                // can update in place.
-                                val shop = hudState.dialog
-                                if (sent && shop is HudDialog.Shop) {
-                                    awaitPurchase(shop, weapon)
-                                }
-                            } else {
-                                hudState.dialog = HudDialog.Message(
-                                    text = "You can only buy weapons between rounds.",
-                                    onDismiss = { hudState.dialog = HudDialog.None },
-                                )
-                            }
-                        }
-                    }
-                },
-                onCancel = { hudState.dialog = HudDialog.None },
-            )
-        }
-    }
-
-    // M4: in-game weapon quick-switch, separate from the Shop dialog above
-    // (buying vs. selecting are different actions upstream too - see
-    // TankAccessorySimAction vs. TanketWeapon::setWeapon). Lists only
-    // already-owned weapons (isOwned - a starting weapon is commonly
-    // unlimited, ownedCount == -1, not "> 0"; filtering on ">0" excluded it
-    // entirely, making even a fresh tank's own default weapon
-    // unreachable here), reusing the same getWeaponShop() JNI surface as
-    // the shop.
-    //
-    // M6: filters to weapons specifically now that getWeaponShop() also
-    // returns shields/parachutes/batteries - selecting one of those as a
-    // "current weapon" is meaningless (they're activated via useDefense -
-    // see showDefenses below).
-    private fun showWeaponQuickSelect() {
-        CoroutineScope(Dispatchers.Main).launch {
-            val owned = withContext(Dispatchers.Default) {
-                parseWeaponShop(NativeBridge.getWeaponShop()).filter { it.isOwned && it.isWeapon }
-            }
-
-            if (owned.isEmpty()) {
-                hudState.dialog = HudDialog.Message(
-                    text = "No weapons yet, buy some in the Shop first.",
-                    onDismiss = { hudState.dialog = HudDialog.None },
-                )
-                return@launch
-            }
-
-            val labels = owned.map { weapon ->
-                val marker = if (weapon.isCurrentWeapon) "> " else "  "
-                "$marker${weapon.name} (${weapon.ownedLabel})"
-            }
-
-            hudState.dialog = HudDialog.ListChoice(
-                title = "Select weapon",
-                items = labels,
-                cancelLabel = "Cancel",
-                onSelect = { index ->
-                    val weapon = owned[index]
-                    CoroutineScope(Dispatchers.Main).launch {
-                        val picked = withContext(Dispatchers.Default) {
-                            NativeBridge.selectWeapon(weapon.accessoryId)
-                        }
-                        // The weapon button keeps its old name when this
-                        // fails, which is easy to miss in the moment.
-                        if (!picked) notifyPlayer("Couldn't select ${weapon.name}")
-                    }
-                    hudState.dialog = HudDialog.None
-                },
-                onCancel = { hudState.dialog = HudDialog.None },
-            )
-        }
-    }
-
-    // M6 parity: the defence panel - raise/lower shields, enable/disable
-    // parachutes, use a battery to repair. Upstream binds these to keys
-    // (ENABLE_SHIELDS/ENABLE_PARACHUTES/USE_BATTERY in data/keys.xml) and
-    // routes them through ComsDefenseMessage; ScorchDroid had no path to
-    // any of it before M6 (see NativeBridge.useDefense). Lists owned
-    // shields/parachutes/batteries plus explicit "down" entries for
-    // whatever is currently up.
-    private fun showDefenses() {
-        CoroutineScope(Dispatchers.Main).launch {
-            val owned = withContext(Dispatchers.Default) {
-                parseWeaponShop(NativeBridge.getWeaponShop())
-                    .filter { it.isOwned && it.activationChange != null }
-            }
-            val active = withContext(Dispatchers.Default) { NativeBridge.getActiveDefenses() }
-            val activeParts = active.split("|")
-            val activeShield = activeParts.getOrNull(0).orEmpty()
-            val activeParachute = activeParts.getOrNull(1).orEmpty()
-
-            // Each entry is a label plus the action to run when tapped, so
-            // the "turn it off" rows can sit in the same list as the owned
-            // accessories without a parallel index-mapping to get wrong.
-            val entries = mutableListOf<Pair<String, () -> Unit>>()
-            for (item in owned) {
-                val change = item.activationChange ?: continue
-                val activeMarker = when {
-                    item.type == AccessoryType.SHIELD && item.name == activeShield -> "> "
-                    item.type == AccessoryType.PARACHUTE && item.name == activeParachute -> "> "
-                    else -> "  "
-                }
-                val verb = if (item.type == AccessoryType.BATTERY) "use" else "activate"
-                entries += "$activeMarker${item.name} [${item.type}] x${item.ownedLabel} - $verb" to {
-                    CoroutineScope(Dispatchers.Main).launch {
-                        // The dialog closes either way, so a refusal used to
-                        // look exactly like a shield going up.
-                        val used = withContext(Dispatchers.Default) {
-                            NativeBridge.useDefense(item.accessoryId, change)
-                        }
-                        if (!used) notifyPlayer("Couldn't $verb ${item.name}")
-                    }
-                    hudState.dialog = HudDialog.None
-                }
-            }
-            if (activeShield.isNotEmpty()) {
-                entries += "Lower shield ($activeShield)" to {
-                    CoroutineScope(Dispatchers.Main).launch {
-                        val used = withContext(Dispatchers.Default) {
-                            NativeBridge.useDefense(0, DefenseChange.SHIELD_DOWN)
-                        }
-                        if (!used) notifyPlayer("Couldn't lower the shield")
-                    }
-                    hudState.dialog = HudDialog.None
-                }
-            }
-            if (activeParachute.isNotEmpty()) {
-                entries += "Disable parachutes ($activeParachute)" to {
-                    CoroutineScope(Dispatchers.Main).launch {
-                        val used = withContext(Dispatchers.Default) {
-                            NativeBridge.useDefense(0, DefenseChange.PARACHUTES_DOWN)
-                        }
-                        if (!used) notifyPlayer("Couldn't disable parachutes")
-                    }
-                    hudState.dialog = HudDialog.None
-                }
-            }
-
-            if (entries.isEmpty()) {
-                hudState.dialog = HudDialog.Message(
-                    text = "No defences yet, buy shields, parachutes or batteries in the Shop.",
-                    onDismiss = { hudState.dialog = HudDialog.None },
-                )
-                return@launch
-            }
-
-            hudState.dialog = HudDialog.ListChoice(
-                title = "Defences",
-                items = entries.map { it.first },
-                cancelLabel = "Close",
-                onSelect = { index -> entries[index].second() },
-                onCancel = { hudState.dialog = HudDialog.None },
-            )
-        }
-    }
-
-
-    // M5: shows "Hosting on <ip>:<port>" once startLocalGame() has bound a
-    // real listening socket (see NativeBridge.isHostingOnNetwork/
-    // engine_jni.cpp's startLocalGame), so another device has an address to
-    // connect to. Falls back to explaining why not, rather than silently
-    // doing nothing, if the port didn't bind.
-    private fun updateHostingLabel() {
-        // A solo game announces nothing and says nothing about announcing.
-        //
-        // This is the first thing checked because everything below it either
-        // publishes the game or reports on having published it: the NSD
-        // registration, the Wi-Fi Direct group, the address on the HUD, and
-        // the two toasts saying how those went. None of it has a reader in a
-        // single-player game, and one of them proved it - "No Wi-Fi Direct:
-        // the nearby devices permission was refused" greeted the player over
-        // the tutorial's first card, which is a fine thing to say to someone
-        // hosting and nonsense to say to someone learning to aim.
-        //
-        // Leaving the label empty rather than writing something solo-shaped
-        // into it: HudText is skipped when it is empty, so the status column
-        // loses the line instead of spending one on the player's own IP.
-        if (!hostForOthers) {
-            hudState.hostingLabel = ""
-            return
-        }
-        CoroutineScope(Dispatchers.Main).launch {
-            val hosting = withContext(Dispatchers.Default) { NativeBridge.isHostingOnNetwork() }
-            val port = withContext(Dispatchers.Default) { NativeBridge.getServerPort() }
-
-            // A Bluetooth game has no address and no port to publish, and
-            // nothing to advertise over the network either - the other
-            // device finds this one by its Bluetooth name.
-            if (hostOverBluetooth) {
-                // Asked of the adapter rather than assumed from the prompt
-                // having been answered: being connectable and being
-                // *findable* are different states, and only the second one
-                // gets an unpaired player in. Claiming the second while in
-                // the first is how a host can look fine to its own player
-                // and be invisible to everyone else.
-                val name = BluetoothTransport.localName(applicationContext)
-                val visible = BluetoothTransport.isDiscoverable(applicationContext)
-                hudState.hostingLabel = when {
-                    !hosting -> "Bluetooth hosting failed"
-                    visible -> "Bluetooth: $name"
-                    else -> "Bluetooth: $name (not visible)"
-                }
-                // The detail that used to ride along on that line. It is
-                // worth saying once and not worth a permanent line of HUD:
-                // the five minutes is Android's own cap and is already
-                // running, and a host that is not findable at all is
-                // something the player has to be told rather than left to
-                // infer from nobody arriving.
-                if (hosting) {
-                    notifyPlayer(
-                        if (visible) {
-                            "New devices can find this game for 5 minutes"
-                        } else {
-                            "Not visible, only paired devices can join"
-                        }
-                    )
-                }
-                return@launch
-            }
-
-            if (!hosting) {
-                hudState.hostingLabel = "Solo only (port $port busy)"
-                return@launch
-            }
-
-            // No address at all means no network is up, which "Hosting on
-            // unknown IP" managed to say without saying what to do about it.
-            // "Host" and the address, and nothing else. The status column
-            // shares its row with four icon buttons, so it has about
-            // twenty-five characters: "Hosting on 192.168.232.2:27270" is
-            // thirty and came out as "Hosting on 192.168.23...", which cut
-            // the one thing on the line worth reading out to someone.
-            //
-            // If a long address still clips, what goes is the port - and the
-            // port is now the part a joiner can leave out, since typing a
-            // bare address uses 27270.
-            val ip = getLocalIpAddress()
-            hudState.hostingLabel = if (ip != null) "Host ${shownAddress(ip, port)}" else "No network"
-            if (ip == null) {
-                notifyPlayer("No network, turn on Wi-Fi or your hotspot so others can join")
-            }
-            LanDiscovery.registerService(applicationContext, port)
-
-            // Wi-Fi Direct is advertised alongside, not instead: the two
-            // reach different people. NSD finds anyone already on this
-            // network (including a PC); Wi-Fi Direct reaches someone sitting
-            // next to you with no network at all. Only claimed in the label
-            // once the group has actually formed - announcing a way to be
-            // reached that isn't up is worse than not offering it.
-            WifiDirectTransport.advertise(applicationContext, port) { advertising, why ->
-                // One line, and the reason goes to a toast instead.
-                //
-                // A host that believes it is reachable over Wi-Fi Direct when
-                // no group formed waits for peers that can never arrive, so
-                // the reason still has to be said - the first two-device test
-                // of this could not tell the two apart from the screen. But it
-                // was five wrapped lines of HUD sitting over the battlefield
-                // for the whole game, which is too high a price for something
-                // a player reads once.
-                hudState.hostingLabel = when {
-                    ip != null -> "Host ${shownAddress(ip, port)}"
-                    advertising -> "Host over Wi-Fi Direct"
-                    else -> hudState.hostingLabel
-                }
-                // Whether Wi-Fi Direct came up is said once rather than
-                // carried on the line for the whole game - the line has
-                // room for the address and that is what it is for.
-                notifyPlayer(
-                    if (advertising) {
-                        "Wi-Fi Direct is on, nearby phones can find this game"
-                    } else {
-                        "No Wi-Fi Direct: ${why ?: "it did not start"}"
-                    }
-                )
-            }
-        }
-    }
-
-    // M5 Phase 2: scans the LAN for other advertised ScorchDroid games (see
-    // LanDiscovery.kt) and lists what it finds. Tapping a result now calls
-    // [onSelected] with its host/port; there's also a manual "Enter
-    // address..." row for a PC host, or a network that drops NSD's
-    // multicast traffic. [onCancelled] fires if the user backs out without
-    // picking anything. Defaults let the main-screen "Find Games" button
-    // (used mid-game, purely to browse - see the button's own click
-    // handler) keep working as a no-op-on-selection browse dialog without
-    // having to pass callbacks it doesn't care about.
-    private fun showFindGames(
-        overBluetooth: Boolean = false,
-        onSelected: (LanDiscovery.FoundGame) -> Unit = {},
-        onCancelled: () -> Unit = {},
-    ) {
-        val found = mutableListOf<LanDiscovery.FoundGame>()
-        var resolved = false
-        // Both scans run at once and land in the same list. Each reports
-        // finishing separately, so the closing title waits for both rather
-        // than for whichever happened to be quicker.
-        // Not while this device is the one hosting a group: the HUD's "Find
-        // Games" button is reachable mid-game, and putting the radio into a
-        // peer scan there would disturb the very group the host is running
-        // the game on. A host has no reason to be looking anyway.
-        //
-        // Whichever reason keeps Wi-Fi Direct out of a search, the player is
-        // told it. Silently searching one radio while appearing to search
-        // both is how two devices sitting next to each other can each report
-        // finding nothing with nothing wrong with either of them.
-        //
-        // Bluetooth is a search of its own rather than a third row of this
-        // one. It cannot be narrowed to devices running the game - asking
-        // each one costs an SDP lookup that is slow and often answers
-        // nothing - so it lists every speaker, headset and car in range, and
-        // burying two phones in that was worse than having one more button.
-        val hostingHere = WifiDirectTransport.isAdvertising()
-        val wifiDirectProblem = when {
-            overBluetooth -> null  // Not part of this search at all.
-            hostingHere -> "this device is hosting"
-            else -> WifiDirectTransport.unavailableReason(applicationContext)
-        }
-        val wifiDirect = !overBluetooth && wifiDirectProblem == null
-        val bluetoothProblem = when {
-            !overBluetooth -> null
-            hostOverBluetooth -> "this device is hosting"
-            else -> BluetoothTransport.unavailableReason(applicationContext)
-        }
-        val bluetooth = overBluetooth && bluetoothProblem == null
-        val network = !overBluetooth
-        var scansRunning =
-            (if (network) 1 else 0) + (if (wifiDirect) 1 else 0) + (if (bluetooth) 1 else 0)
-        // A search with nothing to search still has to report itself
-        // finished - see the scanFinished() call at the end - rather than
-        // sitting on "Searching..." for as long as the player will stare
-        // at it.
-        if (scansRunning == 0) scansRunning = 1
-        // Devices the radio can see that answered no service query - see
-        // WifiDirectTransport.startDiscovery. Listed after the real results,
-        // and joinable anyway: service discovery over Wi-Fi Direct is the
-        // flakiest part of this path, and a player who can see the other
-        // phone's name should be able to try it.
-        val peersWithoutGames = mutableListOf<LanDiscovery.FoundGame>()
-
-        // Nothing to type in a Bluetooth search: an address there is a MAC
-        // nobody knows by heart, and there is no port at all.
-        fun manualEntryLabel() = if (overBluetooth) null else "Enter address manually..."
-        fun helpLabel() = "How do I connect?"
-
-        fun stopScans() {
-            if (network) LanDiscovery.stopDiscovery()
-            if (wifiDirect) WifiDirectTransport.stopDiscovery()
-            if (bluetooth) BluetoothTransport.stopDiscovery(applicationContext)
-        }
-
-        val listDialog = HudDialog.ListChoice(
-            title = when {
-                overBluetooth -> "Searching for Bluetooth devices..."
-                wifiDirect -> "Searching for games..."
-                else -> "Searching for LAN games..."
-            },
-            items = listOf(manualEntryLabel(), helpLabel()).filterNotNull(),
-            cancelLabel = "Cancel",
-            onSelect = { index ->
-                resolved = true
-                stopScans()
-                hudState.dialog = HudDialog.None
-                val rows = found.size + peersWithoutGames.size
-                val manualRow = if (overBluetooth) -1 else rows
-                when (index) {
-                    in found.indices -> onSelected(found[index])
-                    in found.size until rows -> onSelected(peersWithoutGames[index - found.size])
-                    manualRow -> promptManualAddress(onSelected, onCancelled)
-                    else -> showConnectionHelp { showFindGames(overBluetooth, onSelected, onCancelled) }
-                }
-            },
-            onCancel = {
-                stopScans()
-                hudState.dialog = HudDialog.None
-                if (!resolved) onCancelled()
-            },
-        )
-        hudState.dialog = listDialog
-
-        fun refresh() {
-            // A Wi-Fi Direct peer has no address to show yet - there is no IP
-            // until a group forms - so it is labelled by how it was found
-            // instead, which is the part the player cares about anyway.
-            listDialog.items = found.map { game ->
-                when {
-                    game.p2pDeviceAddress != null -> "${game.name} - Wi-Fi Direct"
-                    // Said plainly, because it is what decides whether the
-                    // next tap shows a pairing prompt on both devices.
-                    game.bluetoothAddress != null && game.bluetoothPaired -> "${game.name} - paired"
-                    game.bluetoothAddress != null -> "${game.name} - not paired yet"
-                    else -> "${game.name} - ${game.host}:${game.port}"
-                }
-            } + peersWithoutGames.map { "${it.name} - nearby, no game seen (try anyway)" } +
-                listOfNotNull(manualEntryLabel(), helpLabel())
-        }
-
-        fun add(game: LanDiscovery.FoundGame) {
-            val duplicate = found.any {
-                when {
-                    game.p2pDeviceAddress != null -> it.p2pDeviceAddress == game.p2pDeviceAddress
-                    game.bluetoothAddress != null -> it.bluetoothAddress == game.bluetoothAddress
-                    else -> it.host == game.host && it.port == game.port
-                }
-            }
-            if (duplicate) return
-            found.add(game)
-            // A device that answers properly should not also be offered as a
-            // guess.
-            peersWithoutGames.removeAll { it.p2pDeviceAddress == game.p2pDeviceAddress }
-            refresh()
-        }
-
-        // A device the radio can see that advertised no game. Offered last
-        // and labelled as the guess it is: it may be a phone hosting one
-        // whose service query went unanswered, or it may be a printer.
-        fun addPeer(name: String, deviceAddress: String) {
-            if (found.any { it.p2pDeviceAddress == deviceAddress }) return
-            if (peersWithoutGames.any { it.p2pDeviceAddress == deviceAddress }) return
-            peersWithoutGames.add(
-                LanDiscovery.FoundGame(
-                    name = name,
-                    host = "",
-                    port = DEFAULT_SERVER_PORT,
-                    p2pDeviceAddress = deviceAddress,
-                )
-            )
-            refresh()
-        }
-
-        fun scanFinished() {
-            if (scansRunning <= 0 || --scansRunning > 0) return
-            // Every radio that sat this one out says so, by name and with
-            // its reason. This line is the one a player actually reads, and
-            // "no games found" with half the search silently skipped is how
-            // a working pair of phones comes to look broken - which is
-            // exactly how the first Wi-Fi Direct test went.
-            val skipped = listOfNotNull(
-                wifiDirectProblem?.let { "Wi-Fi Direct ($it)" },
-                bluetoothProblem?.let { "Bluetooth ($it)" },
-            )
-            val outcome = when {
-                found.isNotEmpty() && overBluetooth -> "${found.size} device(s) nearby"
-                found.isNotEmpty() -> "Found ${found.size} game(s)"
-                // Naming the thing that does work. A Bluetooth scan finds
-                // only devices that are currently *discoverable*, which is a
-                // five-minute state the host has to have granted; pairing
-                // the two phones once, in Android's own settings, sidesteps
-                // that permanently - a paired device is listed here from the
-                // bonded list with no scan at all.
-                overBluetooth ->
-                    "No Bluetooth devices found. Pair the two phones in Android " +
-                        "Settings and they'll show up here without searching"
-                peersWithoutGames.isNotEmpty() ->
-                    "No games found (${peersWithoutGames.size} nearby device(s) aren't hosting)"
-                else -> "No games found"
-            }
-            listDialog.title = if (skipped.isEmpty()) {
-                outcome
-            } else {
-                "$outcome\nNot searched: ${skipped.joinToString(", ")}"
-            }
-        }
-
-        if (network) {
-            LanDiscovery.startDiscovery(
-                applicationContext,
-                durationMs = 4000,
-                onFound = { add(it) },
-                onFinished = { scanFinished() },
-            )
-        }
-
-        if (bluetooth) {
-            // Paired devices come back immediately; the scan itself is the
-            // slow part and runs for as long as the Wi-Fi Direct one.
-            BluetoothTransport.startDiscovery(
-                applicationContext,
-                durationMs = 20000,
-                onFound = { add(it) },
-                onFinished = { scanFinished() },
-            )
-        }
-
-        if (wifiDirect) {
-            // Far longer than the NSD scan, and re-issued throughout (see
-            // WifiDirectTransport.startDiscovery): a Wi-Fi Direct service
-            // query has to get the radio scanning for peers before any of
-            // them can answer, and both devices have to be listening in the
-            // same round for an answer to arrive at all - where mDNS is one
-            // multicast onto a network that already exists. Twenty seconds
-            // is a long time to stare at a dialog, but results land in the
-            // list as they arrive rather than at the end.
-            WifiDirectTransport.startDiscovery(
-                applicationContext,
-                durationMs = 20000,
-                onFound = { add(it) },
-                onPeerSeen = { name, address -> addPeer(name, address) },
-                onFinished = { scanFinished() },
-            )
-        }
-
-        // Every radio this search wanted is unavailable, so no scan will ever
-        // report in. Saying why is the whole of what is left to do.
-        if (!network && !wifiDirect && !bluetooth) scanFinished()
-    }
-
-    /**
-     * What to do when "Find Games" turns up nothing, which is the moment a
-     * player is most likely to conclude multiplayer is broken. All four
-     * routes work today and none of them is obvious from the outside -
-     * particularly the hotspot one, which needs no code at all and is the
-     * answer whenever there is no router in reach.
-     *
-     * [onDismiss] goes back to the search rather than out to the menu: a
-     * player who came here to find out how to connect still wants to.
-     */
-    private fun showConnectionHelp(onDismiss: () -> Unit) {
-        hudState.dialog = HudDialog.Message(
-            "Ways to play together:\n\n" +
-                "Same Wi-Fi: put both devices on the same network. One taps " +
-                "Host Game, the other taps Join Game.\n\n" +
-                "Wi-Fi Direct: no router needed, both devices just need Wi-Fi " +
-                "turned on. The host's game shows up in this list marked " +
-                "\"Wi-Fi Direct\". It needs the nearby devices permission, which " +
-                "is only asked for once. If you said no, you can turn it on in " +
-                "Android Settings under Apps > ScorchDroid > Permissions.\n\n" +
-                "Bluetooth: no Wi-Fi needed. The host picks \"Host over " +
-                "Bluetooth\" and allows the visibility prompt, the other picks " +
-                "\"Join over Bluetooth\". Pairing the two phones first makes it " +
-                "quicker and more reliable.\n\n" +
-                "Hotspot: turn on a hotspot on the host and connect the other " +
-                "device to it, then Host and Join as usual.\n\n" +
-                "By address: some guest and work networks block games from " +
-                "finding each other. The host's screen shows its address, type " +
-                "it in with \"Enter address manually\"."
-        ) {
-            hudState.dialog = HudDialog.None
-            onDismiss()
-        }
-    }
-
-    // M5 Phase 2: falls back to a typed "host:port" when nothing useful
-    // showed up via NSD - the only way to reach a PC host today, since
-    // desktop Scorched3D doesn't advertise itself via Android's NSD/mDNS.
-    private fun promptManualAddress(
-        onSelected: (LanDiscovery.FoundGame) -> Unit,
-        onCancelled: () -> Unit,
-    ) {
-        hudState.dialog = HudDialog.ManualAddress(
-            onConnect = { text ->
-                val typed = text.trim()
-                val host = typed.substringBefore(':').trim().takeIf { it.isNotEmpty() }
-                // The port is optional, and anything unusable in its place is
-                // treated as absent rather than as a reason to give up: an
-                // address with no port used to close the dialog and return to
-                // the menu having said nothing, which reads as the Connect
-                // button being broken. Every Scorched3D host listens on
-                // 27270 unless its config says otherwise, so that is the
-                // right guess - and the status line names the port it dialled,
-                // so a wrong guess explains itself.
-                val port = typed.substringAfter(':', "").trim().toIntOrNull()
-                    ?.takeIf { it in 1..65535 }
-                    ?: DEFAULT_SERVER_PORT
-                hudState.dialog = HudDialog.None
-                if (host != null) {
-                    onSelected(LanDiscovery.FoundGame(name = host, host = host, port = port))
-                } else {
-                    onCancelled()
-                }
-            },
-            onCancel = {
-                hudState.dialog = HudDialog.None
-                onCancelled()
-            },
-        )
-    }
-
-    // Plain Android API - the actual LAN IP a peer would dial in to, not
-    // something the native engine (which just binds INADDR_ANY) knows.
-    //
-    // Ranked rather than "the first one found", which was arbitrary as soon
-    // as a device had more than one address up, and a device hosting a game
-    // usually does. Normal Wi-Fi first, since that is the address someone on
-    // the same network types in. Then the hotspot interface, so a host who
-    // turned their hotspot on to play (see the connection help) still shows
-    // an address that works - their normal Wi-Fi is often down at that
-    // point. Wi-Fi Direct's own interface last: peers reach a group owner
-    // through the group, never by typing 192.168.49.1 at it.
-    private fun getLocalIpAddress(): String? {
-        fun rank(interfaceName: String): Int = when {
-            interfaceName.startsWith("wlan") -> 0
-            interfaceName.startsWith("ap") ||
-                interfaceName.startsWith("swlan") ||
-                interfaceName.startsWith("rndis") -> 1
-            interfaceName.startsWith("p2p") -> 3
-            else -> 2
-        }
-
-        return try {
-            Collections.list(NetworkInterface.getNetworkInterfaces())
-                .flatMap { nic -> Collections.list(nic.inetAddresses).map { nic.name to it } }
-                .filter { (_, address) -> !address.isLoopbackAddress && address is Inet4Address }
-                .minByOrNull { (name, _) -> rank(name) }
-                ?.second?.hostAddress
-        } catch (e: Exception) {
-            null
-        }
+        controller.onActivityResult(requestCode, resultCode)
     }
 
     override fun onResume() {
         super.onResume()
-        if (appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onResume()
-        music?.resume()
-        ambient?.resume()
+        if (controller.appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onResume()
+        controller.music?.resume()
+        controller.ambient?.resume()
     }
 
     override fun onPause() {
         super.onPause()
-        if (appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onPause()
-        music?.pause()
-        ambient?.pause()
+        if (controller.appScreen == AppScreen.GAME && ::gameSurface.isInitialized) gameSurface.onPause()
+        controller.music?.pause()
+        controller.ambient?.pause()
     }
 
     override fun onDestroy() {
-        music?.release()
-        ambient?.release()
-        music = null
+        controller.music?.release()
+        controller.ambient?.release()
+        controller.music = null
         super.onDestroy()
-        stopNetworkAdvertising()
+        controller.stopAdvertising()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -3446,30 +190,1093 @@ class MainActivity : AppCompatActivity() {
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
     }
 
-    private companion object {
-        // A press longer than this is a deliberate hold, not a tap - it
-        // stops a slow, still finger from firing off an aim on release.
+    /** The game, with what only a phone has added. */
+    inner class Controller(settings: GameSettings) : GameController(settings, SoundPlayer) {
+        override val versionName: String = BuildConfig.VERSION_NAME
+        override val upstreamCommit: String = BuildConfig.UPSTREAM_COMMIT
+        override val isDebugBuild: Boolean = BuildConfig.DEBUG
 
+        override fun notifyPlayer(text: String) {
+            Toast.makeText(this@MainActivity, text, Toast.LENGTH_SHORT).show()
+        }
+
+        /** For onDestroy, which is outside this class. */
+        fun stopAdvertising() = stopNetworkAdvertising()
+
+        override fun attachGameSurface() {
+            val surface = GLSurfaceView(this@MainActivity).apply {
+                setEGLContextClientVersion(3)
+                // Only a hint - the driver may drop the context anyway under
+                // memory pressure, and nativeOnSurfaceCreated copes when it does -
+                // but when honoured a resume is instant instead of rebuilding the
+                // terrain mesh, the ground texture and every model from scratch.
+                preserveEGLContextOnPause = true
+                // M6: the 3D renderer needs a real depth buffer (the M2/M5 flat
+                // 2D view never did) and GLSurfaceView's default config chooser
+                // doesn't reliably request one on every device.
+                setEGLConfigChooser(8, 8, 8, 8, 16, 0)
+            }
+            // The plate pass lays out in dp, the same dp the Compose plates used,
+            // and the renderer has no way of its own to know what a dp is here.
+            GameRenderer.nativeSetUiDensity(resources.displayMetrics.density)
+            surface.setRenderer(GlRenderer())
+            // After setRenderer, never before: GLSurfaceView has no GL thread
+            // until a renderer is attached, and setRenderMode dereferences it.
+            surface.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+            setUpCameraControls(surface)
+            gameSurface = surface
+            surfaceHost.addView(surface)
+        }
+
+        override fun removeGameSurface() {
+            if (::gameSurface.isInitialized) surfaceHost.removeView(gameSurface)
+        }
+
+        /**
+         * The renderer draws the name plates itself, but it has no font: upstream
+         * has a GL font atlas there and this port never had one. So each name is
+         * drawn here, once, into a bitmap the plate pass uploads and keeps.
+         *
+         * White on nothing, because the *tank's* colour is applied in the shader -
+         * one picture serves a player whatever colour they are playing, and a
+         * player who changes colour needs no new one.
+         */
+        private val plateTextPaint by lazy {
+            android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                // The size the Compose plates used (labelMedium), through the
+                // same sp scaling, so nothing about them changed in the move.
+                textSize = TypedValue.applyDimension(
+                    TypedValue.COMPLEX_UNIT_SP, 12f, resources.displayMetrics,
+                )
+                typeface = android.graphics.Typeface.create(
+                    "sans-serif-medium", android.graphics.Typeface.NORMAL,
+                )
+                color = android.graphics.Color.WHITE
+            }
+        }
+
+        override fun drawPlateText(text: String): PlateText {
+            val metrics = plateTextPaint.fontMetrics
+            val height = ceil(metrics.descent - metrics.ascent).toInt().coerceIn(1, 256)
+            val width = ceil(plateTextPaint.measureText(text)).toInt().coerceIn(1, 2048)
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            android.graphics.Canvas(bitmap).drawText(text, 0f, -metrics.ascent, plateTextPaint)
+            val pixels = IntArray(width * height)
+            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+            bitmap.recycle()
+            return PlateText(width, height, pixels)
+        }
+
+        override fun onFindGames() = showFindGames()
+
+        @Composable
+        override fun MultiplayerMenu() {
+            MultiplayerScreen(
+                onHost = { openSetup("Host Game", forOthers = true) },
+                onHostBluetooth = { startBluetoothHostFlow() },
+                onLoadGame = {
+                    loadGameForOthers = true
+                    appScreen = AppScreen.LOAD_GAME
+                },
+                loadGameEnabled = savedGames.isNotEmpty(),
+                onJoin = { startJoinFlow() },
+                onJoinBluetooth = { requireBluetooth { startJoinFlow(overBluetooth = true) } },
+                onBack = { appScreen = AppScreen.MENU },
+                bluetoothEnabled = BluetoothTransport.isSupported(applicationContext),
+            )
+        }
+
+        override fun resetHostingPrompts() {
+            bluetoothVisibilityAsked = false
+        }
+
+        override fun holdStartForHosting(): Boolean {
+            // Bluetooth visibility is asked for here, not on the way into setup.
+            // Android grants it for five minutes at most and the clock starts the
+            // moment it is granted, so a player who spends two of them choosing
+            // options and waiting for a landscape has two left for the other
+            // phone to find them - which is how a host can be up and genuinely
+            // invisible. Answering lands in onActivityResult, which comes back
+            // to startGame().
+            if (hostOverBluetooth && !bluetoothVisibilityAsked) {
+                bluetoothVisibilityAsked = true
+                try {
+                    startActivityForResult(BluetoothTransport.discoverableIntent(), REQUEST_DISCOVERABLE)
+                    return true
+                } catch (e: android.content.ActivityNotFoundException) {
+                    // No visibility prompt on this device at all. Same
+                    // consequence as refusing one, and worth the same sentence.
+                    showMenuMessage(
+                        "This device can't be made visible over Bluetooth, so only phones " +
+                            "already paired with it can find the game."
+                    )
+                }
+            }
+            return false
+        }
+
+        override fun startHostedSave(save: SavedGame) {
+            // Hosted: the engine has one network interface, so which radio it
+            // comes back on has to be settled before the game starts - the same
+            // reason Host Game and Host over Bluetooth are two buttons rather
+            // than one with an option inside it.
+            val transports = buildList {
+                add("Over Wi-Fi, a hotspot, or Wi-Fi Direct" to false)
+                if (BluetoothTransport.isSupported(applicationContext)) {
+                    add("Over Bluetooth" to true)
+                }
+            }
+            if (transports.size == 1) {
+                startHostedSavedGame(save, overBluetooth = false)
+                return
+            }
+            hudState.dialog = HudDialog.ListChoice(
+                title = "Host it how?",
+                items = transports.map { it.first },
+                cancelLabel = "Cancel",
+                onSelect = { index ->
+                    hudState.dialog = HudDialog.None
+                    val overBluetooth = transports[index].second
+                    if (overBluetooth) {
+                        requireBluetooth { startHostedSavedGame(save, overBluetooth = true) }
+                    } else {
+                        startHostedSavedGame(save, overBluetooth = false)
+                    }
+                },
+                onCancel = { hudState.dialog = HudDialog.None },
+            )
+        }
+
+        fun onActivityResult(requestCode: Int, resultCode: Int) {
+            if (requestCode == REQUEST_ENABLE_BLUETOOTH) {
+                val next = afterBluetoothReady
+                afterBluetoothReady = null
+                if (BluetoothTransport.isOff(applicationContext)) {
+                    // Refused, or it did not come up. Either way, saying so is
+                    // the whole point - this silently did nothing before.
+                    showMenuMessage(
+                        "Bluetooth needs to be switched on. Turn it on and try again."
+                    )
+                } else {
+                    // Straight on to whatever the player was heading for before
+                    // the radio got in the way.
+                    next?.invoke()
+                }
+                return
+            }
+
+            if (requestCode != REQUEST_DISCOVERABLE) return
+
+            // resultCode is the number of seconds granted, or RESULT_CANCELED.
+            // A refusal used to walk straight on into game setup, which is only
+            // half defensible: a phone that is not visible can still be joined
+            // by one it has already paired with, and not by anything else. So
+            // say which of those the player is choosing rather than deciding for
+            // them - and having said it, make asking again the easy answer.
+            if (resultCode == RESULT_CANCELED) {
+                hudState.dialog = HudDialog.ListChoice(
+                    title = "This phone won't be visible.\nOnly devices already paired with " +
+                        "it can find the game.",
+                    items = listOf("Ask again", "Host anyway (paired devices only)"),
+                    cancelLabel = "Back",
+                    onSelect = { index ->
+                        hudState.dialog = HudDialog.None
+                        // Asking again means asking again, so the one-shot guard
+                        // has to be let go of first.
+                        if (index == 0) bluetoothVisibilityAsked = false
+                        startGame()
+                    },
+                    onCancel = {
+                        hudState.dialog = HudDialog.None
+                        bluetoothVisibilityAsked = false
+                        appScreen = AppScreen.SETUP
+                    },
+                )
+                return
+            }
+
+            startGame()
+        }
+
+        // Whether this game has already put the visibility prompt up. Asked once
+        // per game, since a second prompt between setup and the first round would
+        // read as the first one not having worked.
+        private var bluetoothVisibilityAsked = false
+
+        /**
+         * M10: find and connect to a game, staying on a menu screen while it
+         * happens.
+         *
+         * The GL surface is deliberately not built until the connection is up.
+         * Building it first - which is what happened when Join went through
+         * startGame() - put the discovery dialog on top of the aiming sliders and
+         * Fire button of a game that did not exist yet.
+         */
+        override fun startJoinFlow(overBluetooth: Boolean) {
+            if (gameJob != null) return
+            appScreen = AppScreen.JOINING
+            hudState.statusText = if (overBluetooth) {
+                "Looking for a device to join..."
+            } else {
+                "Looking for a game..."
+            }
+            gameJob = scope.launch {
+                val target = pickJoinTarget(overBluetooth)
+                if (target == null) {
+                    gameJob = null
+                    appScreen = AppScreen.MULTIPLAYER
+                    return@launch
+                }
+
+                // A Wi-Fi Direct pick is not an address yet. Forming the group
+                // takes several seconds and puts an invitation prompt on the
+                // host's screen, so it gets its own status line - told that it is
+                // "connecting to :27270", a player would reasonably think the
+                // game had hung.
+                // Bluetooth has no address to connect to at any point - the
+                // whole game runs over RFCOMM - so it takes its own path into
+                // the engine rather than being turned into a host and port.
+                if (target.bluetoothAddress != null) {
+                    hudState.statusText = "Connecting to ${target.name} over Bluetooth...\n" +
+                        if (target.bluetoothPaired) {
+                            "This can take a few seconds."
+                        } else {
+                            "Accept the pairing request on both devices if it pops up."
+                        }
+                    val connecting = withContext(Dispatchers.Default) {
+                        NativeBridge.startJoinGameBluetooth(target.bluetoothAddress)
+                    }
+                    if (!connecting) {
+                        hudState.statusText =
+                            "Couldn't start a Bluetooth connection to ${target.name}. " +
+                                "Tap Cancel to go back."
+                        return@launch
+                    }
+                    // The same lines the network path ends with - there is
+                    // nothing different about a joined client from here on,
+                    // whatever carried it.
+                    showJoinedGame()
+                    awaitJoinAndPlay()
+                    return@launch
+                }
+
+                val host = if (target.p2pDeviceAddress != null) {
+                    // The prompt is worth mentioning: it lands on the *other*
+                    // phone, which the player is not looking at, and ignoring it
+                    // is indistinguishable from the connection failing.
+                    hudState.statusText = "Asking ${target.name} to connect...\n" +
+                        "Accept the invite on the other device if it pops up."
+                    val result = WifiDirectTransport.connectToOwner(
+                        applicationContext, target.p2pDeviceAddress
+                    )
+                    if (result.address == null) {
+                        hudState.statusText = if (result.error != null) {
+                            "Couldn't connect to ${target.name}: ${result.error}. " +
+                                "Tap Cancel to go back."
+                        } else {
+                            "Couldn't form a Wi-Fi Direct group with ${target.name}. " +
+                                "Tap Cancel to go back."
+                        }
+                        return@launch
+                    }
+                    result.address
+                } else {
+                    target.host
+                }
+
+                hudState.statusText = "Connecting to $host:${target.port}..."
+                val connecting = withContext(Dispatchers.Default) {
+                    NativeBridge.startJoinGame(host, target.port)
+                }
+                if (!connecting) {
+                    hudState.statusText =
+                        "Couldn't reach $host:${target.port}. Tap Cancel to go back."
+                    return@launch
+                }
+
+                // Connected, so there is now a game to draw. A joined client is
+                // never the host, so the admin button stays away.
+                showJoinedGame()
+                awaitJoinAndPlay()
+            }
+        }
+
+        /**
+         * Hosting over Bluetooth, which needs two things the network paths do
+         * not: the permissions, and the system's own "make this device visible"
+         * dialog. A host nobody can see is the Bluetooth equivalent of a group
+         * that never formed, and a player would have no way of telling.
+         *
+         * Already-paired devices can find the game without this, which is why a
+         * refused dialog is a warning rather than a failure.
+         */
+        /**
+         * Runs [action] once Bluetooth is actually usable, asking for whatever is
+         * missing first: the permissions, then the radio itself through Android's
+         * own "turn Bluetooth on?" prompt. Both answers come back through
+         * [onActivityResult] or the permission launcher, which is why the action
+         * is held rather than passed down.
+         *
+         * Hosting and joining both need this and neither should be reciting it,
+         * which is also how the two came to disagree about whether to ask at all.
+         */
+        private fun requireBluetooth(action: () -> Unit) {
+            if (!BluetoothTransport.isSupported(applicationContext)) {
+                showMenuMessage("This device has no Bluetooth.")
+                return
+            }
+            if (!BluetoothTransport.hasPermissions(applicationContext)) {
+                afterBluetoothReady = { requireBluetooth(action) }
+                bluetoothPermissionLauncher.launch(BluetoothTransport.requiredPermissions())
+                return
+            }
+            // Switched off is the one fixable case, so it is offered as a fix
+            // rather than reported as a fault.
+            if (BluetoothTransport.isOff(applicationContext)) {
+                afterBluetoothReady = action
+                try {
+                    startActivityForResult(BluetoothTransport.enableIntent(), REQUEST_ENABLE_BLUETOOTH)
+                } catch (e: android.content.ActivityNotFoundException) {
+                    afterBluetoothReady = null
+                    showMenuMessage("Bluetooth needs to be switched on first.")
+                }
+                return
+            }
+            val reason = BluetoothTransport.unavailableReason(applicationContext)
+            if (reason != null) {
+                showMenuMessage("Can't use Bluetooth: $reason.")
+                return
+            }
+            action()
+        }
+
+        private fun startBluetoothHostFlow() = requireBluetooth {
+            openSetup("Host over Bluetooth", overBluetooth = true, forOthers = true)
+        }
+
+        /**
+         * The address to put on the HUD's one line: the port is left off when it
+         * is the default, because a joiner typing a bare address now gets 27270
+         * anyway (see promptManualAddress). That is what buys the line enough
+         * room for a long local address without clipping - "Host
+         * 192.168.232.2:27270" is thirty characters and the column has about
+         * twenty-two, sharing its row with four icon buttons.
+         */
+        private fun shownAddress(ip: String, port: Int): String =
+            if (port == DEFAULT_SERVER_PORT) ip else "$ip:$port"
+
+        /**
+         * Asks for Wi-Fi Direct's discovery permission the first time the player
+         * goes looking for a multiplayer game, and never again in this session -
+         * see [nearbyPermissionLauncher]. Silent on hardware that cannot do
+         * Wi-Fi Direct at all, and on a device where it has already been granted.
+         */
+        override fun onEnterMultiplayer() {
+            if (askedForNearbyPermission) return
+            askedForNearbyPermission = true
+            if (!WifiDirectTransport.isSupported(applicationContext)) return
+            if (WifiDirectTransport.hasPermissions(applicationContext)) return
+            nearbyPermissionLauncher.launch(WifiDirectTransport.requiredPermissions())
+        }
+
+        /**
+         * Stops telling other devices about a game that has ended, and drops any
+         * Wi-Fi Direct group this device is in.
+         *
+         * Both halves matter for different reasons. The NSD registration going
+         * stale is a nuisance - peers keep seeing a game whose socket
+         * stopGame() has already closed - but a Wi-Fi Direct group left up is a
+         * real cost: it holds the radio in a group and can keep the device off
+         * its normal Wi-Fi, long after the game it existed for is over.
+         */
+        override fun stopNetworkAdvertising() {
+            LanDiscovery.stopRegistration()
+            LanDiscovery.stopDiscovery()
+            stopWifiDirect()
+            // The sockets themselves belong to NetBridge and go with stopGame();
+            // this is the scan, which holds the radio and would otherwise keep
+            // running after the dialog that started it went away.
+            BluetoothTransport.stopDiscovery(applicationContext)
+            hostOverBluetooth = false
+            hostForOthers = false
+            bluetoothVisibilityAsked = false
+        }
+
+        private fun stopWifiDirect() {
+            if (!WifiDirectTransport.isSupported(applicationContext)) return
+            WifiDirectTransport.stopDiscovery()
+            WifiDirectTransport.stopAdvertising(applicationContext)
+            WifiDirectTransport.disconnect(applicationContext)
+        }
+
+        // Blocks (suspends) until the user picks a discovered game or types a
+        // host:port manually, or cancels (null). A thin wrapper around
+        // showFindGames's dialog plus a manual-entry option, since a PC host or
+        // an NSD-blocked network has nothing to discover.
+        //
+        // Answers with the whole FoundGame rather than a host/port pair: a Wi-Fi
+        // Direct result has no address yet, and turning it into one is a
+        // seconds-long negotiation the caller has to be able to narrate and
+        // cancel - see startJoinFlow.
+        @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+        private suspend fun pickJoinTarget(overBluetooth: Boolean = false): LanDiscovery.FoundGame? =
+            kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+                showFindGames(
+                    overBluetooth = overBluetooth,
+                    onSelected = { game -> if (cont.isActive) cont.resume(game) {} },
+                    onCancelled = { if (cont.isActive) cont.resume(null) {} },
+                )
+            }
+
+        // M6: the battlefield surface is now camera control, not fire input -
+        // one-finger drag orbits (yaw/pitch), pinch zooms (see
+        // renderer_jni.cpp's file-level comment for why: firing is reliably
+        // handled by the angle/elevation/power sliders + Fire button in
+        // GameHud.kt, which don't depend on screen-to-world mapping, whereas a
+        // screen tap/drag no longer has an unambiguous landscape meaning under
+        // a real perspective camera without ray-casting against the terrain
+        // mesh - not done in this slice). The old M2-era tap-to-fire
+        // (NativeBridge.handleTap) and drag-slingshot fire are retired from
+        // this surface as a result. That path has since been *replaced* rather
+        // than merely retired - tap-to-aim now goes through the terrain
+        // ray-cast (nativePickTerrain + aimAtPoint), so the old normalised-space
+        // handleTap has been deleted rather than left lying around unused.
+        //
+        // ScaleGestureDetector owns pinch-zoom; a plain last-position diff
+        // drives orbit drag, suppressed while a scale gesture is in progress
+        // (or just ended) so a two-finger pinch doesn't also register as a
+        // one-finger drag on whichever pointer stayed down.
+        @SuppressLint("ClickableViewAccessibility")
+        private fun setUpCameraControls(surface: GLSurfaceView) {
+            // Anything under this much movement is a tap, not a drag. Taken from
+            // the platform's own scaled touch slop so it matches every other
+            // Android app on this screen density rather than a guessed pixel
+            // count.
+            val tapSlopPx = android.view.ViewConfiguration.get(this@MainActivity).scaledTouchSlop.toFloat()
+
+            var lastX = 0f
+            var lastY = 0f
+            var dragging = false
+            // Centroid of all pointers, for the two-finger pan. Tracked here
+            // rather than taken from ScaleGestureDetector.focusX/focusY because
+            // those only update while the *span* is changing - two fingers
+            // sliding together at a fixed distance is exactly a pan with no
+            // pinch, and the detector reports nothing for it.
+            var lastFocusX = 0f
+            var lastFocusY = 0f
+            var panning = false
+            // Where and when the gesture started, so a release can be told
+            // apart from the end of a drag. A tap aims (upstream's AUTO_AIM);
+            // a drag orbits. Without the movement test every orbit would also
+            // fling the turret somewhere on release.
+            var downX = 0f
+            var downY = 0f
+            // How far the finger has actually travelled, added up over the whole
+            // gesture rather than measured from where it started. A drag that
+            // curves away and comes back finishes near its own start, so net
+            // displacement cannot tell it from a tap; the distance walked can.
+            var pathLength = 0f
+            var multiTouched = false
+
+            fun focusOf(event: MotionEvent): Pair<Float, Float> {
+                var sumX = 0f
+                var sumY = 0f
+                for (i in 0 until event.pointerCount) {
+                    sumX += event.getX(i)
+                    sumY += event.getY(i)
+                }
+                return Pair(sumX / event.pointerCount, sumY / event.pointerCount)
+            }
+
+            val scaleDetector = android.view.ScaleGestureDetector(
+                this@MainActivity,
+                object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                    override fun onScale(detector: android.view.ScaleGestureDetector): Boolean {
+                        GameRenderer.nativeCameraZoom(detector.scaleFactor)
+                        return true
+                    }
+                },
+            )
+
+            // A long press over a tank's plate opens that tank's card. Only over
+            // a plate: everywhere else a press is a press however long it is
+            // held, which is the rule the battlefield tap has kept since
+            // 02f5f9d - and over a plate a *tap* still aims at the tank, so the
+            // card costs the hold rather than the shot.
+            var plateHeld = false
+            val plateLongPress = Runnable {
+                plateHeld = true
+                val tankId = GameRenderer.nativePickTankPlate(downX, downY)
+                if (tankId != 0) showTankInfo(tankId)
+            }
+
+            surface.setOnTouchListener { _, event ->
+                scaleDetector.onTouchEvent(event)
+
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        lastX = event.x
+                        lastY = event.y
+                        dragging = true
+                        downX = event.x
+                        downY = event.y
+                        pathLength = 0f
+                        multiTouched = false
+                        plateHeld = false
+                        // Armed only where there is a plate to open, so a press
+                        // anywhere else carries no hidden timer at all.
+                        if (settings.showTankInfo &&
+                            GameRenderer.nativePickTankPlate(event.x, event.y) != 0
+                        ) {
+                            surface.postDelayed(
+                                plateLongPress,
+                                android.view.ViewConfiguration.getLongPressTimeout().toLong(),
+                            )
+                        }
+                    }
+                    MotionEvent.ACTION_POINTER_DOWN -> {
+                        // A second finger rules the gesture out as a tap.
+                        multiTouched = true
+                        surface.removeCallbacks(plateLongPress)
+                        // A second finger just went down - this is a pinch/pan,
+                        // not a one-finger orbit; stop treating pointer 0's
+                        // movement as one and start tracking the centroid.
+                        dragging = false
+                        val (fx, fy) = focusOf(event)
+                        lastFocusX = fx
+                        lastFocusY = fy
+                        panning = true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (dragging && event.pointerCount == 1 && !scaleDetector.isInProgress) {
+                            val dx = event.x - lastX
+                            // M11: upstream's InvertMouse, for the one axis where
+                            // people genuinely disagree - dragging down to look up
+                            // is the flight-sim convention and feels wrong to
+                            // everyone else, and vice versa.
+                            val dy = (event.y - lastY) * (if (settings.invertDrag) -1f else 1f)
+                            GameRenderer.nativeCameraDrag(dx, dy)
+                        }
+                        if (panning && event.pointerCount >= 2) {
+                            // Pan and pinch run together rather than one winning:
+                            // they read different things from the same two
+                            // fingers (centroid movement vs. span change), so
+                            // moving and zooming at once behaves the way it does
+                            // in any map app.
+                            val (fx, fy) = focusOf(event)
+                            GameRenderer.nativeCameraPan(fx - lastFocusX, fy - lastFocusY)
+                            lastFocusX = fx
+                            lastFocusY = fy
+                        }
+                        pathLength += kotlin.math.hypot(event.x - lastX, event.y - lastY)
+                        lastX = event.x
+                        lastY = event.y
+                        // A finger that has travelled is orbiting the camera, not
+                        // holding a plate.
+                        if (pathLength > tapSlopPx) surface.removeCallbacks(plateLongPress)
+                    }
+                    MotionEvent.ACTION_POINTER_UP -> {
+                        // One finger lifted out of a multi-touch gesture - resume
+                        // dragging from whichever pointer remains, next MOVE.
+                        dragging = false
+                        // Below two fingers there is no pan; re-seed the centroid
+                        // on the next POINTER_DOWN rather than letting it jump
+                        // from a two-finger centroid to a one-finger position.
+                        if (event.pointerCount - 1 < 2) panning = false
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        surface.removeCallbacks(plateLongPress)
+                        // A press that never went anywhere is a tap, however long
+                        // it was held. There used to be a 250ms ceiling on it as
+                        // well, and it was quietly throwing away deliberate taps:
+                        // anyone lining a shot up rather than stabbing at the
+                        // screen holds the screen for longer than that, and the
+                        // tap simply did nothing. Nothing needed the limit -
+                        // there is no long press on the battlefield for it to
+                        // protect, and the distance walked already separates a
+                        // tap from an orbit.
+                        // plateHeld: the card is already open, and the press
+                        // that opened it is not also a shot.
+                        if (!multiTouched && !plateHeld && pathLength <= tapSlopPx) {
+                            handleBattlefieldTap(event.x, event.y)
+                        }
+                        dragging = false
+                        panning = false
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        surface.removeCallbacks(plateLongPress)
+                        dragging = false
+                        panning = false
+                    }
+                }
+                true
+            }
+        }
+
+        // M5: shows "Hosting on <ip>:<port>" once startLocalGame() has bound a
+        // real listening socket (see NativeBridge.isHostingOnNetwork/
+        // engine_jni.cpp's startLocalGame), so another device has an address to
+        // connect to. Falls back to explaining why not, rather than silently
+        // doing nothing, if the port didn't bind.
+        override fun updateHostingLabel() {
+            // A solo game announces nothing and says nothing about announcing.
+            //
+            // This is the first thing checked because everything below it either
+            // publishes the game or reports on having published it: the NSD
+            // registration, the Wi-Fi Direct group, the address on the HUD, and
+            // the two toasts saying how those went. None of it has a reader in a
+            // single-player game, and one of them proved it - "No Wi-Fi Direct:
+            // the nearby devices permission was refused" greeted the player over
+            // the tutorial's first card, which is a fine thing to say to someone
+            // hosting and nonsense to say to someone learning to aim.
+            //
+            // Leaving the label empty rather than writing something solo-shaped
+            // into it: HudText is skipped when it is empty, so the status column
+            // loses the line instead of spending one on the player's own IP.
+            if (!hostForOthers) {
+                hudState.hostingLabel = ""
+                return
+            }
+            scope.launch {
+                val hosting = withContext(Dispatchers.Default) { NativeBridge.isHostingOnNetwork() }
+                val port = withContext(Dispatchers.Default) { NativeBridge.getServerPort() }
+
+                // A Bluetooth game has no address and no port to publish, and
+                // nothing to advertise over the network either - the other
+                // device finds this one by its Bluetooth name.
+                if (hostOverBluetooth) {
+                    // Asked of the adapter rather than assumed from the prompt
+                    // having been answered: being connectable and being
+                    // *findable* are different states, and only the second one
+                    // gets an unpaired player in. Claiming the second while in
+                    // the first is how a host can look fine to its own player
+                    // and be invisible to everyone else.
+                    val name = BluetoothTransport.localName(applicationContext)
+                    val visible = BluetoothTransport.isDiscoverable(applicationContext)
+                    hudState.hostingLabel = when {
+                        !hosting -> "Bluetooth hosting failed"
+                        visible -> "Bluetooth: $name"
+                        else -> "Bluetooth: $name (not visible)"
+                    }
+                    // The detail that used to ride along on that line. It is
+                    // worth saying once and not worth a permanent line of HUD:
+                    // the five minutes is Android's own cap and is already
+                    // running, and a host that is not findable at all is
+                    // something the player has to be told rather than left to
+                    // infer from nobody arriving.
+                    if (hosting) {
+                        notifyPlayer(
+                            if (visible) {
+                                "New devices can find this game for 5 minutes"
+                            } else {
+                                "Not visible, only paired devices can join"
+                            }
+                        )
+                    }
+                    return@launch
+                }
+
+                if (!hosting) {
+                    hudState.hostingLabel = "Solo only (port $port busy)"
+                    return@launch
+                }
+
+                // No address at all means no network is up, which "Hosting on
+                // unknown IP" managed to say without saying what to do about it.
+                // "Host" and the address, and nothing else. The status column
+                // shares its row with four icon buttons, so it has about
+                // twenty-five characters: "Hosting on 192.168.232.2:27270" is
+                // thirty and came out as "Hosting on 192.168.23...", which cut
+                // the one thing on the line worth reading out to someone.
+                //
+                // If a long address still clips, what goes is the port - and the
+                // port is now the part a joiner can leave out, since typing a
+                // bare address uses 27270.
+                val ip = getLocalIpAddress()
+                hudState.hostingLabel = if (ip != null) "Host ${shownAddress(ip, port)}" else "No network"
+                if (ip == null) {
+                    notifyPlayer("No network, turn on Wi-Fi or your hotspot so others can join")
+                }
+                LanDiscovery.registerService(applicationContext, port)
+
+                // Wi-Fi Direct is advertised alongside, not instead: the two
+                // reach different people. NSD finds anyone already on this
+                // network (including a PC); Wi-Fi Direct reaches someone sitting
+                // next to you with no network at all. Only claimed in the label
+                // once the group has actually formed - announcing a way to be
+                // reached that isn't up is worse than not offering it.
+                WifiDirectTransport.advertise(applicationContext, port) { advertising, why ->
+                    // One line, and the reason goes to a toast instead.
+                    //
+                    // A host that believes it is reachable over Wi-Fi Direct when
+                    // no group formed waits for peers that can never arrive, so
+                    // the reason still has to be said - the first two-device test
+                    // of this could not tell the two apart from the screen. But it
+                    // was five wrapped lines of HUD sitting over the battlefield
+                    // for the whole game, which is too high a price for something
+                    // a player reads once.
+                    hudState.hostingLabel = when {
+                        ip != null -> "Host ${shownAddress(ip, port)}"
+                        advertising -> "Host over Wi-Fi Direct"
+                        else -> hudState.hostingLabel
+                    }
+                    // Whether Wi-Fi Direct came up is said once rather than
+                    // carried on the line for the whole game - the line has
+                    // room for the address and that is what it is for.
+                    notifyPlayer(
+                        if (advertising) {
+                            "Wi-Fi Direct is on, nearby phones can find this game"
+                        } else {
+                            "No Wi-Fi Direct: ${why ?: "it did not start"}"
+                        }
+                    )
+                }
+            }
+        }
+
+        // M5 Phase 2: scans the LAN for other advertised ScorchDroid games (see
+        // LanDiscovery.kt) and lists what it finds. Tapping a result now calls
+        // [onSelected] with its host/port; there's also a manual "Enter
+        // address..." row for a PC host, or a network that drops NSD's
+        // multicast traffic. [onCancelled] fires if the user backs out without
+        // picking anything. Defaults let the main-screen "Find Games" button
+        // (used mid-game, purely to browse - see the button's own click
+        // handler) keep working as a no-op-on-selection browse dialog without
+        // having to pass callbacks it doesn't care about.
+        private fun showFindGames(
+            overBluetooth: Boolean = false,
+            onSelected: (LanDiscovery.FoundGame) -> Unit = {},
+            onCancelled: () -> Unit = {},
+        ) {
+            val found = mutableListOf<LanDiscovery.FoundGame>()
+            var resolved = false
+            // Both scans run at once and land in the same list. Each reports
+            // finishing separately, so the closing title waits for both rather
+            // than for whichever happened to be quicker.
+            // Not while this device is the one hosting a group: the HUD's "Find
+            // Games" button is reachable mid-game, and putting the radio into a
+            // peer scan there would disturb the very group the host is running
+            // the game on. A host has no reason to be looking anyway.
+            //
+            // Whichever reason keeps Wi-Fi Direct out of a search, the player is
+            // told it. Silently searching one radio while appearing to search
+            // both is how two devices sitting next to each other can each report
+            // finding nothing with nothing wrong with either of them.
+            //
+            // Bluetooth is a search of its own rather than a third row of this
+            // one. It cannot be narrowed to devices running the game - asking
+            // each one costs an SDP lookup that is slow and often answers
+            // nothing - so it lists every speaker, headset and car in range, and
+            // burying two phones in that was worse than having one more button.
+            val hostingHere = WifiDirectTransport.isAdvertising()
+            val wifiDirectProblem = when {
+                overBluetooth -> null  // Not part of this search at all.
+                hostingHere -> "this device is hosting"
+                else -> WifiDirectTransport.unavailableReason(applicationContext)
+            }
+            val wifiDirect = !overBluetooth && wifiDirectProblem == null
+            val bluetoothProblem = when {
+                !overBluetooth -> null
+                hostOverBluetooth -> "this device is hosting"
+                else -> BluetoothTransport.unavailableReason(applicationContext)
+            }
+            val bluetooth = overBluetooth && bluetoothProblem == null
+            val network = !overBluetooth
+            var scansRunning =
+                (if (network) 1 else 0) + (if (wifiDirect) 1 else 0) + (if (bluetooth) 1 else 0)
+            // A search with nothing to search still has to report itself
+            // finished - see the scanFinished() call at the end - rather than
+            // sitting on "Searching..." for as long as the player will stare
+            // at it.
+            if (scansRunning == 0) scansRunning = 1
+            // Devices the radio can see that answered no service query - see
+            // WifiDirectTransport.startDiscovery. Listed after the real results,
+            // and joinable anyway: service discovery over Wi-Fi Direct is the
+            // flakiest part of this path, and a player who can see the other
+            // phone's name should be able to try it.
+            val peersWithoutGames = mutableListOf<LanDiscovery.FoundGame>()
+
+            // Nothing to type in a Bluetooth search: an address there is a MAC
+            // nobody knows by heart, and there is no port at all.
+            fun manualEntryLabel() = if (overBluetooth) null else "Enter address manually..."
+            fun helpLabel() = "How do I connect?"
+
+            fun stopScans() {
+                if (network) LanDiscovery.stopDiscovery()
+                if (wifiDirect) WifiDirectTransport.stopDiscovery()
+                if (bluetooth) BluetoothTransport.stopDiscovery(applicationContext)
+            }
+
+            val listDialog = HudDialog.ListChoice(
+                title = when {
+                    overBluetooth -> "Searching for Bluetooth devices..."
+                    wifiDirect -> "Searching for games..."
+                    else -> "Searching for LAN games..."
+                },
+                items = listOf(manualEntryLabel(), helpLabel()).filterNotNull(),
+                cancelLabel = "Cancel",
+                onSelect = { index ->
+                    resolved = true
+                    stopScans()
+                    hudState.dialog = HudDialog.None
+                    val rows = found.size + peersWithoutGames.size
+                    val manualRow = if (overBluetooth) -1 else rows
+                    when (index) {
+                        in found.indices -> onSelected(found[index])
+                        in found.size until rows -> onSelected(peersWithoutGames[index - found.size])
+                        manualRow -> promptManualAddress(onSelected, onCancelled)
+                        else -> showConnectionHelp { showFindGames(overBluetooth, onSelected, onCancelled) }
+                    }
+                },
+                onCancel = {
+                    stopScans()
+                    hudState.dialog = HudDialog.None
+                    if (!resolved) onCancelled()
+                },
+            )
+            hudState.dialog = listDialog
+
+            fun refresh() {
+                // A Wi-Fi Direct peer has no address to show yet - there is no IP
+                // until a group forms - so it is labelled by how it was found
+                // instead, which is the part the player cares about anyway.
+                listDialog.items = found.map { game ->
+                    when {
+                        game.p2pDeviceAddress != null -> "${game.name} - Wi-Fi Direct"
+                        // Said plainly, because it is what decides whether the
+                        // next tap shows a pairing prompt on both devices.
+                        game.bluetoothAddress != null && game.bluetoothPaired -> "${game.name} - paired"
+                        game.bluetoothAddress != null -> "${game.name} - not paired yet"
+                        else -> "${game.name} - ${game.host}:${game.port}"
+                    }
+                } + peersWithoutGames.map { "${it.name} - nearby, no game seen (try anyway)" } +
+                    listOfNotNull(manualEntryLabel(), helpLabel())
+            }
+
+            fun add(game: LanDiscovery.FoundGame) {
+                val duplicate = found.any {
+                    when {
+                        game.p2pDeviceAddress != null -> it.p2pDeviceAddress == game.p2pDeviceAddress
+                        game.bluetoothAddress != null -> it.bluetoothAddress == game.bluetoothAddress
+                        else -> it.host == game.host && it.port == game.port
+                    }
+                }
+                if (duplicate) return
+                found.add(game)
+                // A device that answers properly should not also be offered as a
+                // guess.
+                peersWithoutGames.removeAll { it.p2pDeviceAddress == game.p2pDeviceAddress }
+                refresh()
+            }
+
+            // A device the radio can see that advertised no game. Offered last
+            // and labelled as the guess it is: it may be a phone hosting one
+            // whose service query went unanswered, or it may be a printer.
+            fun addPeer(name: String, deviceAddress: String) {
+                if (found.any { it.p2pDeviceAddress == deviceAddress }) return
+                if (peersWithoutGames.any { it.p2pDeviceAddress == deviceAddress }) return
+                peersWithoutGames.add(
+                    LanDiscovery.FoundGame(
+                        name = name,
+                        host = "",
+                        port = DEFAULT_SERVER_PORT,
+                        p2pDeviceAddress = deviceAddress,
+                    )
+                )
+                refresh()
+            }
+
+            fun scanFinished() {
+                if (scansRunning <= 0 || --scansRunning > 0) return
+                // Every radio that sat this one out says so, by name and with
+                // its reason. This line is the one a player actually reads, and
+                // "no games found" with half the search silently skipped is how
+                // a working pair of phones comes to look broken - which is
+                // exactly how the first Wi-Fi Direct test went.
+                val skipped = listOfNotNull(
+                    wifiDirectProblem?.let { "Wi-Fi Direct ($it)" },
+                    bluetoothProblem?.let { "Bluetooth ($it)" },
+                )
+                val outcome = when {
+                    found.isNotEmpty() && overBluetooth -> "${found.size} device(s) nearby"
+                    found.isNotEmpty() -> "Found ${found.size} game(s)"
+                    // Naming the thing that does work. A Bluetooth scan finds
+                    // only devices that are currently *discoverable*, which is a
+                    // five-minute state the host has to have granted; pairing
+                    // the two phones once, in Android's own settings, sidesteps
+                    // that permanently - a paired device is listed here from the
+                    // bonded list with no scan at all.
+                    overBluetooth ->
+                        "No Bluetooth devices found. Pair the two phones in Android " +
+                            "Settings and they'll show up here without searching"
+                    peersWithoutGames.isNotEmpty() ->
+                        "No games found (${peersWithoutGames.size} nearby device(s) aren't hosting)"
+                    else -> "No games found"
+                }
+                listDialog.title = if (skipped.isEmpty()) {
+                    outcome
+                } else {
+                    "$outcome\nNot searched: ${skipped.joinToString(", ")}"
+                }
+            }
+
+            if (network) {
+                LanDiscovery.startDiscovery(
+                    applicationContext,
+                    durationMs = 4000,
+                    onFound = { add(it) },
+                    onFinished = { scanFinished() },
+                )
+            }
+
+            if (bluetooth) {
+                // Paired devices come back immediately; the scan itself is the
+                // slow part and runs for as long as the Wi-Fi Direct one.
+                BluetoothTransport.startDiscovery(
+                    applicationContext,
+                    durationMs = 20000,
+                    onFound = { add(it) },
+                    onFinished = { scanFinished() },
+                )
+            }
+
+            if (wifiDirect) {
+                // Far longer than the NSD scan, and re-issued throughout (see
+                // WifiDirectTransport.startDiscovery): a Wi-Fi Direct service
+                // query has to get the radio scanning for peers before any of
+                // them can answer, and both devices have to be listening in the
+                // same round for an answer to arrive at all - where mDNS is one
+                // multicast onto a network that already exists. Twenty seconds
+                // is a long time to stare at a dialog, but results land in the
+                // list as they arrive rather than at the end.
+                WifiDirectTransport.startDiscovery(
+                    applicationContext,
+                    durationMs = 20000,
+                    onFound = { add(it) },
+                    onPeerSeen = { name, address -> addPeer(name, address) },
+                    onFinished = { scanFinished() },
+                )
+            }
+
+            // Every radio this search wanted is unavailable, so no scan will ever
+            // report in. Saying why is the whole of what is left to do.
+            if (!network && !wifiDirect && !bluetooth) scanFinished()
+        }
+
+        /**
+         * What to do when "Find Games" turns up nothing, which is the moment a
+         * player is most likely to conclude multiplayer is broken. All four
+         * routes work today and none of them is obvious from the outside -
+         * particularly the hotspot one, which needs no code at all and is the
+         * answer whenever there is no router in reach.
+         *
+         * [onDismiss] goes back to the search rather than out to the menu: a
+         * player who came here to find out how to connect still wants to.
+         */
+        private fun showConnectionHelp(onDismiss: () -> Unit) {
+            hudState.dialog = HudDialog.Message(
+                "Ways to play together:\n\n" +
+                    "Same Wi-Fi: put both devices on the same network. One taps " +
+                    "Host Game, the other taps Join Game.\n\n" +
+                    "Wi-Fi Direct: no router needed, both devices just need Wi-Fi " +
+                    "turned on. The host's game shows up in this list marked " +
+                    "\"Wi-Fi Direct\". It needs the nearby devices permission, which " +
+                    "is only asked for once. If you said no, you can turn it on in " +
+                    "Android Settings under Apps > ScorchDroid > Permissions.\n\n" +
+                    "Bluetooth: no Wi-Fi needed. The host picks \"Host over " +
+                    "Bluetooth\" and allows the visibility prompt, the other picks " +
+                    "\"Join over Bluetooth\". Pairing the two phones first makes it " +
+                    "quicker and more reliable.\n\n" +
+                    "Hotspot: turn on a hotspot on the host and connect the other " +
+                    "device to it, then Host and Join as usual.\n\n" +
+                    "By address: some guest and work networks block games from " +
+                    "finding each other. The host's screen shows its address, type " +
+                    "it in with \"Enter address manually\"."
+            ) {
+                hudState.dialog = HudDialog.None
+                onDismiss()
+            }
+        }
+
+        // M5 Phase 2: falls back to a typed "host:port" when nothing useful
+        // showed up via NSD - the only way to reach a PC host today, since
+        // desktop Scorched3D doesn't advertise itself via Android's NSD/mDNS.
+        private fun promptManualAddress(
+            onSelected: (LanDiscovery.FoundGame) -> Unit,
+            onCancelled: () -> Unit,
+        ) {
+            hudState.dialog = HudDialog.ManualAddress(
+                onConnect = { text ->
+                    val typed = text.trim()
+                    val host = typed.substringBefore(':').trim().takeIf { it.isNotEmpty() }
+                    // The port is optional, and anything unusable in its place is
+                    // treated as absent rather than as a reason to give up: an
+                    // address with no port used to close the dialog and return to
+                    // the menu having said nothing, which reads as the Connect
+                    // button being broken. Every Scorched3D host listens on
+                    // 27270 unless its config says otherwise, so that is the
+                    // right guess - and the status line names the port it dialled,
+                    // so a wrong guess explains itself.
+                    val port = typed.substringAfter(':', "").trim().toIntOrNull()
+                        ?.takeIf { it in 1..65535 }
+                        ?: DEFAULT_SERVER_PORT
+                    hudState.dialog = HudDialog.None
+                    if (host != null) {
+                        onSelected(LanDiscovery.FoundGame(name = host, host = host, port = port))
+                    } else {
+                        onCancelled()
+                    }
+                },
+                onCancel = {
+                    hudState.dialog = HudDialog.None
+                    onCancelled()
+                },
+            )
+        }
+
+        // Plain Android API - the actual LAN IP a peer would dial in to, not
+        // something the native engine (which just binds INADDR_ANY) knows.
+        //
+        // Ranked rather than "the first one found", which was arbitrary as soon
+        // as a device had more than one address up, and a device hosting a game
+        // usually does. Normal Wi-Fi first, since that is the address someone on
+        // the same network types in. Then the hotspot interface, so a host who
+        // turned their hotspot on to play (see the connection help) still shows
+        // an address that works - their normal Wi-Fi is often down at that
+        // point. Wi-Fi Direct's own interface last: peers reach a group owner
+        // through the group, never by typing 192.168.49.1 at it.
+        private fun getLocalIpAddress(): String? {
+            fun rank(interfaceName: String): Int = when {
+                interfaceName.startsWith("wlan") -> 0
+                interfaceName.startsWith("ap") ||
+                    interfaceName.startsWith("swlan") ||
+                    interfaceName.startsWith("rndis") -> 1
+                interfaceName.startsWith("p2p") -> 3
+                else -> 2
+            }
+
+            return try {
+                Collections.list(NetworkInterface.getNetworkInterfaces())
+                    .flatMap { nic -> Collections.list(nic.inetAddresses).map { nic.name to it } }
+                    .filter { (_, address) -> !address.isLoopbackAddress && address is Inet4Address }
+                    .minByOrNull { (name, _) -> rank(name) }
+                    ?.second?.hostAddress
+            } catch (e: Exception) {
+                null
+            }
+        }
+    }
+
+    private companion object {
         // Upstream's PortNo default, which every ScorchDroid host uses since
         // nothing in the port lets a player change it. Only ever a guess for
         // a Wi-Fi Direct peer that advertised no service record and so never
         // told us its port - a real result carries its own.
         const val DEFAULT_SERVER_PORT = 27270
 
-        // The amounts upstream's GiftMoneyDialog offers, in its own order.
-        // Not this port's numbers to pick: they are what a Scorched3D player
-        // sees in that dialog.
-        val GIFT_AMOUNTS = listOf(1000, 2500, 5000, 10000, 15000, 20000, 25000, 50000, 100000)
-
-        // How long Skip All Moves waits before passing a move, which is
-        // upstream's own five seconds (SkipAllDialog::simulate).
-        const val SKIP_ALL_SECONDS = 5
-
         // Bluetooth's "let other devices see this one" dialog, and the
         // system's own "turn Bluetooth on?" prompt.
         const val REQUEST_DISCOVERABLE = 4001
         const val REQUEST_ENABLE_BLUETOOTH = 4002
-
-
     }
 }

@@ -28,7 +28,7 @@ import java.io.File
  * front, which is right for a hundred short effects and wrong for a
  * multi-megabyte OGG.
  */
-object SoundPlayer {
+object SoundPlayer : SoundEffects {
     private const val TAG = "SoundPlayer"
 
     /**
@@ -40,14 +40,14 @@ object SoundPlayer {
     private const val CHANNELS = 8
 
     /** Upstream's `VirtualSoundPriority::eAction` - see SoundEventQueue.h. */
-    const val PRIORITY_ACTION = 10000
+    const val PRIORITY_ACTION = SoundEffects.PRIORITY_ACTION
 
     /**
      * Upstream's `VirtualSoundPriority::eMissile` - the hum a shell carries
      * while it flies. Below every action on purpose: a shell should be heard
      * under an explosion, not over it.
      */
-    const val PRIORITY_MISSILE = 200
+    const val PRIORITY_MISSILE = SoundEffects.PRIORITY_MISSILE
 
     private val attributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_GAME)
@@ -60,7 +60,7 @@ object SoundPlayer {
      * knowing about preferences.
      */
     @Volatile
-    var enabled: Boolean = true
+    override var enabled: Boolean = true
 
     /**
      * Upstream's "SoundVolume" - a master multiplier over each sound's own
@@ -69,7 +69,7 @@ object SoundPlayer {
      * is what the player asked for.
      */
     @Volatile
-    var masterVolume: Float = 1.0f
+    override var masterVolume: Float = 1.0f
 
     private var pool: SoundPool? = null
 
@@ -135,7 +135,7 @@ object SoundPlayer {
      * saying nothing at all. What makes that harmless upstream is precisely
      * that they are eText and yield to anything else.
      */
-    fun play(filePath: String, gain: Float = 1.0f, priority: Int = PRIORITY_ACTION, pan: Float = 0f) {
+    override fun play(filePath: String, gain: Float, priority: Int, pan: Float) {
         if (!enabled) return
         val file = File(filePath)
         if (!file.exists()) return
@@ -176,7 +176,7 @@ object SoundPlayer {
      * gesture that wanted it would be over. Without this the first turret
      * swing of every game is silent.
      */
-    fun preload(filePaths: List<String>) {
+    override fun preload(filePaths: List<String>) {
         if (!enabled) return
         val soundPool = poolOrCreate()
         synchronized(sampleIds) {
@@ -200,13 +200,13 @@ object SoundPlayer {
      * beat late is worse than not starting it. The one-shot that accompanies
      * it warms the cache anyway.
      */
-    fun startLoop(
+    override fun startLoop(
         key: String,
         filePath: String,
         gain: Float,
         priority: Int,
-        pan: Float = 0f,
-        rate: Float = 1f,
+        pan: Float,
+        rate: Float,
     ) {
         if (!enabled) return
         val soundPool = poolOrCreate()
@@ -229,7 +229,7 @@ object SoundPlayer {
         }
     }
 
-    fun stopLoop(key: String) {
+    override fun stopLoop(key: String) {
         synchronized(sampleIds) { stopLoopLocked(key) }
     }
 
@@ -238,7 +238,7 @@ object SoundPlayer {
      * (`TankKeyboardControlUtil::endPlayMove`) - a turret sound left running
      * because a gesture was interrupted would never stop on its own.
      */
-    fun stopAllLoops() {
+    override fun stopAllLoops() {
         synchronized(sampleIds) {
             loopStreams.keys.toList().forEach { stopLoopLocked(it) }
         }
@@ -287,7 +287,7 @@ object SoundPlayer {
      * frame. Does nothing for a key that is not playing, which is how a
      * caller can update without tracking what started.
      */
-    fun updateLoop(key: String, gain: Float, pan: Float, rate: Float = 1f) {
+    override fun updateLoop(key: String, gain: Float, pan: Float, rate: Float) {
         synchronized(sampleIds) {
             val stream = loopStreams[key] ?: return
             val (left, right) = stereo(gain, pan)
@@ -307,7 +307,7 @@ object SoundPlayer {
      * effects for sounds that will not be asked for again is pure resident
      * memory.
      */
-    fun release() {
+    override fun release() {
         synchronized(sampleIds) {
             pool?.release()
             pool = null

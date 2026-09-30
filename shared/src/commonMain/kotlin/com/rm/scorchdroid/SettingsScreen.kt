@@ -1,6 +1,5 @@
 package com.rm.scorchdroid
 
-import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -48,11 +47,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import java.io.File
 import kotlin.math.roundToInt
 
 private val SettingsTop = Color(0xFF16213A)
@@ -724,9 +721,7 @@ private fun AvatarTile(path: String, dataRoot: String, selected: Boolean, onClic
 @Composable
 fun rememberAvatarBitmap(dataRoot: String, path: String): ImageBitmap? = remember(path) {
     if (path.isEmpty()) return@remember null
-    runCatching {
-        BitmapFactory.decodeFile(File(dataRoot, path).path)?.asImageBitmap()
-    }.getOrNull()
+    loadImageFile("$dataRoot/$path")
 }
 
 @Composable

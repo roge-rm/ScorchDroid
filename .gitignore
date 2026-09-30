@@ -24,3 +24,7 @@ local.properties
 # web admin leaves behind. .env.example is the tracked template.
 /.env
 __pycache__/
+
+# The shared module and the browser app build here.
+/shared/build
+/web/app/build

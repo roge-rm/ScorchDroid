@@ -1,14 +1,16 @@
 package com.rm.scorchdroid
 
-object NativeBridge {
-    init {
-        System.loadLibrary("scorchdroid_engine")
-    }
-
-    external fun helloFromNative(): String
+/**
+ * The engine's calls, the same list on the phone and in the browser. On the
+ * phone each is a JNI function in engine_jni.cpp; in the browser it's that same
+ * function compiled to WebAssembly. Both halves are generated from this list by
+ * tools/gen_native_bridge.py, so a call is added here and nowhere else.
+ */
+expect object NativeBridge {
+    fun helloFromNative(): String
 
     /** Points the native engine's cwd/$HOME at the extracted data root (see AssetDataExtractor). */
-    external fun initEngine(dataRoot: String): Boolean
+    fun initEngine(dataRoot: String): Boolean
 
     /**
      * M2 vertical slice: boots a real local game via
@@ -22,20 +24,20 @@ object NativeBridge {
      * a LAN game, and [getServerPort] reports 0 because there is no port to
      * tell anyone.
      */
-    external fun startLocalGame(overBluetooth: Boolean): Boolean
+    fun startLocalGame(overBluetooth: Boolean): Boolean
 
     /** Advances the real game simulation by one step (see ServerSimulator). */
-    external fun tickEngine()
+    fun tickEngine()
 
     /** Debug-only: current ServerState + tank count. */
-    external fun getGameStateDebugString(): String
+    fun getGameStateDebugString(): String
 
     /**
      * M4: playerId of the local human-controlled tank added by
      * startLocalGame() (see addHumanTank() in engine_jni.cpp), or 0 if it
      * hasn't been added to the target container yet.
      */
-    external fun getMyTankId(): Int
+    fun getMyTankId(): Int
 
     /**
      * M4 drag-to-aim: directly submits a move for the given tank, exactly as
@@ -44,7 +46,7 @@ object NativeBridge {
      * aim gesture (see MainActivity.setUpCameraControls) once the player
      * releases.
      */
-    external fun fireWeapon(playerId: Int, angleDegrees: Float, elevationDegrees: Float, power: Float): Boolean
+    fun fireWeapon(playerId: Int, angleDegrees: Float, elevationDegrees: Float, power: Float): Boolean
 
     /**
      * M3: drains sound events queued by SoundAction::simulate() since the
@@ -52,10 +54,10 @@ object NativeBridge {
      * an already-extracted .ogg file, ready to hand to a MediaPlayer.
      */
     /** One "path|gain" row per sound that won a channel - see SoundEventQueue.h. */
-    external fun pollSoundEvents(): Array<String>
+    fun pollSoundEvents(): Array<String>
 
     /** M4 economy: "my tank"'s current money (see TankScore::getMoney), or -1 if not added yet. */
-    external fun getMyMoney(): Int
+    fun getMyMoney(): Int
 
     /**
      * M4 economy, M6 parity: the purchasable accessory list for "my tank",
@@ -65,13 +67,13 @@ object NativeBridge {
      * NativeBridge.parseWeaponShop. Covers all five upstream accessory types
      * now, not just weapons - see [AccessoryType].
      */
-    external fun getWeaponShop(): Array<String>
+    fun getWeaponShop(): Array<String>
 
     /** M4 economy: buys (buy=true) or sells (buy=false) one unit of an accessory for "my tank". */
-    external fun buyAccessory(accessoryId: Int, buy: Boolean): Boolean
+    fun buyAccessory(accessoryId: Int, buy: Boolean): Boolean
 
     /** M4 economy: selects an already-owned accessory as "my tank"'s current weapon. */
-    external fun selectWeapon(accessoryId: Int): Boolean
+    fun selectWeapon(accessoryId: Int): Boolean
 
     /**
      * M4 weapon HUD: "my tank"'s current weapon name plus its remaining
@@ -79,7 +81,7 @@ object NativeBridge {
      * if unlimited - or "" if not set/the tank hasn't been added yet. A
      * lighter-weight query than [getWeaponShop] for polling every tick.
      */
-    external fun getCurrentWeaponName(): String
+    fun getCurrentWeaponName(): String
 
     /**
      * M5: a plain-language status line for "what phase is this round in,
@@ -88,7 +90,7 @@ object NativeBridge {
      * answers "can I fire" rather than "whose turn is it". "" if this
      * process has no tank of its own yet.
      */
-    external fun getMyStatusLabel(): String
+    fun getMyStatusLabel(): String
 
     /**
      * M5: whether startLocalGame() successfully bound a real listening
@@ -96,10 +98,10 @@ object NativeBridge {
      * this device is only playable solo (e.g. the port was already in use),
      * not joinable over the network.
      */
-    external fun isHostingOnNetwork(): Boolean
+    fun isHostingOnNetwork(): Boolean
 
     /** M5: the port passed to NetInterface::start() - see isHostingOnNetwork. */
-    external fun getServerPort(): Int
+    fun getServerPort(): Int
 
     /**
      * M5 Phase 2: starts joining a game hosted elsewhere on the LAN instead
@@ -108,7 +110,7 @@ object NativeBridge {
      * opens the socket and starts the handshake; poll [getClientJoinState]
      * to see how it's progressing.
      */
-    external fun startJoinGame(host: String, port: Int): Boolean
+    fun startJoinGame(host: String, port: Int): Boolean
 
     /**
      * The same join over Bluetooth RFCOMM, where [address] is a Bluetooth
@@ -116,7 +118,7 @@ object NativeBridge {
      * [getClientJoinState] exactly as for [startJoinGame] - everything after
      * the connect is the same engine code.
      */
-    external fun startJoinGameBluetooth(address: String): Boolean
+    fun startJoinGameBluetooth(address: String): Boolean
 
     /**
      * M5 Phase 2: the joining client's handshake progress - one of
@@ -125,10 +127,10 @@ object NativeBridge {
      * 4=waitingLoadLevel, 5=joined, 6=failed), or -1 if this process isn't
      * in client mode at all.
      */
-    external fun getClientJoinState(): Int
+    fun getClientJoinState(): Int
 
     /** M5 Phase 2: why the join failed - only meaningful once [getClientJoinState] reports failed (6). */
-    external fun getClientFailureReason(): String
+    fun getClientFailureReason(): String
 
     /**
      * M6 parity: activates a defence accessory for "my tank" - see
@@ -137,7 +139,7 @@ object NativeBridge {
      * Returns whether the request was queued/sent; the engine re-validates
      * it when simulated, so an impossible request is a silent no-op.
      */
-    external fun useDefense(accessoryId: Int, change: Int): Boolean
+    fun useDefense(accessoryId: Int, change: Int): Boolean
 
     /**
      * Resume a saved game. Like [startLocalGame] this device becomes the
@@ -145,16 +147,16 @@ object NativeBridge {
      * the file. [overBluetooth] picks the transport it comes back on, which
      * the save says nothing about. Mutually exclusive with the other starts.
      */
-    external fun startLoadedGame(name: String, overBluetooth: Boolean): Boolean
+    fun startLoadedGame(name: String, overBluetooth: Boolean): Boolean
 
     /** Throw a saved game away. The name comes from [listSavedGames]. */
-    external fun deleteSavedGame(name: String): Boolean
+    fun deleteSavedGame(name: String): Boolean
 
     /**
      * The saved games on this device, newest first:
      * `"name|epochSeconds|bytes"`. See [parseSavedGames].
      */
-    external fun listSavedGames(): Array<String>
+    fun listSavedGames(): Array<String>
 
     /**
      * Write the game out, answering with the file name it went to, or "" if
@@ -162,7 +164,7 @@ object NativeBridge {
      * the server's own state - and only while it is playing or scoring,
      * which are upstream's own conditions.
      */
-    external fun saveGame(): String
+    fun saveGame(): String
 
     /**
      * One tank's card, as upstream's tooltip shows it when the mouse rests
@@ -170,7 +172,7 @@ object NativeBridge {
      * score|skill|startSkill|rank"`, or "" if there is no such tank. See
      * [parseTankInfo].
      */
-    external fun getTankInfo(playerId: Int): String
+    fun getTankInfo(playerId: Int): String
 
     /**
      * Who this player may give money to, one row each:
@@ -178,34 +180,34 @@ object NativeBridge {
      * outside the buying phase, or with nobody eligible - so the Shop can ask
      * once and get both the answer and the list. See [parseGiftTargets].
      */
-    external fun getGiftTargets(): Array<String>
+    fun getGiftTargets(): Array<String>
 
     /**
      * Hand [amount] to another player. Upstream's own rules decide whether it
      * lands (TankGiftSimAction), so a true here means the action was sent, not
      * that the money moved.
      */
-    external fun giftMoney(toPlayerId: Int, amount: Int): Boolean
+    fun giftMoney(toPlayerId: Int, amount: Int): Boolean
 
     /**
      * M6 parity: "my tank"'s currently-active defences as
      * "shieldName|parachuteName", either side empty if none is up.
      */
-    external fun getActiveDefenses(): String
+    fun getActiveDefenses(): String
 
     /**
      * M6 parity: current wind as "speed|angleDegrees", or "" if there's no
      * running game yet. Wind really does perturb shots (see TankLib's
      * windoffsetFB), so the HUD shows it - upstream has a wind dialog too.
      */
-    external fun getWindInfo(): String
+    fun getWindInfo(): String
 
     /**
      * M6 parity: submits a non-shot player move - see [MoveType]. Before
      * this, only shots could be submitted, so a player could neither skip,
      * resign, nor finish buying early; they had to wait out the timers.
      */
-    external fun submitMove(moveType: Int): Boolean
+    fun submitMove(moveType: Int): Boolean
 
     /**
      * M6 HUD: the move id the server has granted "my tank", or 0 if none is
@@ -218,9 +220,9 @@ object NativeBridge {
      * returns the resulting angle in degrees, or -1 if there is no tank to
      * aim. The angle uses upstream's own autoAim arithmetic.
      */
-    external fun aimAtPoint(landscapeX: Float, landscapeY: Float): Float
+    fun aimAtPoint(landscapeX: Float, landscapeY: Float): Float
 
-    external fun getMyMoveId(): Int
+    fun getMyMoveId(): Int
 
     /**
      * M6 HUD: seconds left in the current timed phase (buying, or the shot
@@ -228,7 +230,7 @@ object NativeBridge {
      * joined as a client (the host owns the clock and doesn't send it), or
      * a phase that ends on an event rather than a deadline.
      */
-    external fun getPhaseSecondsRemaining(): Int
+    fun getPhaseSecondsRemaining(): Int
 
     /**
      * M6: "my tank"'s current aim as
@@ -237,7 +239,7 @@ object NativeBridge {
      * player-facing compass dial is its mirror (see
      * MainActivity.dialAngleFromEngine).
      */
-    external fun getMyAim(): String
+    fun getMyAim(): String
 
     /**
      * M6 tank movement: the current weapon's position-select mode as
@@ -248,7 +250,7 @@ object NativeBridge {
      * (which move the tank) and Teleport work this way. [type] is
      * upstream's own name: fuel, fuellimit, limit or generic.
      */
-    external fun getPositionSelect(): String
+    fun getPositionSelect(): String
 
     /**
      * M6 tank movement: uses the current position-select weapon on a
@@ -256,7 +258,7 @@ object NativeBridge {
      * if that point is out of reach, so the HUD can say so instead of
      * leaving the tap looking ignored.
      */
-    external fun firePositionSelect(landscapeX: Float, landscapeY: Float): Boolean
+    fun firePositionSelect(landscapeX: Float, landscapeY: Float): Boolean
 
     /**
      * M6: applies the aiming sliders to "my tank"'s real turret state, so
@@ -265,17 +267,17 @@ object NativeBridge {
      * bearing, not the player dial - convert with
      * MainActivity.engineAngleFromDial first; [power] is 0..1.
      */
-    external fun setAim(angleDegrees: Float, elevationDegrees: Float, power: Float): Boolean
+    fun setAim(angleDegrees: Float, elevationDegrees: Float, power: Float): Boolean
 
     /**
      * M6 parity: the score / player list (upstream's SHOW_SCORE_DIALOG), one
      * pipe-delimited row per player, sorted by score descending. See
      * [parsePlayerList].
      */
-    external fun getPlayerList(): Array<String>
+    fun getPlayerList(): Array<String>
 
     /** "round|totalRounds|turn|totalTurns", the score dialog's own heading. */
-    external fun getRoundInfo(): String
+    fun getRoundInfo(): String
 
     /**
      * The mini-map's fixed facts:
@@ -285,14 +287,14 @@ object NativeBridge {
      * landscape and upstream's plan view crops to the arena. See
      * [parseMiniMapInfo].
      */
-    external fun getMiniMapInfo(): String
+    fun getMiniMapInfo(): String
 
     /**
      * One row per tank the mini-map should draw, "x|y|r,g,b|flash|isMe".
      * Dead tanks and spectators are absent rather than listed, as upstream's
      * plan view has them. See [parseMiniMapTanks].
      */
-    external fun getMiniMapTanks(): Array<String>
+    fun getMiniMapTanks(): Array<String>
 
     /**
      * Sends one drawn line as upstream's `ComsLinesMessage` - two points and
@@ -301,7 +303,7 @@ object NativeBridge {
      * [landscapeToPlanFraction], which is the only thing that should build
      * them. False if there is no tank yet, or nothing to send to.
      */
-    external fun sendMapLine(ax: Float, ay: Float, bx: Float, by: Float): Boolean
+    fun sendMapLine(ax: Float, ay: Float, bx: Float, by: Float): Boolean
 
     /**
      * Lines *other* players have drawn, newer than [afterId], as
@@ -309,10 +311,10 @@ object NativeBridge {
      * come back through here - they are shown the moment they are finished,
      * and the host's relay never echoes to the sender.
      */
-    external fun getMapLines(afterId: Int): Array<String>
+    fun getMapLines(afterId: Int): Array<String>
 
     /** Bumped on every arriving line, so the HUD can poll one integer. */
-    external fun getMapLinesVersion(): Int
+    fun getMapLinesVersion(): Int
 
     /**
      * Whether the engine has the end-of-round scoreboard up: 0 no, 1 the
@@ -320,14 +322,14 @@ object NativeBridge {
      * itself at the end of every round and holds play there while it shows
      * (RoundScoreTime / ScoreTime); see patch 0017.
      */
-    external fun getScoreboardState(): Int
+    fun getScoreboardState(): Int
 
     /**
      * M9: ends the current game and returns the engine to the state
      * [startLocalGame] and [startJoinGame] will accept. Idempotent, so the
      * menu can call it without tracking whether a game is running.
      */
-    external fun stopGame()
+    fun stopGame()
 
     /**
      * M10: the options the game setup screen offers, as rows of
@@ -335,17 +337,17 @@ object NativeBridge {
      * [parseSetupOptions]. These are upstream's own OptionsGame entries, with
      * upstream's own ranges and descriptions; nothing here invents a rule.
      */
-    external fun getSetupOptions(): Array<String>
+    fun getSetupOptions(): Array<String>
 
     /**
      * Chooses a value for one of them. False when the option isn't offered, or
      * when upstream's own validation rejects the value (out of range, or not
      * one of an enum's choices) - which the UI should report rather than retry.
      */
-    external fun setSetupOption(name: String, value: String): Boolean
+    fun setSetupOption(name: String, value: String): Boolean
 
     /** Back to the values the shipped config file specifies. */
-    external fun resetSetupOptions()
+    fun resetSetupOptions()
 
     /**
      * The mods that can be chosen: "none" (upstream's base game) first, then
@@ -358,20 +360,20 @@ object NativeBridge {
      * the name actually in force - the engine refuses an empty one and keeps
      * the previous name, so the caller should store what comes back.
      */
-    external fun setPlayerName(name: String): String
+    fun setPlayerName(name: String): String
 
     /**
      * M11: renderer options that cost frame rate. Applied on the next frame;
      * no game restart needed.
      */
-    external fun setRenderOptions(showTrees: Boolean, showFog: Boolean)
+    fun setRenderOptions(showTrees: Boolean, showFog: Boolean)
 
     /**
      * M22: which aim sight to draw - 0 for this port's own blade, 1 for
      * Scorched3D's own arrangement (a protractor ring under the tank, a
      * bearing marker on the ground, a blade along the barrel).
      */
-    external fun setSightStyle(style: Int)
+    fun setSightStyle(style: Int)
 
     /**
      * V9: whether to draw upstream's arrow over a tank
@@ -383,68 +385,68 @@ object NativeBridge {
      * A6: upstream's NoCountDownSound and NoChannelTextSound - the two sounds
      * it lets you silence on their own. Both default on, as upstream's do.
      */
-    external fun setCountdownSound(on: Boolean)
+    fun setCountdownSound(on: Boolean)
 
-    external fun setChatSound(on: Boolean)
+    fun setChatSound(on: Boolean)
 
     /**
      * The cue when a move of yours is granted (`misc/play.wav`). Upstream has
      * no switch for this one - it is the port's, because that sound plays
      * every round and some people will want it gone without going quiet.
      */
-    external fun setTurnSound(on: Boolean)
+    fun setTurnSound(on: Boolean)
 
     /**
      * Whether a tank wears its name and its health bar. They reach the
      * renderer rather than the HUD now that it draws the plates itself.
      */
-    external fun setShowNamePlates(show: Boolean)
+    fun setShowNamePlates(show: Boolean)
 
-    external fun setShowHealthBars(show: Boolean)
+    fun setShowHealthBars(show: Boolean)
 
-    external fun setShowTankArrows(show: Boolean)
+    fun setShowTankArrows(show: Boolean)
 
     /**
      * M23: how finely the landscape is drawn, as the resolution of the mesh
      * grid. The default is the heightmap's own, which is what upstream draws;
      * lower is cheaper. Takes effect on the next landscape.
      */
-    external fun setTerrainDetail(grid: Int)
+    fun setTerrainDetail(grid: Int)
 
     /**
      * Water detail: 2 Full (upstream's 2-unit grid, 24 wave phases a
      * second), 1 Half, 0 Quarter.
      */
-    external fun setWaterDetail(level: Int)
+    fun setWaterDetail(level: Int)
 
     /** 0 low, 1 normal, 2 high - upstream's own effects detail levels. */
-    external fun setEffectsDetail(level: Int)
+    fun setEffectsDetail(level: Int)
 
     /** 0 off, 1 for a 1024 shadow map, 2 for upstream's own 2048. */
-    external fun setShadowDetail(level: Int)
+    fun setShadowDetail(level: Int)
 
     /**
      * W3: how much the water reflects - 0 for the sky's own colours, 1 for
      * the sky and the land, 2 for the tanks and scenery as well. Above 0 the
      * scene is drawn a second time from a mirrored camera.
      */
-    external fun setReflectionStyle(style: Int)
+    fun setReflectionStyle(style: Int)
 
     /** M23: the range [setTerrainDetail] accepts, as "min|max". */
-    external fun getTerrainDetailRange(): String
+    fun getTerrainDetailRange(): String
 
     /**
      * M16: the tank models the selected mod offers, by name, from its own
      * tanks.xml. Does not include upstream's "Random" entry - that is the
      * empty choice, not a model.
      */
-    external fun getTankModels(): Array<String>
+    fun getTankModels(): Array<String>
 
     /** M16: upstream's own tank palette, 0xRRGGBB each, in its own order. */
-    external fun getTankColors(): IntArray
+    fun getTankColors(): IntArray
 
     /** M16: the avatars upstream ships, as paths relative to the data root. */
-    external fun getAvatars(): Array<String>
+    fun getAvatars(): Array<String>
 
     /**
      * M16: the tank this player wears. An empty model name, a negative colour
@@ -452,7 +454,7 @@ object NativeBridge {
      * what it did before there was a choice. Applied when a game starts, so
      * changing it mid-game affects the next one.
      */
-    external fun setPlayerIdentity(model: String, colorIndex: Int, avatar: String)
+    fun setPlayerIdentity(model: String, colorIndex: Int, avatar: String)
 
     /**
      * M12: replaces the setup options with those in a preset file - upstream's
@@ -460,62 +462,62 @@ object NativeBridge {
      * [getPresets] lists. False if the file could not be read, in which case
      * nothing changed.
      */
-    external fun loadSetupPreset(path: String): Boolean
+    fun loadSetupPreset(path: String): Boolean
 
     /**
      * M14: the ready-made games the installed mods offer, as rows for
      * [parsePresets]. Read from each mod's own modinfo.xml, so this is
      * upstream's difficulty menu rather than a copy of it.
      */
-    external fun getPresets(): Array<String>
+    fun getPresets(): Array<String>
 
     /**
      * M18: the bots the chosen mod offers, as "name|description" rows.
      * Upstream has no difficulty dial - which AI fills the slots *is* the
      * difficulty, and its own descriptions say how good each one is.
      */
-    external fun getBots(): Array<String>
+    fun getBots(): Array<String>
 
     /** M18: which AI fills the slots that are not the player's. */
-    external fun getBotType(): String
+    fun getBotType(): String
 
-    external fun setBotType(name: String): Boolean
+    fun setBotType(name: String): Boolean
 
     /**
      * M19: the mix. The slots are filled round-robin from this list, so the
      * proportions asked for are the proportions played. Never empty - a game
      * needs someone to play against.
      */
-    external fun getBotTypes(): Array<String>
+    fun getBotTypes(): Array<String>
 
-    external fun setBotTypes(names: Array<String>): Boolean
+    fun setBotTypes(names: Array<String>): Boolean
 
     /**
      * M21: the ambient sounds the current landscape asks for, as
      * "file|gain|looped|min|max" rows. Reads two small XML files, so poll
      * [getLandscapeTex] and only call this when the landscape has changed.
      */
-    external fun getAmbientSounds(): Array<String>
+    fun getAmbientSounds(): Array<String>
 
     /** M21: which landscape is loaded, as its texture definition's path. */
-    external fun getLandscapeTex(): String
+    fun getLandscapeTex(): String
 
     /** M19: every landscape the chosen mod defines, by name. */
-    external fun getLandscapes(): Array<String>
+    fun getLandscapes(): Array<String>
 
     /**
      * M19: the ones a game may choose between. Empty is upstream's own "all
      * of them" (LandscapeDefinitionsBase::landscapeEnabled), not "none".
      */
-    external fun getSelectedLandscapes(): Array<String>
+    fun getSelectedLandscapes(): Array<String>
 
-    external fun setLandscapes(names: Array<String>): Boolean
+    fun setLandscapes(names: Array<String>): Boolean
 
-    external fun getAvailableMods(): Array<String>
+    fun getAvailableMods(): Array<String>
 
-    external fun getSelectedMod(): String
+    fun getSelectedMod(): String
 
-    external fun setSelectedMod(name: String): Boolean
+    fun setSelectedMod(name: String): Boolean
 
     /**
      * Sends a chat message on a channel ("general" or "team"). Hosting, this
@@ -523,16 +525,16 @@ object NativeBridge {
      * ComsChannelTextMessage to the host. False if there is no tank to speak
      * as yet, or (joined) the handshake has not finished.
      */
-    external fun sendChat(channel: String, text: String): Boolean
+    fun sendChat(channel: String, text: String): Boolean
 
     /**
      * Chat lines newer than [afterId], oldest first, as "id|channel|who|text".
      * Text is last so it may contain pipes. See [parseChatLines].
      */
-    external fun getChatLines(afterId: Int): Array<String>
+    fun getChatLines(afterId: Int): Array<String>
 
     /** Bumped on every new chat line, so the HUD can poll one int. */
-    external fun getChatVersion(): Int
+    fun getChatVersion(): Int
 
     /**
      * M6 parity: simulation speed (upstream's SIMULATION_SPEED_* keys).
@@ -540,10 +542,10 @@ object NativeBridge {
      * fixed-point and 1/8 has an exact representation there. Host only -
      * a joined client follows the host's pace (see the native comment).
      */
-    external fun setSimulationSpeed(numerator: Int, denominator: Int): Boolean
+    fun setSimulationSpeed(numerator: Int, denominator: Int): Boolean
 
     /** The current speed as "numerator|denominator". */
-    external fun getSimulationSpeed(): String
+    fun getSimulationSpeed(): String
 
     /**
      * Whether this device owns the game state, and so has authority over the
@@ -556,16 +558,16 @@ object NativeBridge {
      * mod, and with the live attenuation from the camera to your own tank.
      * See engine_jni.cpp; parsed by [AimSounds.parse].
      */
-    external fun getAimSounds(): String
+    fun getAimSounds(): String
 
     /**
      * Whether this tank owns an Auto Defense accessory, which is what buys
      * the chance to raise shields and parachutes before the round begins -
      * see engine_jni.cpp.
      */
-    external fun hasAutoDefense(): Boolean
+    fun hasAutoDefense(): Boolean
 
-    external fun isGameHost(): Boolean
+    fun isGameHost(): Boolean
 
     /**
      * Runs one [AdminCommand] against [playerId] (ignored by the commands
@@ -574,7 +576,7 @@ object NativeBridge {
      * [arg] is the ban reason for [AdminCommand.BAN] and the bot type for
      * [AdminCommand.ADD_BOT]; unused otherwise.
      */
-    external fun adminCommand(command: Int, playerId: Int, arg: String): Boolean
+    fun adminCommand(command: Int, playerId: Int, arg: String): Boolean
 }
 
 /**

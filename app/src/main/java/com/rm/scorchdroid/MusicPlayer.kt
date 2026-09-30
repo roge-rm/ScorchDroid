@@ -27,17 +27,8 @@ import java.io.File
  * because upstream maps several states to the same loop (buying and playing
  * share one) and a fade between identical tracks would be a pointless stutter.
  */
-class MusicPlayer(private val dataRoot: File) {
+class MusicPlayer(private val dataRoot: File) : MusicOutput {
 
-    /** Upstream's own state names, from music.xml. */
-    enum class State(val xmlName: String) {
-        LOADING("loading"),
-        WAIT("wait"),
-        BUYING("buying"),
-        PLAYING("playing"),
-        SHOT("shot"),
-        SCORE("score"),
-    }
 
     private data class Track(val file: File, val gain: Float)
 
@@ -47,26 +38,26 @@ class MusicPlayer(private val dataRoot: File) {
         .build()
 
     private val handler = Handler(Looper.getMainLooper())
-    private var tracks: Map<State, Track> = emptyMap()
+    private var tracks: Map<MusicState, Track> = emptyMap()
     private var current: MediaPlayer? = null
     private var currentFile: File? = null
     private var currentGain = 1f
     private var fading: MediaPlayer? = null
 
-    @Volatile var enabled: Boolean = true
+    @Volatile override var enabled: Boolean = true
         set(value) {
             field = value
             if (!value) stopAll() else state?.let { play(it, force = true) }
         }
 
     /** 0..1, multiplied by the track's own gain. */
-    @Volatile var volume: Float = 0.6f
+    @Volatile override var volume: Float = 0.6f
         set(value) {
             field = value.coerceIn(0f, 1f)
             current?.let { runCatching { it.setVolume(field * currentGain, field * currentGain) } }
         }
 
-    private var state: State? = null
+    private var state: MusicState? = null
     private var paused = false
 
     /**
@@ -74,7 +65,7 @@ class MusicPlayer(private val dataRoot: File) {
      * again when the mod changes; the current loop keeps playing until the
      * next state change asks for something different.
      */
-    fun load(mod: String) {
+    override fun load(mod: String) {
         val candidates = listOf(
             File(dataRoot, "data/globalmods/$mod/data/music.xml"),
             File(dataRoot, "data/globalmods/none/data/music.xml"),
@@ -90,7 +81,7 @@ class MusicPlayer(private val dataRoot: File) {
         Log.i(TAG, "music: ${tracks.size} states mapped from ${xml.path}")
     }
 
-    private fun parse(xml: File, modDir: File): Map<State, Track> {
+    private fun parse(xml: File, modDir: File): Map<MusicState, Track> {
         // Regular expressions over each entry rather than a pull-parser state
         // machine. The file is a few hundred bytes in a shape upstream fixed
         // years ago - a root <music> holding <music> entries, each with
@@ -98,7 +89,7 @@ class MusicPlayer(private val dataRoot: File) {
         // a proper parser broke on exactly the mixture of comments, nested
         // same-named tags and nextText() end-tag consumption that makes pull
         // parsing fiddly. Nothing here needs more than this.
-        val result = mutableMapOf<State, Track>()
+        val result = mutableMapOf<MusicState, Track>()
         val text = try {
             xml.readText().replace(Regex("<!--.*?-->", RegexOption.DOT_MATCHES_ALL), "")
         } catch (e: Exception) {
@@ -119,20 +110,20 @@ class MusicPlayer(private val dataRoot: File) {
             // upstream writes.
             val track = Track(File(modDir, file), gain)
             for (sm in stateTag.findAll(body)) {
-                State.entries.firstOrNull { it.xmlName == sm.groupValues[1] }?.let { result[it] = track }
+                MusicState.entries.firstOrNull { it.xmlName == sm.groupValues[1] }?.let { result[it] = track }
             }
         }
         return result
     }
 
     /** The game has moved into [next]; start its loop if it is a different file. */
-    fun setState(next: State) {
+    override fun setState(next: MusicState) {
         if (state == next) return
         state = next
         if (enabled && !paused) play(next, force = false)
     }
 
-    private fun play(s: State, force: Boolean) {
+    private fun play(s: MusicState, force: Boolean) {
         val track = tracks[s]
         if (track == null) {
             // A state with nothing mapped is silence, as it would be upstream.
@@ -193,12 +184,12 @@ class MusicPlayer(private val dataRoot: File) {
     }
 
     /** Activity paused: silence without forgetting where we were. */
-    fun pause() {
+    override fun pause() {
         paused = true
         current?.let { runCatching { if (it.isPlaying) it.pause() } }
     }
 
-    fun resume() {
+    override fun resume() {
         paused = false
         if (!enabled) return
         val c = current
@@ -213,7 +204,7 @@ class MusicPlayer(private val dataRoot: File) {
         currentFile = null
     }
 
-    fun release() {
+    override fun release() {
         stopAll()
         handler.removeCallbacksAndMessages(null)
     }

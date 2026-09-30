@@ -1,7 +1,5 @@
 package com.rm.scorchdroid
 
-import android.content.Context
-import android.content.SharedPreferences
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -17,7 +15,8 @@ import androidx.compose.runtime.setValue
  * here is about this device and this person, means nothing to the engine, and
  * survives from one game to the next.
  *
- * Backed by SharedPreferences rather than DataStore, which the plan originally
+ * Backed by SharedPreferences on a phone (localStorage in a browser, see
+ * [KeyValueStore]) rather than DataStore, which the plan originally
  * named. DataStore's reads are asynchronous, and these values are needed before
  * the first frame is drawn and before the first tank is named - so using it
  * would mean either blocking on a coroutine at startup or rendering one frame
@@ -28,14 +27,12 @@ import androidx.compose.runtime.setValue
  * are set, and the setters write through to disk immediately - there is no
  * "save" button to forget to press.
  */
-class GameSettings(context: Context) {
-    private val prefs: SharedPreferences =
-        context.getSharedPreferences("scorchdroid.settings", Context.MODE_PRIVATE)
+class GameSettings(private val prefs: KeyValueStore, private val sound: SoundEffects) {
 
     // --- Player -------------------------------------------------------------
 
     /** Shown over your tank and to everyone else in a network game. */
-    var playerName by mutableStateOf(prefs.getString(KEY_NAME, DEFAULT_NAME) ?: DEFAULT_NAME)
+    var playerName by mutableStateOf(prefs.getString(KEY_NAME, DEFAULT_NAME))
         private set
 
     fun updatePlayerName(value: String) {
@@ -44,7 +41,7 @@ class GameSettings(context: Context) {
         // name the game would not use.
         val accepted = NativeBridge.setPlayerName(value)
         playerName = accepted
-        prefs.edit().putString(KEY_NAME, accepted).apply()
+        prefs.putString(KEY_NAME, accepted)
     }
 
     /**
@@ -52,12 +49,12 @@ class GameSettings(context: Context) {
      * what it did before there was a choice - and stays the default, because
      * upstream's own new player gets a random tank too.
      */
-    var tankModel by mutableStateOf(prefs.getString(KEY_MODEL, "") ?: "")
+    var tankModel by mutableStateOf(prefs.getString(KEY_MODEL, ""))
         private set
 
     fun updateTankModel(value: String) {
         tankModel = value
-        prefs.edit().putString(KEY_MODEL, value).apply()
+        prefs.putString(KEY_MODEL, value)
         applyIdentity()
     }
 
@@ -67,17 +64,17 @@ class GameSettings(context: Context) {
 
     fun updateTankColorIndex(value: Int) {
         tankColorIndex = value
-        prefs.edit().putInt(KEY_COLOR, value).apply()
+        prefs.putInt(KEY_COLOR, value)
         applyIdentity()
     }
 
     /** Path relative to the data root; empty for none. */
-    var avatar by mutableStateOf(prefs.getString(KEY_AVATAR, "") ?: "")
+    var avatar by mutableStateOf(prefs.getString(KEY_AVATAR, ""))
         private set
 
     fun updateAvatar(value: String) {
         avatar = value
-        prefs.edit().putString(KEY_AVATAR, value).apply()
+        prefs.putString(KEY_AVATAR, value)
         applyIdentity()
     }
 
@@ -92,8 +89,8 @@ class GameSettings(context: Context) {
 
     fun updateSoundEnabled(value: Boolean) {
         soundEnabled = value
-        SoundPlayer.enabled = value
-        prefs.edit().putBoolean(KEY_SOUND, value).apply()
+        sound.enabled = value
+        prefs.putBoolean(KEY_SOUND, value)
     }
 
     /**
@@ -111,8 +108,8 @@ class GameSettings(context: Context) {
 
     fun updateEffectsVolume(value: Float) {
         effectsVolume = value.coerceIn(0f, 1f)
-        SoundPlayer.masterVolume = effectsVolume
-        prefs.edit().putFloat(KEY_SOUND_VOLUME, effectsVolume).apply()
+        sound.masterVolume = effectsVolume
+        prefs.putFloat(KEY_SOUND_VOLUME, effectsVolume)
     }
 
     /**
@@ -126,7 +123,7 @@ class GameSettings(context: Context) {
     fun updateAmbientVolume(value: Float) {
         ambientVolume = value.coerceIn(0f, 1f)
         ambient?.volume = ambientVolume
-        prefs.edit().putFloat(KEY_AMBIENT_VOLUME, ambientVolume).apply()
+        prefs.putFloat(KEY_AMBIENT_VOLUME, ambientVolume)
     }
 
     /** M15: upstream's music, keyed to game state by its music.xml. */
@@ -136,7 +133,7 @@ class GameSettings(context: Context) {
     fun updateMusicEnabled(value: Boolean) {
         musicEnabled = value
         music?.enabled = value
-        prefs.edit().putBoolean(KEY_MUSIC, value).apply()
+        prefs.putBoolean(KEY_MUSIC, value)
     }
 
     /** 0..1. Separate from effects, as upstream's SoundDialog has it. */
@@ -146,7 +143,7 @@ class GameSettings(context: Context) {
     fun updateMusicVolume(value: Float) {
         musicVolume = value.coerceIn(0f, 1f)
         music?.volume = musicVolume
-        prefs.edit().putFloat(KEY_MUSIC_VOLUME, musicVolume).apply()
+        prefs.putFloat(KEY_MUSIC_VOLUME, musicVolume)
     }
 
     /**
@@ -160,14 +157,14 @@ class GameSettings(context: Context) {
     fun updateAmbientEnabled(value: Boolean) {
         ambientEnabled = value
         ambient?.enabled = value
-        prefs.edit().putBoolean(KEY_AMBIENT, value).apply()
+        prefs.putBoolean(KEY_AMBIENT, value)
     }
 
     /** The music player, once the Activity has one; applyAll() pushes to it. */
-    var music: MusicPlayer? = null
+    var music: MusicOutput? = null
 
     /** The ambient player, likewise. */
-    var ambient: AmbientPlayer? = null
+    var ambient: AmbientOutput? = null
 
     /**
      * A6: upstream's NoCountDownSound and NoChannelTextSound. Both silence
@@ -179,7 +176,7 @@ class GameSettings(context: Context) {
 
     fun updateCountdownSound(value: Boolean) {
         countdownSound = value
-        prefs.edit().putBoolean(KEY_COUNTDOWN_SOUND, value).apply()
+        prefs.putBoolean(KEY_COUNTDOWN_SOUND, value)
         NativeBridge.setCountdownSound(value)
     }
 
@@ -192,7 +189,7 @@ class GameSettings(context: Context) {
 
     fun updateTurnSound(value: Boolean) {
         turnSound = value
-        prefs.edit().putBoolean(KEY_TURN_SOUND, value).apply()
+        prefs.putBoolean(KEY_TURN_SOUND, value)
         NativeBridge.setTurnSound(value)
     }
 
@@ -201,7 +198,7 @@ class GameSettings(context: Context) {
 
     fun updateChatSound(value: Boolean) {
         chatSound = value
-        prefs.edit().putBoolean(KEY_CHAT_SOUND, value).apply()
+        prefs.putBoolean(KEY_CHAT_SOUND, value)
         NativeBridge.setChatSound(value)
     }
 
@@ -212,7 +209,7 @@ class GameSettings(context: Context) {
 
     fun updateShowNamePlates(value: Boolean) {
         showNamePlates = value
-        prefs.edit().putBoolean(KEY_PLATES, value).apply()
+        prefs.putBoolean(KEY_PLATES, value)
         NativeBridge.setShowNamePlates(value)
     }
 
@@ -221,7 +218,7 @@ class GameSettings(context: Context) {
 
     fun updateShowHealthBars(value: Boolean) {
         showHealthBars = value
-        prefs.edit().putBoolean(KEY_HEALTH, value).apply()
+        prefs.putBoolean(KEY_HEALTH, value)
         NativeBridge.setShowHealthBars(value)
     }
 
@@ -239,7 +236,7 @@ class GameSettings(context: Context) {
 
     fun updateShowTankInfo(value: Boolean) {
         showTankInfo = value
-        prefs.edit().putBoolean(KEY_TANK_INFO, value).apply()
+        prefs.putBoolean(KEY_TANK_INFO, value)
     }
 
     /**
@@ -258,7 +255,7 @@ class GameSettings(context: Context) {
 
     fun updateShowTankArrows(value: Boolean) {
         showTankArrows = value
-        prefs.edit().putBoolean(KEY_ARROWS, value).apply()
+        prefs.putBoolean(KEY_ARROWS, value)
         NativeBridge.setShowTankArrows(value)
     }
 
@@ -268,7 +265,7 @@ class GameSettings(context: Context) {
 
     fun updateChatToastSeconds(value: Int) {
         chatToastSeconds = value.coerceIn(2, 15)
-        prefs.edit().putInt(KEY_TOAST, chatToastSeconds).apply()
+        prefs.putInt(KEY_TOAST, chatToastSeconds)
     }
 
     // --- Controls -----------------------------------------------------------
@@ -279,7 +276,7 @@ class GameSettings(context: Context) {
 
     fun updateInvertDrag(value: Boolean) {
         invertDrag = value
-        prefs.edit().putBoolean(KEY_INVERT, value).apply()
+        prefs.putBoolean(KEY_INVERT, value)
     }
 
     /** Tap the ground to aim at it. Off leaves the sliders as the only aim. */
@@ -288,7 +285,7 @@ class GameSettings(context: Context) {
 
     fun updateTapToAim(value: Boolean) {
         tapToAim = value
-        prefs.edit().putBoolean(KEY_TAP_AIM, value).apply()
+        prefs.putBoolean(KEY_TAP_AIM, value)
     }
 
     /**
@@ -301,7 +298,7 @@ class GameSettings(context: Context) {
 
     fun updateLeftHandMode(value: Boolean) {
         leftHandMode = value
-        prefs.edit().putBoolean(KEY_LEFT_HAND, value).apply()
+        prefs.putBoolean(KEY_LEFT_HAND, value)
     }
 
     /** How opaque the on-screen controls are. */
@@ -314,7 +311,7 @@ class GameSettings(context: Context) {
 
     fun updateControlOpacity(value: Float) {
         controlOpacity = value.coerceIn(0.3f, 1.0f)
-        prefs.edit().putFloat(KEY_OPACITY, controlOpacity).apply()
+        prefs.putFloat(KEY_OPACITY, controlOpacity)
     }
 
     // --- Graphics -----------------------------------------------------------
@@ -324,7 +321,7 @@ class GameSettings(context: Context) {
 
     fun updateShowTrees(value: Boolean) {
         showTrees = value
-        prefs.edit().putBoolean(KEY_TREES, value).apply()
+        prefs.putBoolean(KEY_TREES, value)
     }
 
     /**
@@ -341,7 +338,7 @@ class GameSettings(context: Context) {
 
     fun updateTerrainDetail(value: Int) {
         terrainDetail = value
-        prefs.edit().putInt(KEY_DETAIL, value).apply()
+        prefs.putInt(KEY_DETAIL, value)
         NativeBridge.setTerrainDetail(value)
     }
 
@@ -362,7 +359,7 @@ class GameSettings(context: Context) {
 
     fun updateReflectionLevel(value: Int) {
         reflectionLevel = value.coerceIn(0, 2)
-        prefs.edit().putInt(KEY_REFLECT, reflectionLevel).apply()
+        prefs.putInt(KEY_REFLECT, reflectionLevel)
         NativeBridge.setReflectionStyle(reflectionLevel)
     }
 
@@ -380,7 +377,7 @@ class GameSettings(context: Context) {
 
     fun updateWaterDetail(value: Int) {
         waterDetail = value.coerceIn(0, 2)
-        prefs.edit().putInt(KEY_WATER_DETAIL, waterDetail).apply()
+        prefs.putInt(KEY_WATER_DETAIL, waterDetail)
         NativeBridge.setWaterDetail(waterDetail)
     }
 
@@ -395,7 +392,7 @@ class GameSettings(context: Context) {
 
     fun updateOriginalSight(value: Boolean) {
         originalSight = value
-        prefs.edit().putBoolean(KEY_SIGHT, value).apply()
+        prefs.putBoolean(KEY_SIGHT, value)
         NativeBridge.setSightStyle(if (value) 1 else 0)
     }
 
@@ -417,7 +414,7 @@ class GameSettings(context: Context) {
 
     fun updateEffectsDetail(value: Int) {
         effectsDetail = value.coerceIn(0, 2)
-        prefs.edit().putInt(KEY_EFFECTS, effectsDetail).apply()
+        prefs.putInt(KEY_EFFECTS, effectsDetail)
         NativeBridge.setEffectsDetail(effectsDetail)
     }
 
@@ -436,7 +433,7 @@ class GameSettings(context: Context) {
 
     fun updateShadowDetail(value: Int) {
         shadowDetail = value.coerceIn(0, 2)
-        prefs.edit().putInt(KEY_SHADOWS, shadowDetail).apply()
+        prefs.putInt(KEY_SHADOWS, shadowDetail)
         NativeBridge.setShadowDetail(shadowDetail)
         NativeBridge.setShowTankArrows(showTankArrows)
     }
@@ -446,7 +443,7 @@ class GameSettings(context: Context) {
 
     fun updateShowFog(value: Boolean) {
         showFog = value
-        prefs.edit().putBoolean(KEY_FOG, value).apply()
+        prefs.putBoolean(KEY_FOG, value)
     }
 
     /**
@@ -458,8 +455,8 @@ class GameSettings(context: Context) {
     fun applyAll() {
         NativeBridge.setPlayerName(playerName)
         applyIdentity()
-        SoundPlayer.enabled = soundEnabled
-        SoundPlayer.masterVolume = effectsVolume
+        sound.enabled = soundEnabled
+        sound.masterVolume = effectsVolume
         music?.let { it.volume = musicVolume; it.enabled = musicEnabled }
         ambient?.let { it.enabled = ambientEnabled; it.volume = ambientVolume }
         NativeBridge.setRenderOptions(showTrees, showFog)

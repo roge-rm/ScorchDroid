@@ -28,7 +28,7 @@ import kotlin.random.Random
  * gain its definition asks for. On a map where the sea is a long way off that
  * is audibly different - it is still much closer to upstream than silence.
  */
-class AmbientPlayer(private val dataRoot: String) {
+class AmbientPlayer(private val dataRoot: String) : AmbientOutput {
 
     private val attributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_GAME)
@@ -41,7 +41,7 @@ class AmbientPlayer(private val dataRoot: String) {
     private var paused = false
 
     @Volatile
-    var enabled: Boolean = true
+    override var enabled: Boolean = true
         set(value) {
             field = value
             if (!value) stop() else apply(current)
@@ -52,7 +52,7 @@ class AmbientPlayer(private val dataRoot: String) {
     // Upstream's AmbientSoundVolume default - 64 of 0-128. Overwritten by
     // GameSettings.applyAll from the player's own slider; this is only what
     // holds before that runs.
-    var volume: Float = 0.5f
+    override var volume: Float = 0.5f
         set(value) {
             field = value.coerceIn(0f, 1f)
             synchronized(loops) {
@@ -70,7 +70,7 @@ class AmbientPlayer(private val dataRoot: String) {
      * rather than restarted, which would otherwise clip the loop every round
      * on a map that keeps its own atmosphere.
      */
-    fun apply(sounds: List<AmbientSound>) {
+    override fun apply(sounds: List<AmbientSound>) {
         if (sounds == current && loops.isNotEmpty()) return
         stop()
         current = sounds
@@ -137,21 +137,21 @@ class AmbientPlayer(private val dataRoot: String) {
         return if (rooted.exists()) rooted else null
     }
 
-    fun pause() {
+    override fun pause() {
         paused = true
         synchronized(loops) {
             loops.forEach { runCatching { if (it.isPlaying) it.pause() } }
         }
     }
 
-    fun resume() {
+    override fun resume() {
         paused = false
         if (!enabled) return
         synchronized(loops) { loops.forEach { runCatching { it.start() } } }
     }
 
     /** Stops everything; the next apply() starts again from nothing. */
-    fun stop() {
+    override fun stop() {
         scope?.cancel()
         scope = null
         synchronized(loops) {
@@ -160,7 +160,7 @@ class AmbientPlayer(private val dataRoot: String) {
         }
     }
 
-    fun release() {
+    override fun release() {
         stop()
         current = emptyList()
     }

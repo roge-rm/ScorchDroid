@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ScorchDroid</title>
+<link rel="icon" href="icon.png">
+<meta name="theme-color" content="#101018">
+<style>
+  html, body { margin: 0; height: 100%; background: #101018; overflow: hidden; }
+  /* The game draws on a canvas of its own behind the app, which is drawn over
+     it with nothing where the battlefield shows through. */
+  #game { position: fixed; inset: 0; z-index: 0; }
+  #game canvas { display: block; width: 100%; height: 100%; }
+  #root { position: fixed; inset: 0; z-index: 1; }
+  #status { position: fixed; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center;
+            justify-content: center; gap: 10px; padding: 16px; background: #101018; color: #b3a8d8;
+            font: 15px/1.5 system-ui, sans-serif; text-align: center; }
+  #status.gone { display: none; }
+  #bar { width: min(320px, 100%); height: 4px; border-radius: 2px; background: #2a2838; overflow: hidden; visibility: hidden; }
+  #fill { width: 0; height: 100%; background: #b39dff; transition: width 0.2s; }
+  #amount { font-size: 13px; color: #6f6a84; font-variant-numeric: tabular-nums; min-height: 1.5em; }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<div id="root"></div>
+<div id="status">
+  <div id="status-text">Loading ScorchDroid...</div>
+  <div id="bar"><div id="fill"></div></div>
+  <div id="amount"></div>
+</div>
+<script src="audio.js"></script>
+<script>
+  const loading = (() => {
+    const text = document.getElementById('status-text');
+    const bar = document.getElementById('bar');
+    const fill = document.getElementById('fill');
+    const amount = document.getElementById('amount');
+    const mb = (n) => (n / 1048576).toFixed(1);
+    return {
+      // Emscripten's own progress line: "Downloading data... (have/total)".
+      status(line) {
+        const m = /\((\d+)\/(\d+)\)/.exec(line || '');
+        if (!m) return;
+        const have = +m[1], total = +m[2];
+        if (!total) return;
+        bar.style.visibility = 'visible';
+        fill.style.width = (100 * have / total).toFixed(1) + '%';
+        amount.textContent = mb(have) + ' of ' + mb(total) + ' MB';
+        if (have >= total) text.textContent = 'Starting ScorchDroid...';
+      },
+      fail(message) { text.textContent = message; bar.style.display = 'none'; amount.textContent = ''; },
+      done() { document.getElementById('status').classList.add('gone'); },
+    };
+  })();
+
+  // The game surface, one canvas per game like the phone's GLSurfaceView, so
+  // each game gets a fresh GL context and the renderer's caches start empty.
+  globalThis.sdGame = (() => {
+    const host = document.getElementById('game');
+    let canvas = null, context = 0, count = 0, lastW = 0, lastH = 0;
+    return {
+      create() {
+        this.destroy();
+        canvas = document.createElement('canvas');
+        canvas.id = 'game-' + (++count);
+        host.appendChild(canvas);
+        const m = globalThis.sd;
+        const selector = m.stringToNewUTF8('#' + canvas.id);
+        context = m._sd_gl_create(selector);
+        m._free(selector);
+        lastW = lastH = 0;
+        if (!context) console.error('ScorchDroid: no WebGL 2 here');
+        return context;
+      },
+      destroy() {
+        if (!canvas) return;
+        const m = globalThis.sd;
+        if (context) m._sd_gl_destroy(context);
+        canvas.remove();
+        canvas = null;
+        context = 0;
+      },
+      // Keeps the drawing buffer at the canvas's size in device pixels, and
+      // says so when that changed: width * 65536 + height, or -1.
+      fit() {
+        if (!canvas) return -1;
+        const dpr = window.devicePixelRatio || 1;
+        const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+        const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+        if (w === lastW && h === lastH) return -1;
+        canvas.width = w; canvas.height = h;
+        lastW = w; lastH = h;
+        return w * 65536 + h;
+      },
+      // A tank's name, white on nothing, for its plate: the phone's plate
+      // text (12sp, medium weight) in device pixels.
+      plateText(text, scale) {
+        const size = Math.round(12 * scale);
+        const font = '500 ' + size + 'px system-ui, sans-serif';
+        const c = document.createElement('canvas').getContext('2d');
+        c.font = font;
+        const metrics = c.measureText(text);
+        const ascent = Math.ceil(metrics.fontBoundingBoxAscent || size * 0.93);
+        const descent = Math.ceil(metrics.fontBoundingBoxDescent || size * 0.25);
+        const w = Math.max(1, Math.min(2048, Math.ceil(metrics.width)));
+        const h = Math.max(1, Math.min(256, ascent + descent));
+        c.canvas.width = w; c.canvas.height = h;
+        c.font = font;
+        c.fillStyle = '#fff';
+        c.fillText(text, 0, ascent);
+        return { width: w, height: h, data: c.getImageData(0, 0, w, h).data };
+      },
+    };
+  })();
+
+  // The relay on the server this page came from, when it came from one: the
+  // dedicated server's web container serves the game at /play/ and says so
+  // in server.json beside it.
+  globalThis.sdRelay = null;
+  globalThis.sdPageServer = () => {
+    if (!globalThis.sdRelay) return null;
+    const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    return scheme + location.host + globalThis.sdRelay;
+  };
+  fetch('server.json', { cache: 'no-cache' })
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null)
+    .then((s) => { if (s && s.relay) globalThis.sdRelay = s.relay; });
+
+  globalThis.sdUiReady = () => loading.done();
+</script>
+<script src="scorchdroid.js"></script>
+<script>
+  // The engine, then the saves folder from browser storage, then the app.
+  // The folder is saved back after the game writes a save, and when the
+  // tab is hidden.
+  const SAVES = '/scorched_root/scorchdroid';
+  ScorchDroidEngine({
+    setStatus: (line) => loading.status(line),
+  }).then((engine) => {
+    globalThis.sd = engine;
+    const FS = engine.FS;
+    FS.mkdirTree(SAVES);
+    FS.mount(engine.IDBFS, {}, SAVES);
+    FS.syncfs(true, (err) => {
+      if (err) console.warn('ScorchDroid: the saved games could not be read', err);
+      let busy = false, again = false, timer = 0;
+      const save = () => {
+        if (busy) { again = true; return; }
+        busy = true;
+        FS.syncfs(false, (e) => {
+          busy = false;
+          if (e) console.warn('ScorchDroid: the saved games could not be stored', e);
+          if (again) { again = false; save(); }
+        });
+      };
+      globalThis.sdFsChanged = () => { clearTimeout(timer); timer = setTimeout(save, 300); };
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') save(); });
+      const ui = document.createElement('script');
+      ui.src = 'scorchdroid-ui.js';
+      ui.onerror = () => loading.fail('The game could not load. Try reloading the page.');
+      document.body.appendChild(ui);
+    });
+  }).catch((e) => {
+    console.error(e);
+    loading.fail('The game could not start in this browser. It needs WebGL 2 and WebAssembly, ' +
+      'so try a current Chrome, Edge, Firefox or Safari.');
+  });
+</script>
+</body>
+</html>

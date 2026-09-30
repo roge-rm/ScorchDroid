@@ -147,6 +147,7 @@ tasks.matching { it.name.startsWith("configureCMake") }
     .configureEach { dependsOn(applyScorchedPatches) }
 
 dependencies {
+    implementation(project(":shared"))
     implementation(libs.androidx.appcompat)
     implementation(libs.androidx.core.ktx)
     implementation(libs.material)
