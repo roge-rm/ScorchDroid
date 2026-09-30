@@ -756,6 +756,8 @@ abstract class GameController(
 
     protected suspend fun CoroutineScope.startAsHost() {
         val save = savedGameToLoad
+        // A save's mod isn't known until it loads, so it gets every mod.
+        if (!prepareModData(if (save == null) NativeBridge.getSelectedMod() else ALL_MODS)) return
         hudState.statusText = if (save == null) "Starting local game..." else "Loading saved game..."
         val gameOk = withContext(Dispatchers.Default) {
             // A loaded game is a hosted game in every other respect - the
@@ -2372,6 +2374,14 @@ abstract class GameController(
      */
     protected open fun holdStartForHosting(): Boolean = false
 
+    /**
+     * Makes sure [mod]'s files are here before a game with it starts, or
+     * [ALL_MODS] for all of them. A phone has everything already; a browser
+     * fetches a mod's textures, models and sounds the first time a game
+     * needs them. False, with the reason on the status line, if it couldn't.
+     */
+    protected open suspend fun prepareModData(mod: String): Boolean = true
+
     /** A save was written or deleted. A browser keeps them in its own storage. */
     protected open fun onSavesChanged() {}
 
@@ -2639,6 +2649,9 @@ abstract class GameController(
         // How long Skip All Moves waits before passing a move, which is
         // upstream's own five seconds (SkipAllDialog::simulate).
         const val SKIP_ALL_SECONDS = 5
+
+        /** [prepareModData]'s "every mod", for a save whose mod isn't known yet. */
+        const val ALL_MODS = "*"
 
         // TankKeyboardControlUtil's rates: 45 degrees and 250 of 1000 power a second.
         const val TURN_PER_SECOND = 45f

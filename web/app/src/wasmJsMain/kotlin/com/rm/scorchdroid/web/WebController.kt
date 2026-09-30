@@ -24,7 +24,11 @@ import com.rm.scorchdroid.MultiplayerScreen
 import com.rm.scorchdroid.NativeBridge
 import com.rm.scorchdroid.PlateText
 import com.rm.scorchdroid.SoundEffects
+import com.rm.scorchdroid.formatFixed
+import com.rm.scorchdroid.modLabel
 import com.rm.scorchdroid.nowMillis
+import kotlin.js.Promise
+import kotlinx.coroutines.await
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlinx.coroutines.launch
@@ -45,6 +49,16 @@ private fun jsPlateData(p: JsAny): JsAny = js("p.data")
 private fun jsFsChanged(): Unit = js("globalThis.sdFsChanged && globalThis.sdFsChanged()")
 // The relay on the server this page came from, if it came from one.
 private fun jsPageServer(): String? = js("globalThis.sdPageServer ? globalThis.sdPageServer() : null")
+// A mod's pack, fetched into the engine's files if it isn't there yet
+// (index.html's sdPacks).
+private fun jsEnsurePack(mod: String, progress: (Int, Int) -> Unit): Promise<JsAny?> =
+    js("globalThis.sdPacks.ensure(mod, progress)")
+// The mod a server's web container says it runs (play.py's server.json), or
+// null when it can't be asked.
+private fun jsServerMod(url: String): Promise<JsAny?> = js(
+    "fetch(url, { cache: 'no-cache' }).then((r) => (r.ok ? r.json() : null))" +
+        ".then((j) => (j && j.mod ? j.mod : null)).catch(() => null)",
+)
 // An https page can only open wss://.
 private fun jsPageSecure(): Boolean = js("location.protocol === 'https:'")
 
@@ -103,6 +117,20 @@ class WebController(
     }
 
     override fun onSavesChanged() = jsFsChanged()
+
+    override suspend fun prepareModData(mod: String): Boolean {
+        val label = if (mod == ALL_MODS) "the mods" else modLabel(mod)
+        return try {
+            jsEnsurePack(mod) { have, total ->
+                hudState.statusText =
+                    "Loading $label... ${formatFixed(have / 1048576f, 1)} of ${formatFixed(total / 1048576f, 1)} MB"
+            }.await<JsAny?>()
+            true
+        } catch (e: Throwable) {
+            hudState.statusText = "Couldn't load $label. Check your connection and try again."
+            false
+        }
+    }
 
     // --- Joining -------------------------------------------------------------
 
@@ -186,6 +214,12 @@ class WebController(
     private fun join(url: String) {
         prefs.putString(KEY_LAST_SERVER, url)
         gameJob = scope.launch {
+            // The server's mod has to be here before the join starts checking
+            // files. Its page says which mod it is; a server that can't be
+            // asked gets every mod, rather than a join that fails halfway.
+            hudState.statusText = "Asking $url what it's playing..."
+            val mod = runCatching { jsServerMod(serverInfoUrl(url)).await<JsAny?>()?.toString() }.getOrNull()
+            if (!prepareModData(mod ?: ALL_MODS)) return@launch
             hudState.statusText = "Connecting to $url..."
             val connecting = NativeBridge.startJoinGameBluetooth(url)
             if (!connecting) {
@@ -328,6 +362,12 @@ class WebController(
         // (web-admin/app/play.py).
         const val DEFAULT_WEB_PORT = 8080
         const val RELAY_PATH = "/play/ws"
+
+        /** Where the web container beside a relay says what it's playing. */
+        fun serverInfoUrl(relay: String): String {
+            val http = relay.replaceFirst("wss://", "https://").replaceFirst("ws://", "http://")
+            return http.removeSuffix("/ws") + "/server.json"
+        }
 
         /**
          * What a player typed, as the relay's address: a ws:// or wss:// URL

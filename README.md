@@ -107,7 +107,7 @@ network that's `http://<server>:8080/play/`. That's the one to use for a server 
 network, since the page above is https and can only join servers that are too.
 
 It needs a recent browser with WebGL 2 and WebAssembly GC (Chrome or Edge 119, Firefox 120, or
-Safari 18.2, or anything newer). The first load is about 45MB, most of it the game data. Settings
+Safari 18.2, or anything newer). The first load is about 37MB, most of it the game data, and the Apocalypse mod is another 8MB the first time you play it. Settings
 are kept in the browser, and so are saved games. A browser can join a game but can't host one.
 
 ## Dedicated server

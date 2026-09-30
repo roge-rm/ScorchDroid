@@ -86,8 +86,11 @@ the build did it. Neither route is behind the admin login.
   browser loaded the game from it and joined its server alongside the phone
   emulator. (A local Docker build needs clean submodules: the patch script
   can't tell an already patched tree without its .git. The compose files build
-  from the GitHub URL, which is always clean.) Not done yet: loading the Apocalypse mod (22MB of the 87MB) only
-  for players who pick it.
+  from the GitHub URL, which is always clean.) The Apocalypse mod loads only for players who pick it (2026-09-30):
+  `web/engine/stage_data.py` keeps its XML in the page's data and packs the rest
+  into `apoc.pack`, which the page fetches (`sdPacks` in index.html) before a
+  game with it starts, or before joining a server whose `server.json` says it
+  runs it. First load 45MB → 37MB gzipped; the pack is 8MB gzipped.
 - **The hosted page.** https://roge-rm.gitlab.io/play/scorchdroid/, published the
   way Apogee's is: `~/Projects/fdroid/web-builds.json` names the build (with
   `"submodules": true`, which publish.py now honours), so each release's tag

@@ -22,9 +22,12 @@ import struct
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 
+from .control import Control
+
 LOG = logging.getLogger("scorchdroid.play")
 
 router = APIRouter()
+control = Control()
 
 PLAY_DIR = os.environ.get("PLAY_DIR", "/app/play")
 GAME_HOST = os.environ.get("GAME_HOST", "127.0.0.1")
@@ -105,7 +108,16 @@ def play_root():
 def play_server():
     """Tells the page it came from a server, and where the relay is, so
     Join Game can offer "This server" first."""
-    return JSONResponse({"relay": "/play/ws"}, headers={"Cache-Control": "no-cache"})
+    info = {"relay": "/play/ws"}
+    # The mod, so a browser can fetch its files before joining. Pages served
+    # from elsewhere (the hosted one) ask too, hence the open CORS header.
+    try:
+        mod = control.status().get("mod")
+        if mod:
+            info["mod"] = mod
+    except Exception:
+        pass
+    return JSONResponse(info, headers={"Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*"})
 
 
 @router.get("/play/{path:path}")

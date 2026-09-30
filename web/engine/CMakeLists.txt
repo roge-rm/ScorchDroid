@@ -54,7 +54,10 @@ target_link_libraries(scorchdroid PRIVATE
     scorched_common
     -Wl,--no-whole-archive
 )
-set(DATA ${SCORCHDROID_REPO_ROOT}/third_party/scorched3d/data)
+# The data every page loads. build.sh points this at a staged copy without
+# the mods that are loaded later (stage_data.py); on its own it's all of it.
+set(SCORCHDROID_WEB_DATA ${SCORCHDROID_REPO_ROOT}/third_party/scorched3d/data CACHE PATH "the preloaded game data")
+set(DATA ${SCORCHDROID_WEB_DATA})
 target_link_options(scorchdroid PRIVATE
     -sMODULARIZE=1
     -sEXPORT_NAME=ScorchDroidEngine

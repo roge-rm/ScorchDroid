@@ -129,6 +129,60 @@
     .then((s) => { if (s && s.relay) globalThis.sdRelay = s.relay; });
 
   globalThis.sdUiReady = () => loading.done();
+
+  // Mods whose textures, models and sounds aren't in the first download
+  // (web/engine/stage_data.py makes the packs and packs.json lists them).
+  // ensure(mod, progress) fetches a mod's pack into the engine's files once,
+  // and resolves when it's there; '*' means every pack.
+  globalThis.sdPacks = (() => {
+    let listing = null;
+    const loaded = new Map();
+    const list = () => listing || (listing = fetch('packs.json', { cache: 'no-cache' })
+      .then((r) => (r.ok ? r.json() : {})).catch(() => ({})));
+    async function load(mod, entry, progress) {
+      const response = await fetch(entry.file);
+      if (!response.ok || !response.body) throw new Error(entry.file + ': ' + response.status);
+      const reader = response.body.getReader();
+      const bytes = new Uint8Array(entry.size);
+      let have = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes.set(value, have);
+        have += value.length;
+        progress(have, entry.size);
+      }
+      const view = new DataView(bytes.buffer);
+      const headerLength = view.getUint32(0);
+      const header = JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + headerLength)));
+      const FS = globalThis.sd.FS;
+      const root = '/scorched_root/data/globalmods/' + mod + '/';
+      let at = 4 + headerLength;
+      for (const [path, size] of header.files) {
+        const full = root + path;
+        FS.mkdirTree(full.substring(0, full.lastIndexOf('/')));
+        FS.writeFile(full, bytes.subarray(at, at + size));
+        at += size;
+      }
+      console.log('ScorchDroid: loaded ' + header.files.length + ' files for ' + mod);
+    }
+    return {
+      async ensure(mod, progress) {
+        const packs = await list();
+        const mods = mod === '*' ? Object.keys(packs) : (packs[mod] ? [mod] : []);
+        for (const m of mods) {
+          if (!loaded.has(m)) {
+            const attempt = load(m, packs[m], progress);
+            loaded.set(m, attempt);
+            // A failed download can be tried again next time.
+            attempt.catch(() => loaded.delete(m));
+          }
+          await loaded.get(m);
+        }
+        return true;
+      },
+    };
+  })();
 </script>
 <script src="scorchdroid.js"></script>
 <script>

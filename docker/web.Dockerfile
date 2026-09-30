@@ -31,7 +31,7 @@ RUN ./gradlew --no-daemon -Pscorchdroid.webOnly :webApp:wasmJsBrowserDistributio
 # gzipped; play.py serves the .gz to any browser that takes it.
 RUN cp -r web/app/build/dist/wasmJs/productionExecutable /play \
  && rm -f /play/*.map \
- && gzip -9 -k /play/*.data /play/*.wasm /play/*.js
+ && gzip -9 -k /play/*.data /play/*.pack /play/*.wasm /play/*.js
 
 
 FROM python:3.13-slim
