@@ -58,7 +58,7 @@ android {
                 )
             }.standardOutput.asText.get().trim() + "\"",
         )
-        versionCode = 22
+        versionCode = 23
         versionName = "1.2.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
