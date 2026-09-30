@@ -54,6 +54,7 @@
 #include <target/TargetLife.hpp>
 #include <tank/Tank.hpp>
 #include <tank/TankState.hpp>
+#include <tank/TankLib.hpp>
 #include <target/TargetShield.hpp>
 #include <weapons/Shield.hpp>
 #include <weapons/ShieldRound.hpp>
@@ -441,10 +442,12 @@ namespace
 	// the protractor ring lies flat under the tank, the bearing marker and
 	// the elevation arc turn with the turret, and the barrel blade
 	// additionally lifts with the gun.
-	GLuint sightRingVao = 0, sightRingVbo = 0;
-	GLuint sightBearingVao = 0, sightBearingVbo = 0;
-	GLuint sightBarrelVao = 0, sightBarrelVbo = 0;
-	int sightRingVertexCount = 0, sightBearingVertexCount = 0, sightBarrelVertexCount = 0;
+	// M22: upstream's sight (its VisibleSight, drawSight), drawn with its
+	// own four textures - see buildAimSightGeometry.
+	GLuint aimSightProgram = 0, aimSightVao = 0, aimSightVbo = 0;
+	GLint  aimSightMvpLoc = -1, aimSightTexLoc = -1;
+	GLint  aimSightFogColorLoc = -1, aimSightFogDensityLoc = -1;
+	GLuint aimRotationTexture = 0, aimBotTexture = 0, aimSideTexture = 0, aimTopTexture = 0;
 	// 0 = this port's own blade, 1 = upstream's arrangement.
 	std::atomic<int> g_sightStyle{0};
 	// V9: whether the arrow over a tank is drawn at all. Its own setting
@@ -1544,6 +1547,36 @@ namespace
 		void main() {
 			float z = uFogDensity * vViewDepth;
 			fragColor = vec4(mix(uFogColor, vColor, exp(-z * z)), 1.0);
+		}
+	)";
+
+	// Upstream's sight: its textures, blended, with the alpha test its
+	// GLSetup sets for everything (GL_GREATER, 0), and fogged like the rest.
+	const char *kAimSightVertexShader = R"(#version 300 es
+		layout(location = 0) in vec3 aPosition;
+		layout(location = 1) in vec2 aTexCoord;
+		uniform mat4 uMVP;
+		out vec2 vTexCoord;
+		out float vViewDepth;
+		void main() {
+			vTexCoord = aTexCoord;
+			gl_Position = uMVP * vec4(aPosition, 1.0);
+			vViewDepth = gl_Position.w;
+		}
+	)";
+	const char *kAimSightFragmentShader = R"(#version 300 es
+		precision highp float;
+		in vec2 vTexCoord;
+		in float vViewDepth;
+		out vec4 fragColor;
+		uniform sampler2D uTexture;
+		uniform vec3 uFogColor;
+		uniform float uFogDensity;
+		void main() {
+			vec4 c = texture(uTexture, vTexCoord);
+			if (c.a <= 0.0) discard;
+			float z = uFogDensity * vViewDepth;
+			fragColor = vec4(mix(uFogColor, c.rgb, exp(-z * z)), c.a);
 		}
 	)";
 
@@ -2730,7 +2763,10 @@ namespace
 						  int *outW = nullptr, int *outH = nullptr,
 						  S3D::FileLocation location = S3D::eModLocation)
 	{
-		if (file.empty()) return 0;
+		// An empty file with a mask is upstream's ImageID(location, "", png):
+		// a PNG that brings its own alpha, which its loader only keeps when
+		// it's asked for the image as the alpha (the sight's textures).
+		if (file.empty() && mask.empty()) return 0;
 		// toRGB: the roof and sky images of the storm set are greyscale
 		// JPEGs, which arrive with one channel; uploaded as GL_RGB they
 		// were rainbow noise (the cavern's ceiling on every phone).
@@ -5954,143 +5990,90 @@ namespace
 	constexpr float kSightSpanDegrees = 16.0f;  // arc either side of the aim line
 	constexpr int   kSightSteps = 4;
 
-	// M22: upstream's sight, as geometry rather than as its four textures.
+	// M22: upstream's sight, TargetRendererImplTank::drawSight, quad for
+	// quad: the same corners, the same texture coordinates and the same four
+	// textures. It's built in the engine's own axes (z up) and drawn through
+	// the same frames upstream uses - the gun's muzzle, then the turret's
+	// bearing, then the gun's elevation - so every number below can be read
+	// straight against upstream's glVertex3f calls.
 	//
-	// aimrotation.png is a ring of twenty-four radial ticks, aimbot.png a
-	// blue tapered blade and aimtop.png a red one - shapes, not artwork, so
-	// they are built here instead of decoding PNGs and adding a textured
-	// pass for four of them. The colours are the textures' own.
-	//
-	// Triangles rather than a strip: the ring and the arc are rows of
-	// separate ticks, and stitching those into one strip means degenerate
-	// vertices between every pair. Two triangles per quad costs a few dozen
-	// vertices on a mesh built once.
-	//
-	// Not reproduced: aimside.png, a one-unit strip standing on edge beside
-	// the barrel blade. It reads as a thin line even in upstream and adds
-	// nothing on a phone.
-	struct SightVertex { float x, y, z, r, g, b; };
-
-	void appendQuad(std::vector<float> &verts,
-		const SightVertex &a, const SightVertex &b,
-		const SightVertex &c, const SightVertex &d)
+	// Ranges into the one buffer, in vertices: each quad is two triangles.
+	static constexpr int kAimRingFirst = 0, kAimRingCount = 6;           // aimrotation, flat
+	static constexpr int kAimBearingFirst = 6, kAimBearingCount = 6;     // aimbot, turns with the bearing
+	static constexpr int kAimElevationFirst = 12, kAimElevationCount = 6; // aimrotation, lifts with the gun
+	static constexpr int kAimSideFirst = 18, kAimSideCount = 12;         // aimside, both faces
+	static constexpr int kAimTopFirst = 30, kAimTopCount = 6;            // aimtop
+	void buildAimSightGeometry()
 	{
-		const SightVertex order[6] = { a, b, c, a, c, d };
-		for (const SightVertex &v : order) {
-			verts.push_back(v.x); verts.push_back(v.y); verts.push_back(v.z);
-			verts.push_back(v.r); verts.push_back(v.g); verts.push_back(v.b);
-		}
-	}
-
-	// A spike: a point at `near` widening to `halfWidth` at `far`, in columns
-	// so the colour can fade to the edges the way the textures' alpha does.
-	// `flat` lays it on the ground rather than along the barrel.
-	void appendTaperedBlade(std::vector<float> &verts,
-		float nearRadius, float farRadius, float halfWidth,
-		float r, float g, float b, bool flat)
-	{
-		const int columns = 4;
-		// A little clear of the ground rather than flat on it: this port's
-		// terrain mesh is coarser than upstream's, so a ring lying at exactly
-		// the tank's base height disappears into the interpolated surface on
-		// any slope.
-		const float lift = flat ? 0.4f : 0.0f;
-		auto vertex = [&](float lateral, float radius) {
-			const float fade = 1.0f - fabsf(lateral);
-			const float taper = (radius - nearRadius) / (farRadius - nearRadius);
-			SightVertex v;
-			v.x = lateral * halfWidth * taper;
-			v.y = lift;
-			v.z = -radius;
-			v.r = r * fade; v.g = g * fade; v.b = b * fade;
-			return v;
+		if (aimSightVao) return;
+		std::vector<float> v;
+		// A quad as upstream lists it (a, b, c, d), as two triangles.
+		auto quad = [&](const float q[4][5]) {
+			const int order[6] = { 0, 1, 2, 0, 2, 3 };
+			for (int k : order) v.insert(v.end(), q[k], q[k] + 5);
 		};
-		for (int i = -columns; i < columns; i++) {
-			const float left = (float) i / (float) columns;
-			const float right = (float) (i + 1) / (float) columns;
-			appendQuad(verts,
-				vertex(left, nearRadius), vertex(left, farRadius),
-				vertex(right, farRadius), vertex(right, nearRadius));
-		}
-	}
+		// Blue segments round the bottom: a 30-unit square just under the muzzle.
+		const float ring[4][5] = {
+			{ 15.0f, 15.0f, -0.02f, 1.0f, 1.0f }, { -15.0f, 15.0f, -0.02f, 0.0f, 1.0f },
+			{ -15.0f, -15.0f, -0.02f, 0.0f, 0.0f }, { 15.0f, -15.0f, -0.02f, 1.0f, 0.0f } };
+		quad(ring);
+		// The rotation marker.
+		const float bearing[4][5] = {
+			{ -1.0f, 15.0f, -0.01f, 0.0f, 1.0f }, { -1.0f, 3.0f, -0.01f, 0.0f, 0.0f },
+			{ 1.0f, 3.0f, -0.01f, 1.0f, 0.0f }, { 1.0f, 15.0f, -0.01f, 1.0f, 1.0f } };
+		quad(bearing);
+		// The elevation segments: a quarter of the ring texture, standing up.
+		const float elevation[4][5] = {
+			{ 0.0f, 0.0f, 0.0f, 0.5f, 0.5f }, { 0.0f, 0.0f, -15.0f, 0.5f, 0.0f },
+			{ 0.0f, 15.0f, -15.0f, 1.0f, 0.0f }, { 0.0f, 15.0f, 0.0f, 1.0f, 0.5f } };
+		quad(elevation);
+		// The elevation side marker, one face each side.
+		const float side1[4][5] = {
+			{ -0.01f, 15.0f, -1.0f, 1.0f, 1.0f }, { -0.01f, 3.0f, -1.0f, 1.0f, 0.0f },
+			{ -0.01f, 3.0f, 0.0f, 0.0f, 0.0f }, { -0.01f, 15.0f, 0.0f, 0.0f, 1.0f } };
+		const float side2[4][5] = {
+			{ 0.01f, 3.0f, -1.0f, 1.0f, 0.0f }, { 0.01f, 15.0f, -1.0f, 1.0f, 1.0f },
+			{ 0.01f, 15.0f, 0.0f, 0.0f, 1.0f }, { 0.01f, 3.0f, 0.0f, 0.0f, 0.0f } };
+		quad(side1);
+		quad(side2);
+		// The elevation top marker.
+		const float top[4][5] = {
+			{ -1.0f, 15.0f, 0.0f, 0.0f, 1.0f }, { -1.0f, 3.0f, 0.0f, 0.0f, 0.0f },
+			{ 1.0f, 3.0f, 0.0f, 1.0f, 0.0f }, { 1.0f, 15.0f, 0.0f, 1.0f, 1.0f } };
+		quad(top);
 
-	// One arc of ticks: upstream's ring is twenty-four of them over a full
-	// turn, and its elevation quadrant is a quarter of the same.
-	void appendTickArc(std::vector<float> &verts, int ticks, float sweep,
-		float inner, float outer, bool flat, float r, float g, float b)
-	{
-		const float halfTick = 0.11f;   // radians; upstream's ticks are ~6deg
-		for (int i = 0; i < ticks; i++) {
-			const float centre = sweep * ((float) i / (float) ticks);
-			auto vertex = [&](float angle, float radius) {
-				SightVertex v;
-				if (flat) {
-					// Flat on the ground: the ring lies in the x/z plane.
-					v.x = sinf(angle) * radius;
-					v.y = 0.4f;
-					v.z = -cosf(angle) * radius;
-				} else {
-					// Standing up in the plane the barrel swings through.
-					v.x = 0.0f;
-					v.y = sinf(angle) * radius;
-					v.z = -cosf(angle) * radius;
-				}
-				v.r = r; v.g = g; v.b = b;
-				return v;
-			};
-			appendQuad(verts,
-				vertex(centre - halfTick, inner), vertex(centre - halfTick, outer),
-				vertex(centre + halfTick, outer), vertex(centre + halfTick, inner));
-		}
-	}
-
-	void uploadSightPiece(const std::vector<float> &verts, GLuint &vao, GLuint &vbo, int &count)
-	{
-		count = (int) (verts.size() / 6);
-		glGenVertexArrays(1, &vao);
-		glBindVertexArray(vao);
-		glGenBuffers(1, &vbo);
-		glBindBuffer(GL_ARRAY_BUFFER, vbo);
-		glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(float), verts.data(), GL_STATIC_DRAW);
+		glGenVertexArrays(1, &aimSightVao);
+		glBindVertexArray(aimSightVao);
+		glGenBuffers(1, &aimSightVbo);
+		glBindBuffer(GL_ARRAY_BUFFER, aimSightVbo);
+		glBufferData(GL_ARRAY_BUFFER, v.size() * sizeof(float), v.data(), GL_STATIC_DRAW);
 		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) 0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) 0);
 		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *) (3 * sizeof(float)));
+		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *) (3 * sizeof(float)));
 		glBindVertexArray(0);
 	}
 
-	void buildOriginalSightGeometry()
+	// The engine's axes (x, y, z up) to this renderer's world (x, up, map
+	// height - y): worldZFromEngineY as a matrix, a quarter turn about x.
+	Mat4 engineToWorld()
 	{
-		if (sightRingVertexCount > 0) return;
+		Mat4 m = Mat4::identity();
+		m.m[5] = 0.0f; m.m[6] = -1.0f;
+		m.m[9] = 1.0f; m.m[10] = 0.0f;
+		m.m[14] = mapHeightUnits;
+		return m;
+	}
 
-		const float kInner = 9.5f, kOuter = 13.5f;
-		const float kRingR = 0.68f, kRingG = 0.68f, kRingB = 1.0f;
-
-		// Flat under the tank: the protractor ring.
-		{
-			std::vector<float> verts;
-			appendTickArc(verts, 24, 2.0f * (float) M_PI, kInner, kOuter, true,
-				kRingR, kRingG, kRingB);
-			uploadSightPiece(verts, sightRingVao, sightRingVbo, sightRingVertexCount);
-		}
-
-		// Turning with the turret: the blue bearing marker lying on the
-		// ground, and the arc the barrel's elevation is read against.
-		{
-			std::vector<float> verts;
-			appendTaperedBlade(verts, 3.0f, 15.0f, 1.0f, 0.35f, 0.35f, 1.0f, true);
-			appendTickArc(verts, 7, (float) M_PI_2, kInner, kOuter, false,
-				kRingR, kRingG, kRingB);
-			uploadSightPiece(verts, sightBearingVao, sightBearingVbo, sightBearingVertexCount);
-		}
-
-		// Lifting with the gun: the red blade along the barrel, upstream's
-		// aimtop.png - two units across at fifteen out, a point at three.
-		{
-			std::vector<float> verts;
-			appendTaperedBlade(verts, 3.0f, 15.0f, 1.0f, 1.0f, 0.25f, 0.25f, false);
-			uploadSightPiece(verts, sightBarrelVao, sightBarrelVbo, sightBarrelVertexCount);
-		}
+	// glRotatef about z, in degrees, as upstream turns the sight to the bearing.
+	Mat4 engineRotateZ(float degrees)
+	{
+		Mat4 r = Mat4::identity();
+		const float a = degrees * (float) M_PI / 180.0f;
+		const float c = cosf(a), s = sinf(a);
+		r.m[0] = c; r.m[1] = s;
+		r.m[4] = -s; r.m[5] = c;
+		return r;
 	}
 
 	void buildSightGeometry()
@@ -6909,9 +6892,14 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	sightFogColorLoc = glGetUniformLocation(sightProgram, "uFogColor");
 	sightFogDensityLoc = glGetUniformLocation(sightProgram, "uFogDensity");
 	sightVertexCount = 0;
-	sightRingVertexCount = 0;
-	sightBearingVertexCount = 0;
-	sightBarrelVertexCount = 0;
+	aimSightProgram = linkProgram(kAimSightVertexShader, kAimSightFragmentShader);
+	aimSightMvpLoc = glGetUniformLocation(aimSightProgram, "uMVP");
+	aimSightTexLoc = glGetUniformLocation(aimSightProgram, "uTexture");
+	aimSightFogColorLoc = glGetUniformLocation(aimSightProgram, "uFogColor");
+	aimSightFogDensityLoc = glGetUniformLocation(aimSightProgram, "uFogDensity");
+	// A fresh context has none of the old one's buffers.
+	aimSightVao = 0;
+	aimSightVbo = 0;
 
 	meshProgram = linkProgram(kMeshVertexShader, kMeshFragmentShader);
 	meshMvpLoc = glGetUniformLocation(meshProgram, "uMVP");
@@ -7018,6 +7006,13 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnSurfaceCreated(JNIEnv *, jobject) {
 	tankArrowTexture = loadSkyTexture("data/images/arrow.bmp", "data/images/arrowi.bmp",
 									  false, nullptr, nullptr, S3D::eDataLocation);
 	LOGI("Tank arrow texture: %s", tankArrowTexture ? "loaded" : "FAILED");
+	// M22: upstream's sight textures, from the mod like its GLTextureReferences.
+	aimRotationTexture = loadSkyTexture("", "data/windows/aimrotation.png", false);
+	aimBotTexture = loadSkyTexture("", "data/windows/aimbot.png", false);
+	aimSideTexture = loadSkyTexture("", "data/windows/aimside.png", false);
+	aimTopTexture = loadSkyTexture("", "data/windows/aimtop.png", false);
+	LOGI("Sight textures: %s", (aimRotationTexture && aimBotTexture && aimSideTexture && aimTopTexture)
+		 ? "loaded" : "FAILED");
 
 	// One white texel, so a flat-coloured quad can go through the textured
 	// program with the colour in its vertices.
@@ -7339,6 +7334,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		bool  parachuteOpen;
 		// Who this tank is, for the plate tap that opens their card.
 		unsigned int playerId;
+		// The gun's muzzle in the engine's axes, and the gun's bearing and
+		// elevation in degrees, for upstream's sight.
+		float gunX, gunY, gunZ;
+		float bearingDegrees, elevationDegrees;
 	};
 	std::vector<TankInstance> tankInstances;
 
@@ -7600,6 +7599,18 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 		// re-adding one here would put the barrel back out of step with the
 		// shot.
 		float heading = tank->getShotInfo().getRotationGunXY().asFloat() * (float) M_PI / 180.0f;
+		// Where upstream's sight starts. The function hands back a static,
+		// so it's copied at once.
+		float gunX, gunY, gunZ;
+		{
+			FixedVector &gun = TankLib::getTankGunPosition(
+				tank->getLife().getTankTurretPosition(),
+				tank->getShotInfo().getRotationGunXY(),
+				tank->getShotInfo().getRotationGunYZ());
+			gunX = gun[0].asFloat();
+			gunY = gun[1].asFloat();
+			gunZ = gun[2].asFloat();
+		}
 		float elevation = tank->getShotInfo().getRotationGunYZ().asFloat() * (float) M_PI / 180.0f;
 		// The hull's own bearing, from the same place a moving target's
 		// comes from: TargetLife keeps it only as a quaternion, a yaw about
@@ -7684,6 +7695,9 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			shieldR, shieldG, shieldB,
 			parachuteOpen,
 			(unsigned int) tank->getPlayerId(),
+			gunX, gunY, gunZ,
+			tank->getShotInfo().getRotationGunXY().asFloat(),
+			tank->getShotInfo().getRotationGunYZ().asFloat(),
 		});
 
 		float markerY = groundY + 1.5f;
@@ -8296,8 +8310,10 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	std::vector<float> unmodelledShots, explosionPositions;
 	bool haveSight = false;
 	Mat4 sightTransform = Mat4::identity();
-	Mat4 sightBaseTransform = Mat4::identity();
-	Mat4 sightBearingTransform = Mat4::identity();
+	// Upstream's sight hangs off the gun's muzzle (TankLib::getTankGunPosition),
+	// in the engine's axes, with the gun's bearing and elevation in degrees.
+	float sightGunX = 0.0f, sightGunY = 0.0f, sightGunZ = 0.0f;
+	float sightBearingDegrees = 0.0f, sightElevationDegrees = 0.0f;
 
 	// W3: the scenery, as one callable pass, so the reflection can draw
 	// it too. The instance buckets are rebuilt on each call rather than
@@ -8615,16 +8631,20 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// strict turn order, so every live moment is your turn.
 			if (collect && inst.mine && inst.alive) {
 				haveSight = true;
-				// M22: upstream's sight needs three frames, not one - see
-				// buildOriginalSightGeometry.
-				sightBaseTransform = Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z);
-				sightBearingTransform = Mat4::multiply(
-					sightBaseTransform, Mat4::rotateY(inst.headingRadians));
+				// Both sights start at the muzzle, as upstream's do
+				// (drawSight and drawOldSight both translate to
+				// TankLib::getTankGunPosition unless OldSightPosition is on,
+				// which it isn't by default).
+				sightGunX = inst.gunX;
+				sightGunY = inst.gunY;
+				sightGunZ = inst.gunZ;
+				sightBearingDegrees = inst.bearingDegrees;
+				sightElevationDegrees = inst.elevationDegrees;
 				// The blade lives in the gun's own frame, so it inherits the
 				// bearing and elevation for free - but not the model scale,
 				// since its radii are already in world units.
 				sightTransform = Mat4::multiply(
-					Mat4::translate(inst.x, inst.y + gpu->groundOffset, inst.z),
+					Mat4::translate(inst.gunX, inst.gunZ, worldZFromEngineY(inst.gunY)),
 					Mat4::multiply(
 						Mat4::rotateY(inst.headingRadians),
 						Mat4::rotateX(inst.elevationRadians)));
@@ -9664,26 +9684,39 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 	drawTanksPass(mvp, true);
 
 	if (haveSight && g_sightStyle.load() == 1) {
-		// M22: upstream's own arrangement - a protractor ring flat under the
-		// tank, a bearing marker on the ground, an arc for the elevation and
-		// the red blade along the barrel.
-		buildOriginalSightGeometry();
-		glUseProgram(sightProgram);
-		setFixedFunctionFog(sightFogColorLoc, sightFogDensityLoc);
+		// M22: upstream's sight, drawSight's three frames: the muzzle, then
+		// the bearing, then the elevation.
+		buildAimSightGeometry();
+		glUseProgram(aimSightProgram);
+		setFixedFunctionFog(aimSightFogColorLoc, aimSightFogDensityLoc);
+		glUniform1i(aimSightTexLoc, 0);
+		glActiveTexture(GL_TEXTURE0);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		glDisable(GL_CULL_FACE);
-		struct Piece { GLuint vao; int count; const Mat4 *frame; };
+		glBindVertexArray(aimSightVao);
+		const Mat4 atMuzzle = Mat4::multiply(engineToWorld(),
+			Mat4::translate(sightGunX, sightGunY, sightGunZ));
+		const Mat4 alongBearing = Mat4::multiply(atMuzzle, engineRotateZ(sightBearingDegrees));
+		const Mat4 alongGun = Mat4::multiply(alongBearing,
+			Mat4::rotateX(sightElevationDegrees * (float) M_PI / 180.0f));
+		struct Piece { int first; int count; GLuint texture; const Mat4 *frame; };
 		const Piece pieces[] = {
-			{ sightRingVao,    sightRingVertexCount,    &sightBaseTransform },
-			{ sightBearingVao, sightBearingVertexCount, &sightBearingTransform },
-			{ sightBarrelVao,  sightBarrelVertexCount,  &sightTransform },
+			{ kAimRingFirst,      kAimRingCount,      aimRotationTexture, &atMuzzle },
+			{ kAimBearingFirst,   kAimBearingCount,   aimBotTexture,      &alongBearing },
+			{ kAimElevationFirst, kAimElevationCount, aimRotationTexture, &alongGun },
+			{ kAimSideFirst,      kAimSideCount,      aimSideTexture,     &alongGun },
+			{ kAimTopFirst,       kAimTopCount,       aimTopTexture,      &alongGun },
 		};
 		for (const Piece &piece : pieces) {
-			if (piece.count == 0) continue;
+			if (!piece.texture) continue;
 			Mat4 pieceMvp = Mat4::multiply(mvp, *piece.frame);
-			glUniformMatrix4fv(sightMvpLoc, 1, GL_FALSE, pieceMvp.m);
-			glBindVertexArray(piece.vao);
-			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, 0, piece.count);
+			glUniformMatrix4fv(aimSightMvpLoc, 1, GL_FALSE, pieceMvp.m);
+			glBindTexture(GL_TEXTURE_2D, piece.texture);
+			frameDrawCalls++; glDrawArrays(GL_TRIANGLES, piece.first, piece.count);
 		}
+		glBindTexture(GL_TEXTURE_2D, 0);
+		glDisable(GL_BLEND);
 		glEnable(GL_CULL_FACE);
 	} else if (haveSight) {
 		buildSightGeometry();

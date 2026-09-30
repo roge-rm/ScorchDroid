@@ -80,7 +80,7 @@ different; **missing** = not drawn at all.
 | Parachute | Model drawn above a falling tank | Same | match |
 | Names, life bars | Name in the player colour, green/black bars for life and shield, billboarded | Same, drawn by the HUD layer at projected positions | close |
 | Tank arrow | `arrow.bmp` billboard 4–7 units above a tank that is not in its normal state, in the player colour | Off-screen arrow only | gap, small (V9) |
-| Sight | Protractor ring + bearing marker + blade, or the old sight | Both (M22) | match |
+| Sight | Protractor ring + bearing marker + blade, or the old sight | Both (M22). Upstream's is drawn with its own four textures from the muzzle since 2026-09-30; until then it was untextured stand-in geometry at the tank's base | match |
 | Shadow circles | `ShadowMap::addCircle` under tanks, targets and smoke when no hardware shadows | Sprites under tanks and targets | close |
 | Burnt targets | Target swaps to its burnt model after napalm | Trees swap (snow/burnt variants); other targets via the model store | match |
 | Boids, ships | Targets moved by the engine, drawn as models | Drawn as targets | match |
