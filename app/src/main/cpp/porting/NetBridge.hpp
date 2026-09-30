@@ -109,6 +109,9 @@ protected:
 	bool hosting_;
 
 	SDL_Thread*            sendThread_;
+	// The browser build's stand-in for the send thread: the outgoing queue
+	// is drained inline, on each processMessages() (see startProcessing).
+	bool                   sendInline_;
 	volatile bool          stopped_;
 	pthread_mutex_t        peersMutex_;
 	std::set< unsigned int > peers_;

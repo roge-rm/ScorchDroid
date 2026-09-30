@@ -362,6 +362,13 @@ static bool bringUpHostInterface(JNIEnv *env, bool overBluetooth) {
     const int port = ScorchedServer::instance()->getOptionsGame().getPortNo();
     g_hostingPort = port;
 
+#ifdef __EMSCRIPTEN__
+    // A browser can't listen, and NetServerTCP3 wants threads it doesn't
+    // have. The bridge over a WebSocket transport that never listens takes
+    // its place, so a game in a page is a solo game, and what the server
+    // sends to its in-process player is dropped like any unknown peer's.
+    overBluetooth = true;
+#endif
     if (overBluetooth) {
         auto *transport = new JniTransport(env);
         if (!transport->valid()) {

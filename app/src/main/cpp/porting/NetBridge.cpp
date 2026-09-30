@@ -18,6 +18,7 @@ NetBridge::NetBridge(BridgeTransport *transport)
 	, serverDestinationId_(UINT_MAX)
 	, hosting_(false)
 	, sendThread_(nullptr)
+	, sendInline_(false)
 	, stopped_(false)
 {
 	pthread_mutex_init(&peersMutex_, nullptr);
@@ -34,7 +35,11 @@ NetBridge::~NetBridge()
 
 bool NetBridge::started()
 {
+#ifdef __EMSCRIPTEN__
+	return sendInline_ && !stopped_;
+#else
 	return (nullptr != sendThread_);
+#endif
 }
 
 bool NetBridge::start(int portNo)
@@ -80,6 +85,13 @@ bool NetBridge::startProcessing()
 	// on the thread started here rather than on the caller's.
 	outgoingMessageHandler_.setMessageHandler(this);
 
+#ifdef __EMSCRIPTEN__
+	// A browser build has one thread, and a WebSocket send never blocks, so
+	// the queue is drained by processMessages() on the engine's own tick
+	// instead of by a thread of its own.
+	sendInline_ = true;
+	return true;
+#endif
 	sendThread_ = SDL_CreateThread(NetBridge::sendThreadFunc, (void *) this);
 	if (nullptr == sendThread_)
 	{
@@ -119,6 +131,7 @@ void NetBridge::stop()
 	// that basis would leave the transport holding its sockets - on Android,
 	// a live Bluetooth link for a game that ended.
 	stopped_ = true;
+	sendInline_ = false;
 	if (transport_) transport_->stop();
 
 	SDL_Thread *localSendThread = sendThread_;
@@ -137,6 +150,7 @@ void NetBridge::stop()
 
 int NetBridge::processMessages()
 {
+	if (sendInline_ && !stopped_) outgoingMessageHandler_.processMessages();
 	return incomingMessageHandler_.processMessages();
 }
 

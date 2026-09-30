@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import auth
+from . import auth, play
 from .control import Control, ControlError, ServerDown
 from .discovery import Advertiser
 
@@ -86,6 +86,7 @@ async def lifespan(app):
 app = FastAPI(title="ScorchDroid server admin", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=os.path.join(HERE, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(HERE, "templates"))
+app.include_router(play.router)
 
 
 # --- session plumbing -------------------------------------------------

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScorchDroid engine test</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; color: #eee; font: 14px system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #hud { position: fixed; left: 8px; top: 8px; right: 8px; pointer-events: none; }
+  #hud > * { pointer-events: auto; }
+  #status { background: #0008; padding: 4px 8px; border-radius: 4px; display: inline-block; white-space: pre; }
+  #controls { position: fixed; left: 8px; bottom: 8px; background: #0008; padding: 8px; border-radius: 4px; display: grid; grid-template-columns: auto 200px 3em; gap: 4px 8px; align-items: center; }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 12px; align-items: center; justify-content: center; background: #000c; }
+  button, input { font: inherit; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="hud"><div id="status">Loading...</div></div>
+<div id="controls" hidden>
+  <label for="angle">Angle</label><input id="angle" type="range" min="0" max="359" value="0"><span id="angleV"></span>
+  <label for="elev">Elevation</label><input id="elev" type="range" min="0" max="90" value="45"><span id="elevV"></span>
+  <label for="power">Power</label><input id="power" type="range" min="0" max="1000" value="600"><span id="powerV"></span>
+  <span></span><button id="fire">Fire</button><span></span>
+</div>
+<div id="start" hidden>
+  <button id="solo">Play solo against bots</button>
+  <div><input id="server" placeholder="ws://host:port" size="28"> <button id="join">Join</button></div>
+</div>
+<script src="scorchdroid.js"></script>
+<script>
+(async () => {
+  const status = document.getElementById('status');
+  const canvas = document.getElementById('canvas');
+  const M = await ScorchDroidEngine({
+    canvas,
+    setStatus: (s) => { if (s) status.textContent = s; },
+  });
+  const env = M._sd_jni_env();
+
+  // JNI objects to and from the page. Everything made is freed together by release().
+  const str = (s) => { const p = M.stringToNewUTF8(s); const j = M._sd_jni_string(p); M._free(p); return j; };
+  const text = (j) => j ? M.UTF8ToString(M._sd_jni_chars(j)) : '';
+  const strings = (a) => { const n = M._sd_jni_length(a); const out = []; for (let i = 0; i < n; i++) out.push(text(M._sd_jni_object_at(a, i))); return out; };
+  const release = () => M._sd_jni_release();
+  const nb = (name, ...args) => M['_Java_com_rm_scorchdroid_NativeBridge_' + name](env, 0, ...args);
+  const gr = (name, ...args) => M['_Java_com_rm_scorchdroid_GameRenderer_' + name](env, 0, ...args);
+
+  if (!nb('initEngine', str('/scorched_root'))) { status.textContent = 'initEngine failed'; return; }
+  release();
+
+  const start = document.getElementById('start');
+  start.hidden = false;
+  status.textContent = 'Ready';
+  const query = new URLSearchParams(location.search);
+  const mode = await new Promise((resolve) => {
+    if (query.has('solo')) resolve({ solo: true });
+    if (query.has('join')) resolve({ url: query.get('join') });
+    document.getElementById('solo').onclick = () => resolve({ solo: true });
+    document.getElementById('join').onclick = () => resolve({ url: document.getElementById('server').value });
+  });
+  start.hidden = true;
+
+  const selector = M.stringToNewUTF8('#canvas');
+  const context = M._sd_gl_create(selector);
+  M._free(selector);
+  if (!context) { status.textContent = 'No WebGL 2 here'; return; }
+  const resize = () => {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(canvas.clientWidth * dpr);
+    canvas.height = Math.round(canvas.clientHeight * dpr);
+    gr('nativeOnSurfaceChanged', canvas.width, canvas.height);
+  };
+  gr('nativeSetUiDensity', window.devicePixelRatio || 1);
+  gr('nativeOnSurfaceCreated');
+  resize();
+  window.addEventListener('resize', resize);
+
+  const ok = mode.solo ? nb('startLocalGame', 0) : nb('startJoinGameBluetooth', str(mode.url));
+  release();
+  if (!ok) { status.textContent = 'Could not start the game'; return; }
+
+  // Camera: drag to orbit, right-drag or shift-drag to pan, wheel to zoom.
+  let drag = null;
+  canvas.addEventListener('pointerdown', (e) => { drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey }; canvas.setPointerCapture(e.pointerId); });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    gr(drag.pan ? 'nativeCameraPan' : 'nativeCameraDrag', dx, dy);
+  });
+  canvas.addEventListener('pointerup', () => { drag = null; });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('wheel', (e) => { e.preventDefault(); gr('nativeCameraZoom', Math.exp(-e.deltaY * 0.001)); }, { passive: false });
+
+  // Aiming. The sliders are the engine's own angle, counter-clockwise.
+  const controls = document.getElementById('controls');
+  const angle = document.getElementById('angle'), elev = document.getElementById('elev'), power = document.getElementById('power');
+  const show = () => {
+    document.getElementById('angleV').textContent = angle.value;
+    document.getElementById('elevV').textContent = elev.value;
+    document.getElementById('powerV').textContent = power.value;
+  };
+  const aim = () => { show(); nb('setAim', +angle.value, +elev.value, power.value / 1000); };
+  [angle, elev, power].forEach((s) => s.addEventListener('input', aim));
+  document.getElementById('fire').onclick = () => {
+    const id = nb('getMyTankId');
+    nb('fireWeapon', id, +angle.value, +elev.value, power.value / 1000);
+  };
+  let aimSeeded = false;
+
+  let lastTick = 0, frames = 0, fpsAt = performance.now(), fps = 0;
+  const frame = (now) => {
+    if (now - lastTick >= 100) {
+      lastTick = now;
+      nb('tickEngine');
+      const join = nb('getClientJoinState');
+      let label = text(nb('getMyStatusLabel'));
+      if (join >= 0 && join !== 3) label = 'Joining (' + join + ') ' + text(nb('getClientFailureReason'));
+      const weapon = text(nb('getCurrentWeaponName'));
+      const wind = text(nb('getWindInfo'));
+      status.textContent = label + '\n' + weapon + '   wind ' + wind + '   $' + nb('getMyMoney') + '   ' + fps + ' fps';
+      if (!aimSeeded) {
+        const parts = text(nb('getMyAim')).split('|');
+        if (parts.length === 3) {
+          angle.value = Math.round(+parts[0]); elev.value = Math.round(+parts[1]); power.value = Math.round(+parts[2] * 1000);
+          show(); aimSeeded = true; controls.hidden = false;
+        }
+      }
+      nb('pollSoundEvents');
+      release();
+    }
+    gr('nativeOnDrawFrame');
+    release();
+    frames++;
+    if (now - fpsAt >= 1000) { fps = frames; frames = 0; fpsAt = now; }
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

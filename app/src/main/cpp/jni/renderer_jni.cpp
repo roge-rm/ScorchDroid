@@ -2586,7 +2586,7 @@ namespace
 				 groundJob.inputs.sunPosition[2],
 				 groundJob.inputs.ambience[0], groundJob.inputs.ambience[1], groundJob.inputs.ambience[2],
 				 groundJob.inputs.diffuse[0], groundJob.inputs.diffuse[1], groundJob.inputs.diffuse[2]);
-			groundThread = std::thread([]() {
+			auto groundBuild = []() {
 				// Everything below reads only the job's own copies.
 				LandscapeTextureBuilder::Inputs inputs;
 				int size; bool bake;
@@ -2607,7 +2607,14 @@ namespace
 				groundJob.lightBaked = lightBaked;
 				groundJob.error = error;
 				groundJob.done = true;
-			});
+			};
+#ifdef __EMSCRIPTEN__
+			// A browser build has one thread: the build runs here, and the
+			// next frame adopts it like a finished worker's.
+			groundBuild();
+#else
+			groundThread = std::thread(groundBuild);
+#endif
 			return;
 		}
 
@@ -2616,7 +2623,7 @@ namespace
 			std::lock_guard<std::mutex> lock(groundMutex);
 			if (!groundJob.done) return;
 		}
-		groundThread.join();
+		if (groundThread.joinable()) groundThread.join();
 		groundJobRunning = false;
 		if (groundJob.generation != groundGeneration) {
 			LOGI("Ground texture: discarding a build for a previous landscape");
@@ -3562,6 +3569,37 @@ namespace
 		oceanHasNew = false;
 	}
 
+#ifdef __EMSCRIPTEN__
+	// The browser build's worker: one thread, so the tile is generated on
+	// the frame, at the rate the worker below sleeps to.
+	std::chrono::steady_clock::time_point oceanStarted;
+	std::chrono::steady_clock::time_point oceanNextStep;
+
+	void startOceanWorker()
+	{
+		if (oceanRunning.load()) return;
+		oceanRunning.store(true);
+		oceanStarted = std::chrono::steady_clock::now();
+		oceanNextStep = oceanStarted;
+	}
+
+	void pumpOceanInline()
+	{
+		if (!oceanRunning.load()) return;
+		const auto now = std::chrono::steady_clock::now();
+		if (now < oceanNextStep) return;
+		static ScorchDroidOcean::Tile tile;
+		ScorchDroidOcean::generate(std::chrono::duration<float>(now - oceanStarted).count(), tile);
+		{
+			std::lock_guard<std::mutex> lock(oceanMutex);
+			oceanReady = tile;
+			oceanHasNew = true;
+		}
+		const int detail = g_waterDetail.load();
+		const int millis = detail >= 2 ? 41 : (detail == 1 ? 83 : 166);
+		oceanNextStep = now + std::chrono::milliseconds(millis);
+	}
+#else
 	void startOceanWorker()
 	{
 		if (oceanRunning.load()) return;
@@ -3589,6 +3627,7 @@ namespace
 			}
 		});
 	}
+#endif
 
 	void updateOceanIfNeeded(ScorchedContext &ctx)
 	{
@@ -3621,6 +3660,9 @@ namespace
 		}
 
 		startOceanWorker();
+#ifdef __EMSCRIPTEN__
+		pumpOceanInline();
+#endif
 
 		// Upload whatever the worker has finished, if anything.
 		bool haveNew = false;

@@ -1,0 +1,4 @@
+build/
+out/
+# The test page links these from out/ (see docs/web-port-plan.md).
+test/scorchdroid.*
