@@ -383,11 +383,18 @@ static bool bringUpHostInterface(JNIEnv *env, bool overBluetooth) {
         // handing it over again. host-tests does exactly this.
         bridge->setMessageHandler(&ScorchedServer::instance()->getComsMessageHandler());
         g_hostingPort = 0;
+#ifdef __EMSCRIPTEN__
+        // Nothing to listen with, so nothing to report as a failure: the
+        // game runs, and it's solo.
+        bridge->startWithoutListening();
+        g_hostingListening = false;
+#else
         g_hostingListening = bridge->start(0);
         LOGI("NetBridge::start() over Bluetooth -> %d", g_hostingListening);
         if (!g_hostingListening) {
             LOGE("Bluetooth hosting failed to start listening");
         }
+#endif
     } else {
         g_hostingListening = ScorchedServer::instance()->getContext().getNetInterface().start(port);
         LOGI("NetInterface::start(%d) -> %d", port, g_hostingListening);
@@ -477,6 +484,7 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
          options.getStartMoney());
 
     if (!bringUpHostInterface(env, overBluetooth == JNI_TRUE)) return JNI_FALSE;
+#ifndef __EMSCRIPTEN__
     if (!g_hostingListening) {
         // Not fatal - matches upstream's own single-player-vs-loopback
         // fallback in spirit: local practice against bots still works
@@ -486,6 +494,7 @@ Java_com_rm_scorchdroid_NativeBridge_startLocalGame(
         // failure is too harsh for an interactive app.
         LOGE("Failed to bind port %d - continuing without LAN hosting", g_hostingPort);
     }
+#endif
 
     addHumanTank();
     g_humanPromoted = false;
@@ -588,9 +597,11 @@ Java_com_rm_scorchdroid_NativeBridge_startLoadedGame(JNIEnv *env, jobject /* thi
         ScorchedServer::stopServer();
         return JNI_FALSE;
     }
+#ifndef __EMSCRIPTEN__
     if (!g_hostingListening) {
         LOGE("Loaded game: nothing is listening - it will not be joinable");
     }
+#endif
 
     g_humanPromoted = false;
     g_humanLoadPending = false;

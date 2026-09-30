@@ -59,6 +59,16 @@ bool NetBridge::start(int portNo)
 	return true;
 }
 
+bool NetBridge::startWithoutListening()
+{
+	// A host nobody can reach: the browser's, which can't listen at all. It
+	// still runs its queues, so the server counts as started and what it
+	// sends to peers that will never exist is dropped quietly.
+	if (!transport_) return false;
+	hosting_ = true;
+	return startProcessing();
+}
+
 bool NetBridge::connect(const char *hostName, int portNo)
 {
 	if (!transport_) return false;

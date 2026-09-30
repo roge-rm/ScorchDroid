@@ -68,6 +68,12 @@ public:
 	NetBridge( BridgeTransport* transport );
 	virtual ~NetBridge();
 
+	/**
+	 * Hosts without listening: the queues run, so the server counts as
+	 * started, but nobody can join. For the browser, which can't listen.
+	 */
+	bool startWithoutListening();
+
 	// NetInterface
 	virtual bool started();
 	virtual bool connect( const char* hostName, int portNo );
