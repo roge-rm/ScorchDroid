@@ -1,6 +1,21 @@
 package com.rm.scorchdroid
 
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.withFrameNanos
@@ -845,6 +860,7 @@ abstract class GameController(
     /** Once a frame, while a game's tick loop is running. */
     fun onFrame() {
         if (!frameUpdatesOn) return
+        applyHeldKeys()
         hudState.floatingLabels = parseFloatingLabels(GameRenderer.nativeGetFloatingLabels())
         // A1: the shells in flight hum while they fly, and both how
         // loud and which side change as they travel - so this rides
@@ -2076,6 +2092,213 @@ abstract class GameController(
         }
     }
 
+    // --- Keyboard ----------------------------------------------------------------
+    //
+    // Scorched3D's own keys (data/keys.xml) for a browser or a phone with a
+    // keyboard. The aiming keys work as TankKeyboardControlUtil does: held,
+    // they move the gun 45 degrees and the power 250 (of 1000) a second,
+    // four times as fast with Ctrl, a quarter with Shift and a twentieth with
+    // both. Everything else is one action per press.
+
+    // Which keys are down, so a held key's repeats don't act twice.
+    private val keysDown = HashSet<Key>()
+    private var shiftDown = false
+    private var ctrlDown = false
+    private var lastKeyFrameMillis = 0L
+    private val keyAimAxes = HashSet<AimAxis>()
+
+    /**
+     * Where the pointer is over the battlefield, in the renderer's pixels, if
+     * there's a pointer at all. Upstream's "Aim at point" key aims there.
+     */
+    protected open val hoverPoint: Pair<Float, Float>? get() = null
+
+    /** A key event on the game screen. True if the game used it. */
+    fun onGameKey(event: KeyEvent): Boolean {
+        shiftDown = event.isShiftPressed
+        ctrlDown = event.isCtrlPressed
+        // Typing a chat message, or a dialog is up: the keys are theirs.
+        if (hudState.chatComposing || hudState.dialog !is HudDialog.None) {
+            keysDown.clear()
+            return false
+        }
+        val key = event.key
+        if (event.type == KeyEventType.KeyUp) {
+            return keysDown.remove(key) && (key in HELD_KEYS || key in PRESS_KEYS)
+        }
+        if (event.type != KeyEventType.KeyDown) return false
+        if (key in HELD_KEYS) {
+            if (keysDown.add(key)) lastKeyFrameMillis = nowMillis()
+            return true
+        }
+        if (key !in PRESS_KEYS) return false
+        // Held down, a key repeats. These act once per press, as upstream's do.
+        if (!keysDown.add(key)) return true
+        onKeyPress(key)
+        return true
+    }
+
+    private fun onKeyPress(key: Key) {
+        when (key) {
+            Key.Spacebar, Key.F -> fireFromSliders()
+            Key.Tab -> cycleWeapon(if (shiftDown) -1 else 1)
+            Key.U -> revertToLastAim()
+            Key.A -> hoverPoint?.let { (x, y) -> handleBattlefieldTap(x, y) }
+            Key.S -> showScores()
+            Key.D -> keyDefense(AccessoryType.SHIELD)
+            Key.P -> keyDefense(AccessoryType.PARACHUTE)
+            Key.B -> keyDefense(AccessoryType.BATTERY)
+            Key.C -> showCameraPresets()
+            Key.O -> showActionsMenu()
+            Key.Escape -> confirmQuitToMenu()
+            Key.T, Key.Enter, Key.Slash -> openChat("general")
+            Key.Y -> openChat("team")
+            Key.One -> keyCamera(CameraPreset.TOP)
+            Key.Two -> keyCamera(CameraPreset.BEHIND)
+            Key.Three -> keyCamera(CameraPreset.TANK)
+            Key.Four -> keyCamera(CameraPreset.SHOT)
+            Key.Nine -> keyCamera(CameraPreset.ACTION)
+            Key.F1 -> keySpeed(1)
+            Key.F2 -> keySpeed(2)
+            Key.F3 -> keySpeed(3)
+            Key.F4 -> keySpeed(4)
+            else -> Unit
+        }
+    }
+
+    /** Moves the gun and the power, and the camera, for the keys being held. */
+    private fun applyHeldKeys() {
+        if (keysDown.isEmpty() || hudState.chatComposing || hudState.dialog !is HudDialog.None) {
+            if (keysDown.isNotEmpty()) keysDown.clear()
+            stopKeyAimSounds(emptySet())
+            return
+        }
+        val now = nowMillis()
+        // Capped so a long stall (a tab in the background) is not one big jump.
+        val seconds = ((now - lastKeyFrameMillis).coerceIn(0L, 250L)) / 1000f
+        lastKeyFrameMillis = now
+        val rate = when {
+            shiftDown && ctrlDown -> 0.05f
+            ctrlDown -> 4f
+            shiftDown -> 0.25f
+            else -> 1f
+        } * seconds
+
+        fun held(keys: List<Key>) = keys.any { it in keysDown }
+        fun held(key: Key) = key in keysDown
+        val moving = HashSet<AimAxis>()
+        var changed = false
+
+        // Left turns the gun anticlockwise, which is the engine's own
+        // direction, and the dial runs the other way (engineAngleFromDial).
+        val turn = (if (held(Key.DirectionLeft)) -1 else 0) + (if (held(Key.DirectionRight)) 1 else 0)
+        if (turn != 0) {
+            currentAngleDegrees = ((currentAngleDegrees + turn * TURN_PER_SECOND * rate) % 360f + 360f) % 360f
+            hudState.angleDegrees = currentAngleDegrees
+            moving += AimAxis.ANGLE
+            changed = true
+        }
+        var raise = (if (held(Key.DirectionUp)) 1 else 0) - (if (held(Key.DirectionDown)) 1 else 0)
+        if (settings.invertUpDownKeys) raise = -raise
+        if (raise != 0) {
+            currentElevationDegrees = (currentElevationDegrees + raise * TURN_PER_SECOND * rate).coerceIn(0f, 90f)
+            hudState.elevationDegrees = currentElevationDegrees
+            moving += AimAxis.ELEVATION
+            changed = true
+        }
+        val power = (if (held(listOf(Key.Equals, Key.Plus, Key.NumPadAdd, Key.PageUp))) 1 else 0) -
+            (if (held(listOf(Key.Minus, Key.NumPadSubtract, Key.PageDown))) 1 else 0)
+        if (power != 0) {
+            currentPowerFraction = (currentPowerFraction + power * POWER_PER_SECOND * rate).coerceIn(0f, 1f)
+            hudState.powerFraction = currentPowerFraction
+            moving += AimAxis.POWER
+            changed = true
+        }
+        if (changed) pushAimToEngine()
+        for (axis in moving) if (keyAimAxes.add(axis)) playAimSound(axis, true)
+        stopKeyAimSounds(moving)
+
+        // The number pad moves the camera, as upstream's does.
+        if (surfaceAttached) {
+            val dx = (if (held(Key.NumPad6)) 1 else 0) - (if (held(Key.NumPad4)) 1 else 0)
+            val dy = (if (held(Key.NumPad2)) 1 else 0) - (if (held(Key.NumPad8)) 1 else 0)
+            if (dx != 0 || dy != 0) {
+                GameRenderer.nativeCameraDrag(dx * CAMERA_PIXELS_PER_SECOND * seconds, dy * CAMERA_PIXELS_PER_SECOND * seconds)
+            }
+            val zoom = (if (held(Key.NumPad9)) 1 else 0) - (if (held(Key.NumPad3)) 1 else 0)
+            if (zoom != 0) GameRenderer.nativeCameraZoom(1f + zoom * seconds)
+        }
+    }
+
+    private fun stopKeyAimSounds(still: Set<AimAxis>) {
+        val stopped = keyAimAxes.filter { it !in still }
+        for (axis in stopped) {
+            keyAimAxes.remove(axis)
+            playAimSound(axis, false)
+        }
+    }
+
+    /**
+     * Next or previous weapon among the ones owned, as upstream's Tab and
+     * Shift+Tab do.
+     */
+    private fun cycleWeapon(step: Int) {
+        scope.launch {
+            val owned = withContext(Dispatchers.Default) {
+                parseWeaponShop(NativeBridge.getWeaponShop()).filter { it.isOwned && it.isWeapon }
+            }
+            if (owned.isEmpty()) return@launch
+            val current = owned.indexOfFirst { it.isCurrentWeapon }
+            val next = owned[((if (current < 0) 0 else current + step) % owned.size + owned.size) % owned.size]
+            val picked = withContext(Dispatchers.Default) { NativeBridge.selectWeapon(next.accessoryId) }
+            if (!picked) notifyPlayer("Couldn't select ${next.name}")
+        }
+    }
+
+    /**
+     * Upstream's shield, parachute and battery keys. Each only acts when
+     * there's no choice to make: one kind of shield or parachute owned, and
+     * a battery only when there's damage for it to repair.
+     */
+    private fun keyDefense(type: String) {
+        scope.launch {
+            val owned = withContext(Dispatchers.Default) {
+                parseWeaponShop(NativeBridge.getWeaponShop())
+                    .filter { it.isOwned && it.type == type && it.activationChange != null }
+            }
+            val item = when (type) {
+                AccessoryType.BATTERY -> {
+                    val myId = withContext(Dispatchers.Default) { NativeBridge.getMyTankId() }
+                    val info = withContext(Dispatchers.Default) { parseTankInfo(NativeBridge.getTankInfo(myId)) }
+                    if (info == null || info.life >= info.maxLife) return@launch
+                    owned.firstOrNull()
+                }
+                else -> owned.singleOrNull()
+            } ?: return@launch
+            val change = item.activationChange ?: return@launch
+            val used = withContext(Dispatchers.Default) { NativeBridge.useDefense(item.accessoryId, change) }
+            if (!used) notifyPlayer("Couldn't use ${item.name}")
+        }
+    }
+
+    private fun keyCamera(preset: CameraPreset) {
+        if (!surfaceAttached) return
+        GameRenderer.nativeSetCameraPreset(preset.ordinal)
+        hudState.cameraFollow = preset == CameraPreset.FOLLOW
+    }
+
+    private fun keySpeed(times: Int) {
+        scope.launch {
+            val ok = withContext(Dispatchers.Default) { NativeBridge.setSimulationSpeed(times, 1) }
+            if (!ok) notifyPlayer("Only the host can change the game speed")
+        }
+    }
+
+    private fun openChat(channel: String) {
+        hudState.chatChannel = channel
+        hudState.chatComposing = true
+    }
+
     // --- What each platform brings -------------------------------------------
 
     /** The app's version, and the upstream commit the engine was built from. */
@@ -2308,6 +2531,21 @@ abstract class GameController(
                         onFrame()
                     }
                 }
+                // The keys go to the game screen as a whole, ahead of whatever
+                // button or slider was last touched, and it takes focus back
+                // whenever a dialog or the chat box lets go of it.
+                val keyFocus = remember { FocusRequester() }
+                LaunchedEffect(hudState.dialog, hudState.chatComposing) {
+                    if (hudState.dialog is HudDialog.None && !hudState.chatComposing) {
+                        runCatching { keyFocus.requestFocus() }
+                    }
+                }
+                Box(
+                    Modifier.fillMaxSize()
+                        .onPreviewKeyEvent { onGameKey(it) }
+                        .focusRequester(keyFocus)
+                        .focusable(),
+                ) {
                 Battlefield()
                 GameHud(
                     state = hudState,
@@ -2359,6 +2597,7 @@ abstract class GameController(
                         }
                     },
                 )
+                }
             }
         }
         // A game that fails to load has to be able to say so from the
@@ -2389,6 +2628,28 @@ abstract class GameController(
         // How long Skip All Moves waits before passing a move, which is
         // upstream's own five seconds (SkipAllDialog::simulate).
         const val SKIP_ALL_SECONDS = 5
+
+        // TankKeyboardControlUtil's rates: 45 degrees and 250 of 1000 power a second.
+        const val TURN_PER_SECOND = 45f
+        const val POWER_PER_SECOND = 0.25f
+        // The number pad's camera, in the same pixels a drag moves it by.
+        const val CAMERA_PIXELS_PER_SECOND = 300f
+
+        // Keys that act for as long as they're held.
+        val HELD_KEYS = setOf(
+            Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown,
+            Key.Equals, Key.Plus, Key.NumPadAdd, Key.PageUp,
+            Key.Minus, Key.NumPadSubtract, Key.PageDown,
+            Key.NumPad4, Key.NumPad6, Key.NumPad8, Key.NumPad2, Key.NumPad9, Key.NumPad3,
+        )
+
+        // Keys that act once per press.
+        val PRESS_KEYS = setOf(
+            Key.Spacebar, Key.F, Key.Tab, Key.U, Key.A, Key.S, Key.D, Key.P, Key.B, Key.C, Key.O,
+            Key.Escape, Key.T, Key.Enter, Key.Slash, Key.Y,
+            Key.One, Key.Two, Key.Three, Key.Four, Key.Nine,
+            Key.F1, Key.F2, Key.F3, Key.F4,
+        )
     }
 }
 

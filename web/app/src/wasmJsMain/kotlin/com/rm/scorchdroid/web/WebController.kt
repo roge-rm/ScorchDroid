@@ -217,10 +217,19 @@ class WebController(
         )
     }
 
+    // Where the mouse is over the battlefield, for the "aim at point" key.
+    private var hover: Pair<Float, Float>? = null
+    override val hoverPoint: Pair<Float, Float>? get() = hover
+
     private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.handleWheel() {
         awaitPointerEventScope {
             while (true) {
                 val event = awaitPointerEvent()
+                when (event.type) {
+                    PointerEventType.Move, PointerEventType.Enter ->
+                        event.changes.firstOrNull()?.position?.let { hover = it.x to it.y }
+                    PointerEventType.Exit -> hover = null
+                }
                 if (event.type != PointerEventType.Scroll) continue
                 val dy = event.changes.firstOrNull()?.scrollDelta?.y ?: 0f
                 // One step in or out per wheel event. How big a delta a notch

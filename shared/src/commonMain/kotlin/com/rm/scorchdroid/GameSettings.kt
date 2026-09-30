@@ -279,6 +279,18 @@ class GameSettings(private val prefs: KeyValueStore, private val sound: SoundEff
         prefs.putBoolean(KEY_INVERT, value)
     }
 
+    /**
+     * Upstream's InvertUpDownKeys. Its keys file calls Up "increase
+     * elevation", so that's what Up does here; this swaps the two.
+     */
+    var invertUpDownKeys by mutableStateOf(prefs.getBoolean(KEY_INVERT_KEYS, false))
+        private set
+
+    fun updateInvertUpDownKeys(value: Boolean) {
+        invertUpDownKeys = value
+        prefs.putBoolean(KEY_INVERT_KEYS, value)
+    }
+
     /** Tap the ground to aim at it. Off leaves the sliders as the only aim. */
     var tapToAim by mutableStateOf(prefs.getBoolean(KEY_TAP_AIM, true))
         private set
@@ -493,6 +505,7 @@ class GameSettings(private val prefs: KeyValueStore, private val sound: SoundEff
         const val KEY_TURN_SOUND = "sound.turn"
         const val KEY_TOAST = "hud.chatToastSeconds"
         const val KEY_INVERT = "controls.invertDrag"
+        const val KEY_INVERT_KEYS = "controls.invertUpDownKeys"
         const val KEY_TAP_AIM = "controls.tapToAim"
         const val KEY_LEFT_HAND = "controls.leftHand"
         const val KEY_OPACITY = "controls.opacity"

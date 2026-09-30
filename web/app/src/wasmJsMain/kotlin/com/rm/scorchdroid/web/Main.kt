@@ -49,7 +49,10 @@ fun main() {
         controller.onEngineReady(DATA_ROOT, WebMusic(DATA_ROOT), WebAmbient(DATA_ROOT, sound))
     }
 
-    ComposeViewport("root") {
+    // Keep focus where it is when the battlefield is clicked. Clicking
+    // something that can't take focus would otherwise drop it, and with it
+    // the keyboard controls.
+    ComposeViewport("root", configure = { isClearFocusOnMouseDownEnabled = false }) {
         // No theme around it, as on the phone: the screens bring their own colours.
         LaunchedEffect(Unit) { jsPageReady() }
         // Skiko clears its canvas to white before every frame, and the game is

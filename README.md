@@ -80,6 +80,27 @@ You can play it in a browser too, at [roge-rm.gitlab.io/play/scorchdroid](https:
 It's the same game with the same menus. Play solo against bots, or join a server where browser
 players and phone players end up in the same game.
 
+It has Scorched3D's keyboard controls too, and so does the app if your phone has a keyboard:
+
+| Key | What it does |
+|---|---|
+| Left / Right | Turn |
+| Up / Down | Raise / lower the barrel |
+| `+` / `-`, Page Up / Page Down | Power |
+| Hold Shift / Ctrl / both | Aim slower / faster / much slower |
+| Space or `f` | Fire |
+| Tab / Shift+Tab | Next / previous weapon |
+| `u` | Back to your last shot's aim |
+| `a` | Aim where the mouse is |
+| `d` / `p` / `b` | Shield / parachutes / battery |
+| `1` `2` `3` `4` `9`, `c` | Camera views, camera menu |
+| Number pad 4 6 8 2, 9 3 | Move the camera, zoom |
+| `t` or Enter / `y` | Chat / team chat |
+| `s` | Scores |
+| `o` | More actions |
+| F1 to F4 | Game speed (host only) |
+| Esc | Leave the game |
+
 A dedicated server (see below) has the game on its own web page too, at `/play/`, so on the same
 network that's `http://<server>:8080/play/`. That's the one to use for a server on your own
 network, since the page above is https and can only join servers that are too.

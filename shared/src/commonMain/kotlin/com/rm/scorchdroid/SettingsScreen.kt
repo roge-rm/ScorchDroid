@@ -418,6 +418,11 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             settings.invertDrag,
                         ) { settings.updateInvertDrag(it) }
                         SwitchRow(
+                            "Invert up/down keys",
+                            "On a keyboard, makes the up arrow lower the barrel",
+                            settings.invertUpDownKeys,
+                        ) { settings.updateInvertUpDownKeys(it) }
+                        SwitchRow(
                             "Left-hand mode",
                             "Mirrors the controls for left-handed play",
                             settings.leftHandMode,
