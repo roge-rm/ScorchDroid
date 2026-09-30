@@ -42,7 +42,10 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ScorchDroid"
-include(":app")
+// -Pscorchdroid.webOnly builds the browser app without the Android one, for
+// the web container's image, which has no Android SDK (docker/web.Dockerfile).
+val webOnly = providers.gradleProperty("scorchdroid.webOnly").isPresent
+if (!webOnly) include(":app")
 include(":shared")
 include(":webApp")
 project(":webApp").projectDir = file("web/app")

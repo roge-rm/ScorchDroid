@@ -39,9 +39,12 @@ kotlin.sourceSets.named("wasmJsMain") { resources.srcDir(files(engineOut).builtB
 /** The version, read from app/build.gradle.kts, and the upstream commit, as the phone's BuildConfig has them. */
 val appGradle = rootProject.file("app/build.gradle.kts").readText()
 val versionName = Regex("versionName = \"([^\"]+)\"").find(appGradle)!!.groupValues[1]
+// A Docker build has no .git to ask (docker/web.Dockerfile removes the
+// submodules' pointers), and says so rather than failing.
 val upstreamCommit = providers.exec {
     commandLine("git", "-C", rootProject.file("third_party/scorched3d").absolutePath, "rev-parse", "--short=10", "HEAD")
-}.standardOutput.asText.map { it.trim() }
+    isIgnoreExitValue = true
+}.standardOutput.asText.map { it.trim().ifEmpty { "unknown" } }
 val buildInfo = tasks.register("buildInfo") {
     val out = layout.buildDirectory.dir("generated/buildInfo")
     val name = versionName

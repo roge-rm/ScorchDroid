@@ -1,3 +1,5 @@
+# The web image also builds the browser game, so it needs shared/, web/,
+# kotlin-js-store/, the Gradle files and app/src/main/cpp/jni/ too.
 # The build needs third_party/ (upstream + the vendored libraries),
 # patches/, scripts/, cmake/, dedicated-server/, web-admin/ and two
 # directories under app/ - app/src/main/cpp/porting/ is compiled into the
@@ -21,7 +23,6 @@ app/src/main/res
 app/src/main/AndroidManifest.xml
 app/src/androidTest
 app/src/test
-app/src/main/cpp/jni
 host-tests/build
 design
 docs
@@ -29,3 +30,8 @@ tools
 *.jks
 local.properties
 **/__pycache__
+# Local builds of the browser game.
+shared/build
+web/app/build
+web/engine/build
+web/engine/out

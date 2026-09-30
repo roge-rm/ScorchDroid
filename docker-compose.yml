@@ -60,6 +60,8 @@ services:
       GAME_PORT: "${GAME_PORT:-27270}"
       WEB_PORT: "${WEB_PORT:-8080}"
       WEB_BIND: "${WEB_BIND:-0.0.0.0}"
+      # How many browsers can play at once through the relay at /play/ws.
+      PLAY_MAX_CONNECTIONS: "${PLAY_MAX_CONNECTIONS:-32}"
       LAN_DISCOVERY: "${LAN_DISCOVERY:-1}"
       # Set to 1 only when something in front of this terminates TLS -
       # otherwise the session cookie is marked Secure and never comes back.

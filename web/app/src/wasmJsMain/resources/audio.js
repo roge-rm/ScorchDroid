@@ -140,6 +140,12 @@ globalThis.sdAudio = (() => {
       e.gain.gain.linearRampToValueAtTime(0, c.currentTime + fadeSeconds);
       try { e.source.stop(c.currentTime + fadeSeconds); } catch (x) {}
     },
+    // For checking from the console: whether sound is running, and how much
+    // has been decoded and is playing.
+    stats() {
+      return { state: ctx ? ctx.state : 'none', decoded: [...buffers.values()].filter(Boolean).length,
+               failed: [...buffers.values()].filter((b) => !b).length, loops: loops.size, tracks: tracks.size };
+    },
     exists(path) {
       try { return globalThis.sd.FS.analyzePath(path).exists; } catch (e) { return false; }
     },

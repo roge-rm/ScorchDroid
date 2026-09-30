@@ -38,14 +38,20 @@ echo 'ADMIN_PASSWORD=pick-something' > .env
 docker compose up -d --build
 ```
 
-The first build compiles the engine from source and takes a few minutes. After
-that it is cached and a restart is immediate.
+The first build compiles the engine from source, twice (once for the server and
+once for browsers), and takes ten minutes or so. After that it is cached and a
+restart is immediate.
 
 Then open `http://<that machine>:8080` and sign in with the password you set.
 
 Phones on the same network find the server by themselves under
 **Multiplayer → Join Game**, with no address to type. Desktop Scorched3D
 players, and anyone off the LAN, use the machine's address on port `27270`.
+
+The game itself is at `http://<that machine>:8080/play/`, for anyone who'd
+rather play in a browser. No password for that one, it's for players. Under
+**Multiplayer → Join Game** it offers "This server" first, and browser players
+end up in the same game as phone players.
 
 To stop it:
 
@@ -80,7 +86,8 @@ line is required.
 | `ADMIN_PASSWORD` | *(none)* | **Required.** The web admin refuses to start without one rather than come up open. |
 | `SERVER_NAME` | `ScorchDroid` | What players see in their Join Game list. It names the config the first time the server starts; after that the Settings page owns the name, so a rename there survives a restart. |
 | `GAME_PORT` | `27270` | Upstream's port. Anything else means players type `address:port`. |
-| `WEB_PORT` | `8080` | The admin page. |
+| `WEB_PORT` | `8080` | The admin page, and the game for browsers at `/play/`. |
+| `PLAY_MAX_CONNECTIONS` | `32` | How many browsers can play at once. |
 | `WEB_BIND` | `0.0.0.0` | `127.0.0.1` to keep the page to that machine and reach it over an SSH tunnel. |
 | `LAN_DISCOVERY` | `1` | Publish the mDNS service phones discover. Needs host networking. |
 | `HTTPS` | `0` | Set to 1 only behind a TLS-terminating proxy; it marks the session cookie `Secure`, which breaks plain HTTP. |
@@ -115,6 +122,25 @@ Scorched3D host.
 There is no public server list. Upstream's master-server announcement is not
 compiled into this port, so a server on the internet is found by its address,
 not by browsing.
+
+## Browser players
+
+A browser can't open a game connection itself, so the web container relays
+it: each browser connects to `/play/ws`, and the web container opens an
+ordinary game connection to the server for it. The server sees exactly what a
+phone would send, so there is nothing to set up.
+
+Two things follow from that:
+
+- Every browser player reaches the server from the web container, which with
+  host networking is `127.0.0.1`. That's fine as long as `AllowSameIP` stays on
+  (it is by default). Turning it off, or banning by IP, catches every browser
+  player at once. Ban by name instead.
+- A page loaded over `https` can only open `wss://`, so if you put the server
+  behind a TLS proxy, the proxy has to pass WebSockets through to `/play/ws`.
+
+`PLAY_MAX_CONNECTIONS` (default 32) caps how many browsers can be connected
+at once.
 
 ## Administering it
 
@@ -232,6 +258,10 @@ refuses to start if `ADMIN_PASSWORD` is unset. That is proportionate to a game
 server with one operator; if it faces the internet, put it behind a reverse
 proxy with TLS and set `HTTPS=1`, or bind it to `127.0.0.1` and use an SSH
 tunnel.
+
+The browser game at `/play/` and its relay at `/play/ws` are open to anyone
+who can reach the page, the same way the game port is. The relay only ever
+connects to this machine's own game server.
 
 The game port is what any Scorched3D server has always exposed. Set
 `ServerPassword` on the Settings page if you want to keep strangers out.

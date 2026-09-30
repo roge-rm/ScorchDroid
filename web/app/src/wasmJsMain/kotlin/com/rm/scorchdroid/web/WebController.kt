@@ -27,7 +27,6 @@ import com.rm.scorchdroid.SoundEffects
 import com.rm.scorchdroid.nowMillis
 import kotlin.math.abs
 import kotlin.math.hypot
-import kotlin.math.pow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -215,7 +214,10 @@ class WebController(
                 val event = awaitPointerEvent()
                 if (event.type != PointerEventType.Scroll) continue
                 val dy = event.changes.firstOrNull()?.scrollDelta?.y ?: 0f
-                if (dy != 0f) GameRenderer.nativeCameraZoom(1.15f.pow(-dy))
+                // One step in or out per wheel event. How big a delta a notch
+                // is differs between browsers, mice and touchpads, so its size
+                // only decides the direction.
+                if (dy != 0f) GameRenderer.nativeCameraZoom(if (dy < 0f) WHEEL_STEP else 1f / WHEEL_STEP)
                 event.changes.forEach { it.consume() }
             }
         }
@@ -302,6 +304,8 @@ class WebController(
 
     private companion object {
         const val KEY_LAST_SERVER = "join.lastServer"
+        // What one wheel step zooms by: about what a small pinch does.
+        const val WHEEL_STEP = 1.1f
         // The web container's port, and the path its relay listens on
         // (web-admin/app/play.py).
         const val DEFAULT_WEB_PORT = 8080

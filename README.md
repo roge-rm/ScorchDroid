@@ -74,13 +74,24 @@ Then search for ScorchDroid in F-Droid. When a new version comes out, F-Droid wi
 You can also download the APK from the [Releases](https://github.com/roge-rm/ScorchDroid/releases)
 page and sideload it.
 
+## Playing in a browser
+
+You can play it in a browser too, if someone runs a dedicated server (see below). The server's web
+page has the game at `/play/`, so on the same network that's `http://<server>:8080/play/`. It's the
+same game with the same menus, and you can play solo against bots or join the server, where
+browser players and phone players end up in the same game.
+
+It needs a recent browser with WebGL 2 and WebAssembly GC (Chrome or Edge 119, Firefox 120, or
+Safari 18.2, or anything newer). The first load is about 45MB, most of it the game data. Settings
+are kept in the browser, and so are saved games. A browser can join a game but can't host one.
+
 ## Dedicated server
 
 If you want a game that's always up you can run a **dedicated server** on a spare machine. It's
 the same engine without the graphics and sound, so both ScorchDroid and desktop Scorched3D 44.3
 players can connect to it. It comes with a web admin page where you can change any setting, manage
 players (kick, ban, mute etc.), watch the log and chat, and restart the server. Phones on the same
-network will find it on their own.
+network will find it on their own, and browsers can play on it from the same web page.
 
 It runs as two containers and you don't need to clone anything, the compose file builds straight
 from this repo:
@@ -98,6 +109,8 @@ If you're curious how it's built, see [docs/dedicated-server.md](docs/dedicated-
 
 - Android Studio (recent stable) with the NDK, or Gradle with a JDK set up.
 - minSdk 26 / targetSdk 37, `arm64-v8a` and `x86_64`.
+- For the browser build, [Emscripten](https://emscripten.org) 6.0.10 in `~/.local/share/emsdk` (or
+  wherever `EMSDK` says).
 - The submodules, since the upstream source and its dependencies aren't copied into this repo:
 
 ```
@@ -107,8 +120,9 @@ git clone --recurse-submodules https://github.com/roge-rm/ScorchDroid.git
 ## Building & testing
 
 ```
-./gradlew installDebug      # build and install the debug APK
-./gradlew assembleRelease   # build the release APK
+./gradlew installDebug                          # build and install the debug APK
+./gradlew assembleRelease                       # build the release APK
+./gradlew :webApp:wasmJsBrowserDistribution     # the browser game, in web/app/build/dist/wasmJs/productionExecutable/
 ```
 
 Upstream's `data/` folder (weapons, maps, models, language files) gets bundled from the submodule
@@ -148,16 +162,24 @@ Or as the two containers, which is how it's meant to be run: `cp .env.example .e
   texture generator, the sky, and `ClientContext`, which replaces `ScorchedClient`.
 - `app/src/main/cpp/jni/` - `engine_jni.cpp` (game state and controls) and `renderer_jni.cpp` (the
   whole GLES3 renderer).
-- `app/src/main/java/com/rm/scorchdroid/` - the Compose UI (`GameHud`, `HudDialogs`), the
-  `GLSurfaceView` and touch handling (`MainActivity`, `GameRenderer`), the JNI bindings
-  (`NativeBridge`), LAN discovery, sound, and extracting the game data on first run.
+- `shared/` - the game's UI and controller for the phone and the browser alike: the menus, setup,
+  settings, the HUD and its dialogs (`GameHud`, `HudDialogs`), and `GameController`, which runs the
+  game. `NativeBridge` and `GameRenderer` are the engine's calls, and `tools/gen_native_bridge.py`
+  writes both halves of them from one list.
+- `app/src/main/java/com/rm/scorchdroid/` - what only the phone has: the `GLSurfaceView` and touch
+  handling (`MainActivity`), Wi-Fi Direct, Bluetooth and LAN discovery, sound, and extracting the
+  game data on first run.
+- `web/engine/` - the engine and renderer built with Emscripten for the browser, from the same
+  `jni/` files against a stand-in `jni.h`, with a WebSocket where the phone has Bluetooth.
+- `web/app/` - the browser app: the shared UI over that engine, with Web Audio for sound.
 - `host-tests/` - a plain CMake project that builds the engine natively and runs the tests.
 - `dedicated-server/` - the standalone Linux server, with its own CMake project, `main.cpp`, and
   `ControlServer.cpp`, which is how the web admin talks to it. It doesn't touch the game's network
   protocol.
 - `cmake/ScorchedCommon.cmake` - the `scorched_common` library, shared by `host-tests/` and
   `dedicated-server/`.
-- `web-admin/` - the server's web admin page, built with FastAPI, Jinja and htmx.
+- `web-admin/` - the server's web admin page, built with FastAPI, Jinja and htmx. It also serves the
+  browser game and relays browsers to the server over a WebSocket.
 - `docker/`, `docker-compose.yml` - the two images and how they run together.
 
 Two things worth knowing before digging into the renderer, because both have caused bugs: the
