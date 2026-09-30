@@ -32,7 +32,14 @@ apply_patches_for() {
         # is effectively already present. Only a fully clean checkout
         # (matching the pinned commit exactly) gets patches applied
         # automatically.
-        if [ -n "$(git status --porcelain)" ]; then
+        #
+        # Line endings don't count. Upstream commits some Windows headers
+        # with CRLF, and with core.autocrlf set to input a fresh checkout can
+        # list all 130 of them as modified, which skipped every patch on a
+        # clean tree. A diff that ignores a CR at the end of a line sees a
+        # fresh checkout as clean and a patched one as not.
+        if ! git diff --ignore-cr-at-eol --quiet ||
+            [ -n "$(git ls-files --others --exclude-standard)" ]; then
             return 0
         fi
     else
