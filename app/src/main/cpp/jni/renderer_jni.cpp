@@ -6612,7 +6612,7 @@ namespace
 			if (!o.onScreen) continue;
 
 			// Where the Compose column's top edge sat: centred on the tank
-			// and 28dp above the anchor the projection put 4 units over it.
+			// and 28dp above the anchor the projection put just over it.
 			float top = o.screenY - 28.0f * d;
 			const float plateTop = top;
 			float plateWidth = 0.0f;
@@ -10005,9 +10005,14 @@ Java_com_rm_scorchdroid_GameRenderer_nativeOnDrawFrame(JNIEnv *, jobject) {
 			// name hanging over an empty crater.
 			if (!inst.visible) continue;
 
-			// Anchor above the tank, like upstream's own name billboard
-			// (drawNames puts it at height + 8).
-			const float wx = inst.x, wy = inst.y + 4.0f, wz = inst.z;
+			// Anchor just over the tank. Upstream's name billboard sits at
+			// height + 8 (drawNames), but that's a world-sized billboard that
+			// shrinks with distance; the plate is a fixed size on screen, and
+			// a tall world offset put it at the top edge of the screen, or off
+			// it, once the camera came in close. One unit clears the turret,
+			// and the gap above that is in pixels (drawTankPlates), so the
+			// plate stays by its tank at any zoom.
+			const float wx = inst.x, wy = inst.y + 1.0f, wz = inst.z;
 			const float cx = mvp.m[0] * wx + mvp.m[4] * wy + mvp.m[8]  * wz + mvp.m[12];
 			const float cy = mvp.m[1] * wx + mvp.m[5] * wy + mvp.m[9]  * wz + mvp.m[13];
 			const float cw = mvp.m[3] * wx + mvp.m[7] * wy + mvp.m[11] * wz + mvp.m[15];
