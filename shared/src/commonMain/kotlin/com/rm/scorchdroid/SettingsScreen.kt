@@ -1,6 +1,17 @@
 package com.rm.scorchdroid
 
 import androidx.compose.foundation.Image
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -83,10 +94,23 @@ private enum class SettingsTab(val label: String) {
 }
 
 @Composable
-fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit) {
+fun SettingsScreen(
+    settings: GameSettings,
+    dataRoot: String,
+    onBack: () -> Unit,
+    editingKeys: Boolean = false,
+    onEditKeys: (Boolean) -> Unit = {},
+) {
     // Remembered across tab switches only, not across visits: coming back to
     // Settings should start where the screen starts.
     var tab by remember { mutableStateOf(SettingsTab.PLAYER) }
+
+    // The key list is a page of its own, over the settings, so the tab it
+    // was opened from is still showing when it closes.
+    if (editingKeys) {
+        KeysPage(settings.keys, onBack = { onEditKeys(false) })
+        return
+    }
 
     Box(
         modifier = Modifier
@@ -422,6 +446,11 @@ fun SettingsScreen(settings: GameSettings, dataRoot: String, onBack: () -> Unit)
                             "On a keyboard, makes the up arrow lower the barrel",
                             settings.invertUpDownKeys,
                         ) { settings.updateInvertUpDownKeys(it) }
+                        ButtonRow(
+                            "Customize keys",
+                            "Change which key does what, for a keyboard",
+                            "Change",
+                        ) { onEditKeys(true) }
                         SwitchRow(
                             "Left-hand mode",
                             "Mirrors the controls for left-handed play",
@@ -786,5 +815,186 @@ private fun SliderRow(
                 inactiveTrackColor = Color.White.copy(alpha = 0.2f),
             ),
         )
+    }
+}
+
+@Composable
+private fun ButtonRow(title: String, subtitle: String, button: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column(modifier = Modifier.fillMaxWidth(0.72f)) {
+            Text(title, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                subtitle,
+                color = Color.White.copy(alpha = 0.55f),
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        TextButton(onClick = onClick) { Text(button, color = SettingsAccent) }
+    }
+}
+
+/**
+ * Which key does what. Tap an action, then press the key for it. A key that
+ * was doing something else moves over, and the page says what from.
+ */
+@Composable
+private fun KeysPage(keys: KeyBindings, onBack: () -> Unit) {
+    var waitingFor by remember { mutableStateOf<KeyAction?>(null) }
+    var note by remember { mutableStateOf("") }
+    val scroll = rememberScrollState()
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(SettingsTop, SettingsBottom))),
+    ) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 560.dp)
+                .fillMaxSize()
+                .align(Alignment.TopCenter)
+                .padding(horizontal = 24.dp, vertical = 28.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Keys", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                TextButton(onClick = onBack) { Text("Back", color = SettingsAccent) }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Hold Shift to aim slower, Ctrl to aim faster, or both to aim very slowly.",
+                    color = Color.White.copy(alpha = 0.55f),
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.fillMaxWidth(0.72f),
+                )
+                TextButton(onClick = {
+                    keys.resetAll()
+                    note = "Back to the original keys"
+                }) { Text("Reset", color = SettingsAccent) }
+            }
+            if (note.isNotEmpty()) {
+                Text(note, color = SettingsAccent, style = MaterialTheme.typography.bodySmall)
+            }
+            Spacer(Modifier.height(8.dp))
+            Column(modifier = Modifier.fillMaxWidth().verticalScroll(scroll)) {
+                var group = ""
+                for (action in KeyAction.entries) {
+                    if (action.group != group) {
+                        group = action.group
+                        Spacer(Modifier.height(12.dp))
+                        Text(group, color = SettingsAccent, style = MaterialTheme.typography.titleSmall)
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.12f))
+                    }
+                    val bound = keys.keysFor(action)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                note = ""
+                                waitingFor = action
+                            }
+                            .padding(vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(action.title, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            if (bound.isEmpty()) "None" else bound.joinToString(", ") { it.label },
+                            color = if (bound.isEmpty()) Color.White.copy(alpha = 0.4f) else SettingsAccent,
+                            style = MaterialTheme.typography.bodyLarge,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(24.dp))
+            }
+        }
+
+        waitingFor?.let { action ->
+            KeyCapture(
+                action = action,
+                onKey = { binding ->
+                    val takenFrom = keys.assign(action, binding)
+                    note = if (takenFrom.isEmpty()) {
+                        "${action.title}: ${keys.keysFor(action).first().label}"
+                    } else {
+                        "${keys.keysFor(action).first().label} moved here from " +
+                            takenFrom.joinToString(", ") { it.title }
+                    }
+                    waitingFor = null
+                },
+                onClear = {
+                    keys.clear(action)
+                    note = "${action.title} has no key now"
+                    waitingFor = null
+                },
+                onCancel = { waitingFor = null },
+            )
+        }
+    }
+}
+
+/** Waits for the next key, over the key list. */
+@Composable
+private fun KeyCapture(
+    action: KeyAction,
+    onKey: (KeyBinding) -> Unit,
+    onClear: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(action) { runCatching { focus.requestFocus() } }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.6f))
+            .clickable(onClick = onCancel)
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent true
+                if (event.key in KeyNames.modifiers) return@onPreviewKeyEvent true
+                onKey(KeyBinding(event.key, event.isShiftPressed, event.isCtrlPressed, event.isAltPressed))
+                true
+            }
+            .focusRequester(focus)
+            .focusable(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 360.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .background(Color(0xFF2A2838))
+                .clickable(enabled = false) {}
+                .padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("Press a key for", color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.bodyMedium)
+            Text(action.title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (action.held) {
+                    "Shift and Ctrl change how fast it goes, so they can't be part of this one."
+                } else {
+                    "You can hold Shift, Ctrl or Alt with it."
+                },
+                color = Color.White.copy(alpha = 0.55f),
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Spacer(Modifier.height(12.dp))
+            Row {
+                TextButton(onClick = onClear) { Text("No key", color = SettingsAccent) }
+                TextButton(onClick = onCancel) { Text("Cancel", color = SettingsAccent) }
+            }
+        }
     }
 }

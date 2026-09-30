@@ -11,6 +11,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
@@ -2095,7 +2096,7 @@ abstract class GameController(
     // --- Keyboard ----------------------------------------------------------------
     //
     // Scorched3D's own keys (data/keys.xml) for a browser or a phone with a
-    // keyboard. The aiming keys work as TankKeyboardControlUtil does: held,
+    // keyboard, which the player can change (KeyBindings, Settings > Controls). The aiming keys work as TankKeyboardControlUtil does: held,
     // they move the gun 45 degrees and the power 250 (of 1000) a second,
     // four times as fast with Ctrl, a quarter with Shift and a twentieth with
     // both. Everything else is one action per press.
@@ -2122,46 +2123,50 @@ abstract class GameController(
             keysDown.clear()
             return false
         }
+        val keys = settings.keys
         val key = event.key
         if (event.type == KeyEventType.KeyUp) {
-            return keysDown.remove(key) && (key in HELD_KEYS || key in PRESS_KEYS)
+            return keysDown.remove(key)
         }
         if (event.type != KeyEventType.KeyDown) return false
-        if (key in HELD_KEYS) {
+        if (keys.isHeldKey(key)) {
             if (keysDown.add(key)) lastKeyFrameMillis = nowMillis()
             return true
         }
-        if (key !in PRESS_KEYS) return false
+        val action = keys.pressAction(key, event.isShiftPressed, event.isCtrlPressed, event.isAltPressed)
+            ?: return false
         // Held down, a key repeats. These act once per press, as upstream's do.
         if (!keysDown.add(key)) return true
-        onKeyPress(key)
+        onKeyAction(action)
         return true
     }
 
-    private fun onKeyPress(key: Key) {
-        when (key) {
-            Key.Spacebar, Key.F -> fireFromSliders()
-            Key.Tab -> cycleWeapon(if (shiftDown) -1 else 1)
-            Key.U -> revertToLastAim()
-            Key.A -> hoverPoint?.let { (x, y) -> handleBattlefieldTap(x, y) }
-            Key.S -> showScores()
-            Key.D -> keyDefense(AccessoryType.SHIELD)
-            Key.P -> keyDefense(AccessoryType.PARACHUTE)
-            Key.B -> keyDefense(AccessoryType.BATTERY)
-            Key.C -> showCameraPresets()
-            Key.O -> showActionsMenu()
-            Key.Escape -> confirmQuitToMenu()
-            Key.T, Key.Enter, Key.Slash -> openChat("general")
-            Key.Y -> openChat("team")
-            Key.One -> keyCamera(CameraPreset.TOP)
-            Key.Two -> keyCamera(CameraPreset.BEHIND)
-            Key.Three -> keyCamera(CameraPreset.TANK)
-            Key.Four -> keyCamera(CameraPreset.SHOT)
-            Key.Nine -> keyCamera(CameraPreset.ACTION)
-            Key.F1 -> keySpeed(1)
-            Key.F2 -> keySpeed(2)
-            Key.F3 -> keySpeed(3)
-            Key.F4 -> keySpeed(4)
+    private fun onKeyAction(action: KeyAction) {
+        when (action) {
+            KeyAction.FIRE -> fireFromSliders()
+            KeyAction.NEXT_WEAPON -> cycleWeapon(1)
+            KeyAction.PREVIOUS_WEAPON -> cycleWeapon(-1)
+            KeyAction.UNDO -> revertToLastAim()
+            KeyAction.AIM_AT_POINTER -> hoverPoint?.let { (x, y) -> handleBattlefieldTap(x, y) }
+            KeyAction.SCORES -> showScores()
+            KeyAction.SHIELD -> keyDefense(AccessoryType.SHIELD)
+            KeyAction.PARACHUTES -> keyDefense(AccessoryType.PARACHUTE)
+            KeyAction.BATTERY -> keyDefense(AccessoryType.BATTERY)
+            KeyAction.CAMERA_MENU -> showCameraPresets()
+            KeyAction.ACTIONS -> showActionsMenu()
+            KeyAction.LEAVE -> confirmQuitToMenu()
+            KeyAction.CHAT -> openChat("general")
+            KeyAction.TEAM_CHAT -> openChat("team")
+            KeyAction.CAMERA_TOP -> keyCamera(CameraPreset.TOP)
+            KeyAction.CAMERA_BEHIND -> keyCamera(CameraPreset.BEHIND)
+            KeyAction.CAMERA_TANK -> keyCamera(CameraPreset.TANK)
+            KeyAction.CAMERA_SHOT -> keyCamera(CameraPreset.SHOT)
+            KeyAction.CAMERA_ACTION -> keyCamera(CameraPreset.ACTION)
+            KeyAction.SPEED_1 -> keySpeed(1)
+            KeyAction.SPEED_2 -> keySpeed(2)
+            KeyAction.SPEED_3 -> keySpeed(3)
+            KeyAction.SPEED_4 -> keySpeed(4)
+            // Held actions are applyHeldKeys'.
             else -> Unit
         }
     }
@@ -2184,21 +2189,20 @@ abstract class GameController(
             else -> 1f
         } * seconds
 
-        fun held(keys: List<Key>) = keys.any { it in keysDown }
-        fun held(key: Key) = key in keysDown
+        fun held(action: KeyAction) = settings.keys.isHeld(action, keysDown)
         val moving = HashSet<AimAxis>()
         var changed = false
 
         // Left turns the gun anticlockwise, which is the engine's own
         // direction, and the dial runs the other way (engineAngleFromDial).
-        val turn = (if (held(Key.DirectionLeft)) -1 else 0) + (if (held(Key.DirectionRight)) 1 else 0)
+        val turn = (if (held(KeyAction.TURN_LEFT)) -1 else 0) + (if (held(KeyAction.TURN_RIGHT)) 1 else 0)
         if (turn != 0) {
             currentAngleDegrees = ((currentAngleDegrees + turn * TURN_PER_SECOND * rate) % 360f + 360f) % 360f
             hudState.angleDegrees = currentAngleDegrees
             moving += AimAxis.ANGLE
             changed = true
         }
-        var raise = (if (held(Key.DirectionUp)) 1 else 0) - (if (held(Key.DirectionDown)) 1 else 0)
+        var raise = (if (held(KeyAction.RAISE)) 1 else 0) - (if (held(KeyAction.LOWER)) 1 else 0)
         if (settings.invertUpDownKeys) raise = -raise
         if (raise != 0) {
             currentElevationDegrees = (currentElevationDegrees + raise * TURN_PER_SECOND * rate).coerceIn(0f, 90f)
@@ -2206,8 +2210,8 @@ abstract class GameController(
             moving += AimAxis.ELEVATION
             changed = true
         }
-        val power = (if (held(listOf(Key.Equals, Key.Plus, Key.NumPadAdd, Key.PageUp))) 1 else 0) -
-            (if (held(listOf(Key.Minus, Key.NumPadSubtract, Key.PageDown))) 1 else 0)
+        val power = (if (held(KeyAction.POWER_UP)) 1 else 0) -
+            (if (held(KeyAction.POWER_DOWN)) 1 else 0)
         if (power != 0) {
             currentPowerFraction = (currentPowerFraction + power * POWER_PER_SECOND * rate).coerceIn(0f, 1f)
             hudState.powerFraction = currentPowerFraction
@@ -2218,14 +2222,14 @@ abstract class GameController(
         for (axis in moving) if (keyAimAxes.add(axis)) playAimSound(axis, true)
         stopKeyAimSounds(moving)
 
-        // The number pad moves the camera, as upstream's does.
+        // The number pad moves the camera, by default, as upstream's does.
         if (surfaceAttached) {
-            val dx = (if (held(Key.NumPad6)) 1 else 0) - (if (held(Key.NumPad4)) 1 else 0)
-            val dy = (if (held(Key.NumPad2)) 1 else 0) - (if (held(Key.NumPad8)) 1 else 0)
+            val dx = (if (held(KeyAction.CAMERA_RIGHT)) 1 else 0) - (if (held(KeyAction.CAMERA_LEFT)) 1 else 0)
+            val dy = (if (held(KeyAction.CAMERA_DOWN)) 1 else 0) - (if (held(KeyAction.CAMERA_UP)) 1 else 0)
             if (dx != 0 || dy != 0) {
                 GameRenderer.nativeCameraDrag(dx * CAMERA_PIXELS_PER_SECOND * seconds, dy * CAMERA_PIXELS_PER_SECOND * seconds)
             }
-            val zoom = (if (held(Key.NumPad9)) 1 else 0) - (if (held(Key.NumPad3)) 1 else 0)
+            val zoom = (if (held(KeyAction.ZOOM_IN)) 1 else 0) - (if (held(KeyAction.ZOOM_OUT)) 1 else 0)
             if (zoom != 0) GameRenderer.nativeCameraZoom(1f + zoom * seconds)
         }
     }
@@ -2399,6 +2403,9 @@ abstract class GameController(
         appScreen = AppScreen.MENU
     }
 
+    // Whether Settings is showing its key list rather than its tabs.
+    private var editingKeys by mutableStateOf(false)
+
     /** Whether going back means anything on this screen. */
     val backEnabled: Boolean get() = appScreen != AppScreen.MENU
 
@@ -2410,6 +2417,8 @@ abstract class GameController(
     fun onBack() {
         when (appScreen) {
             AppScreen.GAME -> Unit
+            // The key list is a page inside Settings; back leaves it first.
+            AppScreen.SETTINGS -> if (editingKeys) editingKeys = false else appScreen = AppScreen.MENU
             // The only screen two levels down; back should undo one
             // step, not both.
             AppScreen.QUICK_GAME -> appScreen = AppScreen.SINGLE_PLAYER
@@ -2515,6 +2524,8 @@ abstract class GameController(
                 settings = settings,
                 dataRoot = dataRootPath,
                 onBack = { appScreen = AppScreen.MENU },
+                editingKeys = editingKeys,
+                onEditKeys = { editingKeys = it },
             )
             AppScreen.ABOUT -> AboutScreen(
                 versionName = versionName,
@@ -2635,21 +2646,6 @@ abstract class GameController(
         // The number pad's camera, in the same pixels a drag moves it by.
         const val CAMERA_PIXELS_PER_SECOND = 300f
 
-        // Keys that act for as long as they're held.
-        val HELD_KEYS = setOf(
-            Key.DirectionLeft, Key.DirectionRight, Key.DirectionUp, Key.DirectionDown,
-            Key.Equals, Key.Plus, Key.NumPadAdd, Key.PageUp,
-            Key.Minus, Key.NumPadSubtract, Key.PageDown,
-            Key.NumPad4, Key.NumPad6, Key.NumPad8, Key.NumPad2, Key.NumPad9, Key.NumPad3,
-        )
-
-        // Keys that act once per press.
-        val PRESS_KEYS = setOf(
-            Key.Spacebar, Key.F, Key.Tab, Key.U, Key.A, Key.S, Key.D, Key.P, Key.B, Key.C, Key.O,
-            Key.Escape, Key.T, Key.Enter, Key.Slash, Key.Y,
-            Key.One, Key.Two, Key.Three, Key.Four, Key.Nine,
-            Key.F1, Key.F2, Key.F3, Key.F4,
-        )
     }
 }
 

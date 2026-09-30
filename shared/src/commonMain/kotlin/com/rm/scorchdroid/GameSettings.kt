@@ -279,6 +279,9 @@ class GameSettings(private val prefs: KeyValueStore, private val sound: SoundEff
         prefs.putBoolean(KEY_INVERT, value)
     }
 
+    /** Which key does what in a game. */
+    val keys = KeyBindings(prefs)
+
     /**
      * Upstream's InvertUpDownKeys. Its keys file calls Up "increase
      * elevation", so that's what Up does here; this swaps the two.

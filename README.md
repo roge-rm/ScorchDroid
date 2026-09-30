@@ -80,7 +80,8 @@ You can play it in a browser too, at [roge-rm.gitlab.io/play/scorchdroid](https:
 It's the same game with the same menus. Play solo against bots, or join a server where browser
 players and phone players end up in the same game.
 
-It has Scorched3D's keyboard controls too, and so does the app if your phone has a keyboard:
+It has Scorched3D's keyboard controls too, and so does the app if your phone has a keyboard. These are
+the keys it starts with, and you can change any of them in Settings, under Controls:
 
 | Key | What it does |
 |---|---|
