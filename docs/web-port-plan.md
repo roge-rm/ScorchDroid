@@ -91,10 +91,10 @@ the build did it. Neither route is behind the admin login.
   into `apoc.pack`, which the page fetches (`sdPacks` in index.html) before a
   game with it starts, or before joining a server whose `server.json` says it
   runs it. First load 45MB → 37MB gzipped; the pack is 8MB gzipped.
-- **The hosted page.** https://roge-rm.gitlab.io/play/scorchdroid/, published the
+- **The hosted page.** https://hunke.ws/fdroid/play/scorchdroid/, published the
   way Apogee's is: `~/Projects/fdroid/web-builds.json` names the build (with
   `"submodules": true`, which publish.py now honours), so each release's tag
-  gets built and copied to `play/scorchdroid/`, and the Pages job gzips it. An
+  gets built, copied to `play/scorchdroid/` and uploaded, and nginx gzips it. An
   https page can only open `wss://`, so from there Join Game says to use a LAN
   server's own `/play/` page instead.
 
