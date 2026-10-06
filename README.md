@@ -11,8 +11,6 @@ Requires Android 8.0 or higher.
 
 Questions, bug reports, suggestions, looking for people to play with? Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jGC6)**.
 
-Disclaimer: I am not a great programmer and this was made using Claude Opus 5.0/5.5
-
 Enjoy!
 Dan
 
@@ -227,3 +225,5 @@ Check out the #scorchdroid channel **[on my discord](https://discord.gg/9Wun47jG
 ## License
 
 GNU General Public License v2 (or later), same as Scorched3D. See [LICENSE](LICENSE).
+
+Disclaimer: I am not a great programmer and this was made using Claude Opus 5.0/5.5
